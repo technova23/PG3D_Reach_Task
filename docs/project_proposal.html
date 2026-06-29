@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PG3D: Programmatic Geometric Guidance for 3D Diffusion Policies</title>
+  <style>
+    :root {
+      --bg: #fbfbf8;
+      --paper: #ffffff;
+      --ink: #1f2933;
+      --muted: #596575;
+      --line: #d9dee7;
+      --accent: #244f9e;
+      --accent-2: #0f766e;
+      --soft: #f1f5f9;
+      --warn: #fff7ed;
+      --good: #ecfdf5;
+      --code: #0f172a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.55;
+      font-size: 16px;
+    }
+    main {
+      max-width: 1020px;
+      margin: 0 auto;
+      padding: 44px 28px 80px;
+    }
+    article {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 44px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+    }
+    h1, h2, h3, h4 { line-height: 1.2; margin-top: 1.6em; margin-bottom: 0.5em; }
+    h1 { font-size: 2.3rem; margin-top: 0; letter-spacing: -0.03em; }
+    h2 { font-size: 1.45rem; border-top: 1px solid var(--line); padding-top: 1.2em; }
+    h3 { font-size: 1.12rem; color: var(--accent); }
+    p { margin: 0.65em 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .subtitle { font-size: 1.18rem; color: var(--muted); margin-top: -0.35em; }
+    .meta { color: var(--muted); font-size: 0.94rem; margin: 1.25em 0 1.75em; }
+    .thesis {
+      border-left: 5px solid var(--accent);
+      background: var(--soft);
+      padding: 16px 18px;
+      margin: 22px 0;
+      border-radius: 10px;
+      font-size: 1.05rem;
+    }
+    .update {
+      border-left: 5px solid var(--accent-2);
+      background: var(--good);
+      padding: 14px 18px;
+      margin: 18px 0;
+      border-radius: 10px;
+    }
+    .risk {
+      border-left: 5px solid #ea580c;
+      background: var(--warn);
+      padding: 14px 18px;
+      margin: 18px 0;
+      border-radius: 10px;
+    }
+    table { border-collapse: collapse; width: 100%; margin: 18px 0 24px; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 10px 12px; vertical-align: top; }
+    th { background: var(--soft); text-align: left; }
+    ul, ol { padding-left: 1.35em; }
+    li { margin: 0.35em 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    pre {
+      background: var(--code);
+      color: #e5e7eb;
+      padding: 16px;
+      overflow-x: auto;
+      border-radius: 12px;
+      font-size: 0.9rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 12px;
+      margin: 18px 0;
+    }
+    .card {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .card h4 { margin: 0 0 6px; color: var(--accent); }
+    .small { color: var(--muted); font-size: 0.92rem; }
+    .toc {
+      background: var(--soft);
+      border: 1px solid var(--line);
+      padding: 16px 20px;
+      border-radius: 12px;
+      margin: 24px 0;
+    }
+    .toc ol { margin: 0; }
+    .refs li { margin-bottom: 0.55em; }
+    @media print {
+      body { background: #fff; }
+      main { padding: 0; max-width: none; }
+      article { box-shadow: none; border: none; border-radius: 0; }
+      a { color: #000; text-decoration: none; }
+      h2 { page-break-before: auto; }
+    }
+  </style>
+</head>
+<body>
+<main>
+<article>
+  <h1>PG3D: Programmatic Geometric Guidance for 3D Diffusion Policies</h1>
+  <p class="subtitle">A self-contained proposal for constraint-compositional robot manipulation in ManiSkill</p>
+  <p class="meta">Draft date: May 17, 2026 &middot; Scope: simulation-only research MVP, with robot-agnostic software interfaces</p>
+
+  <div class="thesis">
+    <strong>One-sentence thesis:</strong> Executable geometric programs can provide an explicit test-time constraint interface for 3D diffusion policies, and kinematic point-cloud rollouts can make those constraints actionable before execution by imagining how the robot geometry will move through the observed scene.
+  </div>
+
+  <div class="update">
+    <strong>Key update from the earlier draft:</strong> ManiSkill/SAPIEN is now the central simulator. The first MVP is a controlled reach task, followed by manipulation tasks such as pick, stack, and placement. Real-robot implementation is out of scope for the current plan, but the interfaces remain robot-agnostic.
+  </div>
+
+  <h2>0. Core components</h2>
+  <table>
+    <thead><tr><th>Component</th><th>Role in PG3D</th></tr></thead>
+    <tbody>
+      <tr><td>3D diffusion policy</td><td>Learns a prior over action chunks from point-cloud observations and robot state. The initial base policy is DP3-style: compact point-cloud encoding plus diffusion over action sequences.</td></tr>
+      <tr><td>Kinematic point-cloud world model</td><td>Predicts future robot geometry from candidate joint action chunks by using forward kinematics, robot meshes, and point-cloud compositing. This is not initially a learned dynamics model.</td></tr>
+      <tr><td>Executable geometric programs</td><td>Define trajectory-level costs and checks such as avoid-region, no-over-zone, smoothness, kinematic feasibility, and later carried-object overflight and relational placement.</td></tr>
+      <tr><td>Composition operator</td><td>Combines the learned policy prior with programmatic constraints through candidate rejection, candidate reranking, receding-horizon execution, and later energy-guided denoising.</td></tr>
+      <tr><td>ManiSkill evaluation overlay</td><td>Provides controlled reach and manipulation tasks, point-cloud and segmentation observations, GPU simulation/rendering, and custom task variants for systematic constraint-composition experiments.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="toc">
+    <strong>Contents</strong>
+    <ol>
+      <li>Executive summary</li>
+      <li>Motivation and problem setting</li>
+      <li>Why ManiSkill is the primary simulator</li>
+      <li>Related work and research gap</li>
+      <li>Proposed method</li>
+      <li>Task ladder and experiment plan</li>
+      <li>Baselines, ablations, and metrics</li>
+      <li>Implementation milestones</li>
+      <li>Risks and success criteria</li>
+      <li>References</li>
+    </ol>
+  </div>
+
+  <h2>1. Executive summary</h2>
+  <p>
+    This project studies how to compose learned 3D robot policies with explicit geometric constraints at inference time. A nominal 3D diffusion policy can learn useful reaching and manipulation behaviors from demonstrations, but it may not obey deployment-time constraints that were absent from the training data: avoid a newly introduced keep-out region, do not pass over a restricted zone, approach from a specified side, maintain smooth robot motion, or place an object in relation to another object.
+  </p>
+  <p>
+    Pure geometric planners and code-as-policy systems can express these constraints explicitly, but they can discard the learned manipulation prior that makes imitation policies robust in clutter, partial observability, contact-rich execution, and perceptual ambiguity. PG3D combines these strengths: a 3D diffusion policy proposes action chunks; a geometric program scores what should be true; and a kinematic point-cloud world model predicts how candidate actions would move the robot through the current scene before execution.
+  </p>
+  <p>
+    The first proof-of-concept is deliberately simple: train a DP3-style point-cloud diffusion policy on nominal ManiSkill reach demonstrations, then add a new avoid-region constraint only at evaluation time. The policy samples multiple action chunks. For each candidate, PG3D imagines the future robot geometry in point-cloud space, evaluates the handwritten geometric program, reranks candidates, and executes the best chunk in receding-horizon mode.
+  </p>
+  <p>
+    After constrained reach works, the same machinery extends to pick-and-place, stack, and placement tasks. The core research question is whether programmatic geometric constraints can steer learned 3D diffusion policies without retraining, while preserving enough of the learned prior to outperform or complement purely code-only geometry baselines.
+  </p>
+
+  <h2>2. Motivation and problem setting</h2>
+  <h3>2.1 Deployment-time constraints</h3>
+  <p>
+    Consider a robot policy trained from nominal demonstrations. At deployment time, the robot may be asked to satisfy extra constraints that were not explicitly demonstrated. Examples include:
+  </p>
+  <ul>
+    <li>Avoid a keep-out sphere, box, or tabletop region near the nominal path.</li>
+    <li>Do not let the gripper, end effector, or carried object pass over a restricted zone.</li>
+    <li>Approach a target from a specified direction or cone.</li>
+    <li>Place an object left of, behind, between, or inside other objects.</li>
+    <li>Maintain gripper or object orientation during transport.</li>
+    <li>Satisfy robot-specific feasibility constraints such as joint limits, velocity limits, collision, and workspace bounds.</li>
+  </ul>
+
+  <h3>2.2 Mathematical view</h3>
+  <p>
+    Let <code>p_theta(tau | P_t, s_t)</code> denote a 3D diffusion policy over an action chunk <code>tau</code>, conditioned on the current point cloud <code>P_t</code> and robot state <code>s_t</code>. Let <code>C</code> denote an executable geometric constraint program. Earlier formulations score constraints directly on sampled trajectories. PG3D adds an intermediate object: an imagined rollout generated by a kinematic point-cloud world model.
+  </p>
+  <pre><code>candidate action chunk:   tau ~ p_theta(tau | P_t, s_t)
+kinematic world model:    R_tau = G(P_t, robot_mask_t, q_t, tau)
+constraint program:       E_C(R_tau), F_C(R_tau)
+composed selection:       argmin_tau [E_C(R_tau) + E_task(R_tau) + E_prior_proxy(tau)]</code></pre>
+  <p>
+    Here <code>R_tau</code> contains the predicted joint sequence, end-effector path, future robot point clouds, composited scene point clouds, and masks. The constraint program can then evaluate clearance, smoothness, no-over-zone costs, and feasibility proxies before the action is executed.
+  </p>
+
+  <h2>3. Why ManiSkill is the primary simulator</h2>
+  <p>
+    ManiSkill is a SAPIEN-based robotics simulation and training framework with a Gym/Gymnasium interface, support for reinforcement learning and imitation learning workflows, GPU/CPU simulation, and fast parallelized rendering. It is particularly well matched to PG3D because the project is centered on point-cloud observations, segmentation masks, custom task variants, and controlled geometry overlays.
+  </p>
+  <div class="grid">
+    <div class="card"><h4>Point-cloud first</h4><p>ManiSkill supports visual observation modes such as <code>rgb+depth+segmentation</code> and <code>pointcloud</code>, which directly match the input representation needed for 3D diffusion policies and robot-mask compositing.</p></div>
+    <div class="card"><h4>Custom task control</h4><p>The first milestone needs tight control over start and goal distributions. ManiSkill’s task-building API is a better fit for creating <code>PG3DReach-v0</code>, constrained reach variants, and later pick/place overlays.</p></div>
+    <div class="card"><h4>GPU throughput</h4><p>ManiSkill v3 emphasizes GPU-parallelized simulation, rendering, and heterogeneous scene execution, which is useful for data collection and later sample-count ablations.</p></div>
+    <div class="card"><h4>Manipulation ladder</h4><p>The platform already exposes manipulation tasks such as <code>PickCube-v1</code>, <code>StackCube-v1</code>, and <code>PegInsertionSide-v1</code>, giving a natural path from reach to contact-rich manipulation.</p></div>
+    <div class="card"><h4>Visualization and masks</h4><p>ManiSkill includes example tools for point-cloud and segmentation visualization, which aligns with the need to inspect imagined rollouts, selected trajectories, and constraint violations.</p></div>
+    <div class="card"><h4>Related baseline fit</h4><p>Because ManiSkill is SAPIEN-based, it is closer to several modern 3D manipulation codebases and easier to customize for CodeDiffuser-style or obstacle-guidance baselines later.</p></div>
+  </div>
+  <p>
+    The main caveat is that ManiSkill v3 is still a fast-moving stack. This is acceptable for PG3D because the first MVP is narrow, custom, and simulation-only. The implementation should pin versions, keep the environment adapter isolated, and document exact commands in the repository runbooks.
+  </p>
+
+  <h2>4. Related work and research gap</h2>
+  <h3>4.1 3D diffusion and point-cloud robot policies</h3>
+  <p>
+    DP3 shows that sparse point-cloud representations can be paired with diffusion policies to learn visuomotor control across many simulation and real-world tasks. RISE and 3D Diffuser Actor similarly motivate 3D representations for robot imitation. These works provide strong learned priors, but they do not by themselves expose a typed, executable interface for new test-time geometric constraints.
+  </p>
+
+  <h3>4.2 Inference-time policy steering</h3>
+  <p>
+    ITPS, value-guided policy steering, and policy-composition methods study ways to steer generative policies at inference time. PG3D is most closely aligned with this family but makes a specific commitment: the steering signal is an executable geometric program evaluated over imagined 3D robot rollouts.
+  </p>
+
+  <h3>4.3 Code-as-policy and geometric-constraint systems</h3>
+  <p>
+    ReKep, GeoManip, and code-as-policy systems demonstrate that executable geometric constraints can express rich manipulation structure. PG3D differs by using code as a constraint interface over a learned diffusion-policy distribution, not as the entire controller.
+  </p>
+
+  <h3>4.4 Neural motion planning and reactive policies</h3>
+  <p>
+    NeuralMP and Deep Reactive Policy show that point-cloud conditioned motion policies, procedural obstacle scenes, and motion-planning supervision are productive for collision-aware reaching and motion generation. PG3D borrows the emphasis on point clouds, joint-space motion, and robot geometry, but studies a different composition question: how to steer a diffusion policy with newly supplied executable constraints at test time.
+  </p>
+
+  <h3>4.5 Diffusion guidance and executable attention</h3>
+  <p>
+    Lan-o3DP, GravMAD, AffordDP, and CodeDiffuser use obstacle costs, grounded spatial maps, affordance guidance, or VLM-generated code/attention to guide action generation. PG3D focuses on trajectory-level executable programs and the ability to evaluate constraints through imagined robot-geometry rollouts.
+  </p>
+
+  <table>
+    <thead><tr><th>Related direction</th><th>Representative works</th><th>Gap addressed by PG3D</th></tr></thead>
+    <tbody>
+      <tr><td>3D diffusion policies</td><td>DP3, RISE, 3D Diffuser Actor</td><td>Strong 3D policy priors, but no general executable constraint interface.</td></tr>
+      <tr><td>Inference-time steering</td><td>ITPS, value-guided and distribution-composition methods</td><td>Steering exists, but not centered on typed geometric programs over imagined robot point clouds.</td></tr>
+      <tr><td>Code/geometric solvers</td><td>ReKep, GeoManip, code-as-policy systems</td><td>Expressive constraints, but often use code/optimization as the controller rather than as guidance over a learned prior.</td></tr>
+      <tr><td>Neural motion planning</td><td>NeuralMP, Deep Reactive Policy</td><td>Relevant for reach and collision-aware motion, but not primarily about diffusion-policy constraint composition.</td></tr>
+      <tr><td>3D diffusion guidance</td><td>Lan-o3DP, GravMAD, AffordDP, CodeDiffuser</td><td>Guidance via maps, attention, affordance, or obstacle cost; less emphasis on composable trajectory programs and hard checks.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. Proposed method</h2>
+  <h3>5.1 System overview</h3>
+  <pre><code>ManiSkill observation
+  -> point cloud + robot state + robot/object masks
+  -> DP3-style diffusion policy samples K action chunks
+  -> kinematic point-cloud world model imagines each candidate
+  -> executable geometric programs score imagined rollouts
+  -> rejection / reranking / receding-horizon execution
+  -> later: energy-guided denoising + final reranking</code></pre>
+
+  <h3>5.2 Observation and action representation</h3>
+  <p>
+    The policy should operate on point clouds and robot state. Simulator ground truth may be used for evaluation, constraint-instance generation, visualization, and debugging, but should not be required as policy input. The initial action representation should be joint-space action chunks, with end-effector trajectories recovered through forward kinematics.
+  </p>
+  <table>
+    <thead><tr><th>Design choice</th><th>Preferred P0 option</th><th>Rationale</th></tr></thead>
+    <tbody>
+      <tr><td>Observation</td><td>ManiSkill point cloud + robot proprioception; optional segmentation masks</td><td>Matches 3D diffusion policies and enables robot-mask point-cloud compositing.</td></tr>
+      <tr><td>Action chunks</td><td>Absolute joint target chunks, with delta joint chunks as fallback</td><td>Forward kinematics becomes direct; no IK is required to imagine robot geometry.</td></tr>
+      <tr><td>Policy</td><td>DP3-style sparse point-cloud diffusion policy</td><td>Best match for the 3D point-cloud diffusion-policy thesis.</td></tr>
+      <tr><td>Control loop</td><td>Receding-horizon action chunks, about one second per chunk initially</td><td>Allows re-observation, repeated sampling, and multi-step imagination.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>5.3 Kinematic point-cloud world model</h3>
+  <p>
+    The world model is the central new component. It should initially be deterministic and geometry-based rather than learned. Given the current point cloud, robot mask, robot joint state, and a candidate action chunk, it predicts how the robot geometry would appear in future point-cloud observations.
+  </p>
+  <pre><code>Inputs:
+  P_t                  current point cloud
+  M_robot_t            robot mask in current point cloud
+  q_t                  current joint state
+  tau                  candidate joint action chunk
+  robot_model          URDF / link meshes / FK model
+
+Outputs:
+  q_{t:t+H}            predicted joint sequence
+  ee_{t:t+H}           end-effector path
+  robot_cloud_{t:t+H}  sampled future robot geometry
+  P_hat_{t:t+H}        composited future scene point clouds
+  masks_hat            future robot masks and optional proxy masks</code></pre>
+  <p>
+    The P0 compositor is simple: remove current robot points from the observed point cloud, sample the robot mesh at future joint states, and insert future robot points into the static scene. In reach, this is sufficient because no object dynamics are needed. In pick-and-place, the world model later adds a gripper proxy and then a carried-object proxy or attached object point cloud.
+  </p>
+
+  <h3>5.4 Constraint-program representation</h3>
+  <p>
+    The first interface should be Python-first, with JSON-serializable configuration for replayable experiments. A full DSL is unnecessary for the MVP.
+  </p>
+  <pre><code>class Constraint:
+    def cost(self, rollout: ImaginedRollout, scene: SceneContext) -> dict[str, float]:
+        ...
+
+    def satisfied(self, rollout: ImaginedRollout, scene: SceneContext) -> bool:
+        ...</code></pre>
+  <table>
+    <thead><tr><th>Primitive</th><th>P0/P1</th><th>Definition</th></tr></thead>
+    <tbody>
+      <tr><td><code>avoid_region</code></td><td>P0</td><td>Penalize the EEF, gripper proxy, robot-link points, or carried-object proxy for entering a sphere, box, cylinder, or other simple keep-out primitive.</td></tr>
+      <tr><td><code>avoid_projection</code></td><td>P0.5</td><td>Reach analog of no-overflight: penalize the XY projection of the EEF or gripper for passing over a restricted tabletop region.</td></tr>
+      <tr><td><code>smoothness</code></td><td>P0</td><td>Penalize jagged joint or end-effector trajectories.</td></tr>
+      <tr><td><code>avoid_overflight</code></td><td>P1</td><td>Manipulation version of no-over-zone: penalize a carried-object proxy for passing over a restricted object or region.</td></tr>
+      <tr><td><code>place_relative</code></td><td>P2</td><td>Evaluate final object relation, such as left-of, behind, between, or inside.</td></tr>
+      <tr><td><code>approach_from</code></td><td>P2</td><td>Evaluate the final pre-grasp approach segment against an approach cone or direction.</td></tr>
+    </tbody>
+  </table>
+  <p>
+    P0 should avoid heavy hard constraints. The only hard-style checks should be simple kinematic feasibility: joint limits, action bounds, and optionally velocity limits. Collision, IK, and whole-arm feasibility checks are important but should be added after the basic steering/reranking loop works.
+  </p>
+
+  <h3>5.5 Composition operators</h3>
+  <p>
+    The MVP should implement candidate reranking before energy guidance. Reranking works with arbitrary Python checks, visualization, and non-differentiable logic.
+  </p>
+  <pre><code>candidates = policy.sample_action_chunks(obs, K)
+for tau in candidates:
+    rollout = world_model.imagine(obs, tau)
+    costs = constraint_program.cost(rollout, scene)
+    score = - weighted_sum(costs) - task_cost(rollout) + prior_proxy(tau)
+execute(best_tau)</code></pre>
+  <p>
+    The initial prior proxy can be lightweight: smoothness, action magnitude, and deviation from the sample consensus. A DP3 denoising-score proxy or diffusion likelihood surrogate can be added later, but should not block the first MVP.
+  </p>
+
+  <h2>6. Task ladder and experiment plan</h2>
+  <h3>6.1 Task ladder</h3>
+  <table>
+    <thead><tr><th>Stage</th><th>Environment</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>Stage A</td><td><code>PG3DReach-Narrow-v0</code></td><td>Debug observation adapters, action chunks, DP3 training, and deterministic start/goal distributions.</td></tr>
+      <tr><td>Stage B</td><td><code>PG3DReach-Medium-v0</code></td><td>First real constrained-reach evaluation with unseen keep-out regions.</td></tr>
+      <tr><td>Stage C</td><td><code>PG3DReach-ConstrainedEval-v0</code></td><td>Evaluate avoid-region and no-over-zone constraints without constrained training demos.</td></tr>
+      <tr><td>Stage D</td><td><code>PickCube-v1</code> or narrow custom pick task</td><td>Move from motion-only reach to object manipulation.</td></tr>
+      <tr><td>Stage E</td><td><code>StackCube-v1</code>, placement, or insertion task</td><td>Test carried-object constraints, relational placement, and more contact-sensitive behavior.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>6.2 Experiment 1: nominal reach sanity check</h3>
+  <p>
+    Train a DP3-style policy on nominal ManiSkill reach demonstrations. Evaluate reach success, final target distance, smoothness, and action-chunk stability. This experiment establishes whether the base policy is good enough to steer.
+  </p>
+
+  <h3>6.3 Experiment 2: constrained reach with avoid-region</h3>
+  <p>
+    Train only on nominal reach. At evaluation time, place a simple keep-out sphere or box near the nominal path. Compare base policy, rejection/filtering, world-model reranking, code-only waypoint planning, and a simple ITPS-style sample-and-rank baseline. The main outcome is combined reach-and-constraint success.
+  </p>
+
+  <h3>6.4 Experiment 3: no-over-zone reach analog</h3>
+  <p>
+    Evaluate a tabletop projection constraint where the EEF or gripper proxy should not pass over a restricted 2D region. This validates the geometric form of no-overflight before introducing grasped objects.
+  </p>
+
+  <h3>6.5 Experiment 4: pick-and-place transfer</h3>
+  <p>
+    Move to a narrow pick task or <code>PickCube-v1</code>. Add a gripper proxy and later an object proxy to the world model. Evaluate whether the same reranking machinery improves constraint satisfaction without destroying task success.
+  </p>
+
+  <h3>6.6 Experiment 5: carried-object overflight and placement</h3>
+  <p>
+    After pick-and-place works, implement a carried-object proxy and evaluate no-overflight constraints. Later add relative placement and approach-direction constraints to test multi-constraint composition.
+  </p>
+
+  <h2>7. Baselines, ablations, and metrics</h2>
+  <h3>7.1 Baselines</h3>
+  <table>
+    <thead><tr><th>Priority</th><th>Baseline</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>P0</td><td>Base DP3-style policy</td><td>Tests whether the learned policy already satisfies new constraints implicitly.</td></tr>
+      <tr><td>P0</td><td>Base policy + rejection/filtering</td><td>Tests whether simple sample-until-feasible selection is enough.</td></tr>
+      <tr><td>P0</td><td>World-model reranking</td><td>Main proposed method for the reach MVP.</td></tr>
+      <tr><td>P0</td><td>Code-only waypoint planner</td><td>Tests whether executable geometry alone solves the constrained reach task.</td></tr>
+      <tr><td>P0/P1</td><td>ITPS-style sample-and-rank baseline</td><td>Conceptual inference-time steering baseline implemented inside PG3D.</td></tr>
+      <tr><td>P1</td><td>Obstacle-cost / spatial-map guidance baseline</td><td>Closest single-purpose spatial guidance comparison.</td></tr>
+      <tr><td>P2</td><td>CodeDiffuser-style attention baseline</td><td>Tests whether code-generated 3D attention maps are sufficient compared with trajectory-level constraint programs.</td></tr>
+      <tr><td>P2</td><td>RISE adapter or alternate 3D policy</td><td>Tests whether the composition interface transfers beyond DP3-style policies.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.2 Ablations</h3>
+  <table>
+    <thead><tr><th>Priority</th><th>Ablation</th><th>Question answered</th></tr></thead>
+    <tbody>
+      <tr><td>P0</td><td>Reranking vs rejection/filtering</td><td>Is scoring/selecting the best imagined rollout better than just finding any acceptable one?</td></tr>
+      <tr><td>P0</td><td>Sample count K = 16, 32, 64</td><td>How much sampling is needed for feasible constrained actions?</td></tr>
+      <tr><td>P0</td><td>Remove prior proxy</td><td>Are we doing learned-policy composition or merely geometric planning?</td></tr>
+      <tr><td>P0</td><td>EEF-only vs gripper-proxy vs robot-link scoring</td><td>How much robot geometry is needed to predict useful constraint satisfaction?</td></tr>
+      <tr><td>P1</td><td>One-step vs multi-chunk imagination</td><td>Does re-querying the policy on imagined point clouds improve long-horizon constraint satisfaction?</td></tr>
+      <tr><td>P1</td><td>Robot-only vs robot+object-proxy world model</td><td>Is carried-object imagination necessary for overflight and placement constraints?</td></tr>
+      <tr><td>P2</td><td>Reranking vs energy guidance vs hybrid</td><td>When is active diffusion guidance necessary?</td></tr>
+      <tr><td>P2</td><td>Researcher-written vs LLM-generated programs</td><td>Can off-the-shelf or local models reliably instantiate the same constraint primitives?</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.3 Metrics</h3>
+  <table>
+    <thead><tr><th>Metric family</th><th>Metrics</th></tr></thead>
+    <tbody>
+      <tr><td>Task performance</td><td>Reach success, final target distance, pick/place success, episode length.</td></tr>
+      <tr><td>Constraint satisfaction</td><td>Constraint satisfaction rate, combined task-and-constraint success, violation count.</td></tr>
+      <tr><td>Geometric quality</td><td>Minimum clearance, over-zone time, path length, smoothness, final relation error.</td></tr>
+      <tr><td>World-model quality</td><td>Predicted vs simulator EEF path error, qualitative point-cloud overlay quality, constraint-prediction agreement.</td></tr>
+      <tr><td>Sampling behavior</td><td>Candidate feasibility fraction, selected candidate cost, number of resampling rounds, K sensitivity.</td></tr>
+      <tr><td>Compute</td><td>Scoring time, world-model rollout time, total action-selection latency. This is a reported metric, not a hard constraint for the MVP.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>8. Implementation milestones</h2>
+  <table>
+    <thead><tr><th>Milestone</th><th>Target</th><th>Deliverables</th></tr></thead>
+    <tbody>
+      <tr><td>M0</td><td>Repo and simulator scaffold</td><td><code>pg3d</code> package, ManiSkill install smoke test, GPU/PyTorch check, W&amp;B setup, minimal docs/runbooks.</td></tr>
+      <tr><td>M1</td><td>Custom reach environment and data adapter</td><td><code>PG3DReach-v0</code>, controlled reset distributions, point-cloud and segmentation extraction, joint-action chunk writer.</td></tr>
+      <tr><td>M2</td><td>Nominal DP3 reach policy</td><td>DP3 fork/submodule integration, training config, nominal reach evaluation, qualitative videos.</td></tr>
+      <tr><td>M3</td><td>World model v0</td><td>FK over joint chunks, robot mesh point sampling, robot-mask deletion, point-cloud compositing, EEF path extraction.</td></tr>
+      <tr><td>M4</td><td>Constraint programs v0</td><td>Python constraint API, JSON serialization, <code>avoid_region</code>, <code>avoid_projection</code>, smoothness, visual overlays.</td></tr>
+      <tr><td>M5</td><td>Reranking controller</td><td>Candidate sampling, rejection, reranking, K = 16/32/64 resampling policy, per-candidate diagnostics.</td></tr>
+      <tr><td>M6</td><td>First constrained-reach MVP</td><td>Base vs rejection vs reranking vs code-only vs ITPS-style baseline; fixed seeds; confidence intervals; videos.</td></tr>
+      <tr><td>M7</td><td>Pick-and-place transfer</td><td><code>PickCube-v1</code> or narrow custom pick task, nominal policy, gripper proxy, first manipulation constraints.</td></tr>
+      <tr><td>M8</td><td>Carried-object world model</td><td>Grasp-state heuristic, object proxy attachment, no-overflight scoring.</td></tr>
+      <tr><td>M9</td><td>Energy guidance and stronger baselines</td><td>Differentiable costs, guidance schedules, hybrid guidance+rereanking, CodeDiffuser-style or spatial-map baseline.</td></tr>
+      <tr><td>M10</td><td>LLM-generated constraints</td><td>Local/open-weight LLM frontend that instantiates known primitives; static validation; synthetic scene checks.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>9. Risks and success criteria</h2>
+  <h3>9.1 Technical risks</h3>
+  <table>
+    <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr><td>ManiSkill version churn complicates setup.</td><td>Pin versions, isolate the adapter, keep exact uv commands and runbooks up to date, and avoid unnecessary simulator patches.</td></tr>
+      <tr><td>Custom reach is too easy and code-only planning dominates.</td><td>Use reach only as a mechanism-validation task. Move quickly to pick and place once the machinery works.</td></tr>
+      <tr><td>DP3 adaptation takes longer than expected.</td><td>Keep a minimal dataset/action adapter first; debug with small reach data; avoid adding language, multitask, or real-robot scope.</td></tr>
+      <tr><td>Reranking cannot find feasible samples.</td><td>Increase K from 16 to 32 to 64; improve sample diversity; add energy guidance later if feasible samples are too rare.</td></tr>
+      <tr><td>World model is inaccurate for manipulation.</td><td>Start with robot-only reach; then add gripper proxy; then carried-object primitive; only later attach object point clouds.</td></tr>
+      <tr><td>Lack of novelty over simple steering baselines.</td><td>Make the world-model ablation central: current-chunk-only vs robot-point-cloud rollout vs multi-chunk imagined rollout vs object-proxy rollout.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>9.2 First MVP success criteria</h3>
+  <ol>
+    <li>The nominal DP3-style policy solves controlled ManiSkill reach at a usable rate.</li>
+    <li>The base policy sometimes violates an unseen evaluation-time avoid-region constraint.</li>
+    <li>The kinematic point-cloud world model predicts candidate EEF/robot paths well enough to identify likely violations before execution.</li>
+    <li>World-model reranking improves combined reach-and-constraint success over the base policy and simple rejection/filtering.</li>
+    <li>Visualizations clearly show point clouds, candidate trajectories, keep-out regions, selected candidates, and failure modes.</li>
+  </ol>
+
+  <h3>9.3 Paper-scale success criteria</h3>
+  <ol>
+    <li>The method transfers from reach to pick-and-place and at least one placement-style manipulation task.</li>
+    <li>The method improves combined task-and-constraint success under constraints not present in training demonstrations.</li>
+    <li>The learned-policy prior still matters: code-only waypoint planning is strong on reach but brittle or incomplete on manipulation tasks.</li>
+    <li>The world-model contribution is empirically supported through ablations.</li>
+    <li>LLM-generated programs can instantiate the validated constraint primitives, but the main result does not depend on LLM reliability.</li>
+  </ol>
+
+  <h2>10. References</h2>
+  <ol class="refs">
+    <li>DP3: 3D Diffusion Policy / Generalizable Visuomotor Policy Learning via Simple 3D Representations. <a href="https://3d-diffusion-policy.github.io/">https://3d-diffusion-policy.github.io/</a></li>
+    <li>ManiSkill 3 documentation and GitHub repository. <a href="https://maniskill.readthedocs.io/en/latest/">https://maniskill.readthedocs.io/en/latest/</a> and <a href="https://github.com/haosulab/ManiSkill">https://github.com/haosulab/ManiSkill</a></li>
+    <li>ManiSkill observation modes. <a href="https://maniskill.readthedocs.io/en/latest/user_guide/concepts/observation.html">https://maniskill.readthedocs.io/en/latest/user_guide/concepts/observation.html</a></li>
+    <li>ManiSkill custom task building. <a href="https://github.com/haosulab/ManiSkill/blob/main/docs/source/user_guide/tutorials/custom_tasks/intro.md">https://github.com/haosulab/ManiSkill/blob/main/docs/source/user_guide/tutorials/custom_tasks/intro.md</a></li>
+    <li>ManiSkill demo scripts, motion-planning demos, and point-cloud/segmentation visualization. <a href="https://maniskill.readthedocs.io/en/latest/user_guide/demos/scripts.html">https://maniskill.readthedocs.io/en/latest/user_guide/demos/scripts.html</a></li>
+    <li>ITPS: Inference-Time Policy Steering through Human Interactions. <a href="https://yanweiw.github.io/itps/">https://yanweiw.github.io/itps/</a></li>
+    <li>CodeDiffuser: Attention-Enhanced Diffusion Policy via VLM-Generated Code for Instruction Ambiguity. <a href="https://robopil.github.io/code-diffuser/">https://robopil.github.io/code-diffuser/</a></li>
+    <li>RISE: 3D Perception Makes Real-World Robot Imitation Simple and Effective. <a href="https://rise-policy.github.io/">https://rise-policy.github.io/</a></li>
+    <li>Neural MP: A Generalist Neural Motion Planner. <a href="https://mihdalal.github.io/neuralmotionplanner/">https://mihdalal.github.io/neuralmotionplanner/</a></li>
+    <li>Deep Reactive Policy: Learning Reactive Manipulator Motion Planning for Dynamic Environments. <a href="https://deep-reactive-policy.com/">https://deep-reactive-policy.com/</a></li>
+    <li>Lan-o3DP: Language-Guided Object-Centric Diffusion Policy for Collision-Aware Robotic Manipulation. <a href="https://arxiv.org/abs/2407.00451">https://arxiv.org/abs/2407.00451</a></li>
+    <li>GravMAD: Grounded Spatial Value Maps Guided Action Diffusion for Generalized 3D Manipulation. <a href="https://arxiv.org/abs/2409.20154">https://arxiv.org/abs/2409.20154</a></li>
+    <li>ReKep: Spatio-Temporal Reasoning of Relational Keypoint Constraints for Robotic Manipulation. <a href="https://arxiv.org/abs/2409.01652">https://arxiv.org/abs/2409.01652</a></li>
+    <li>GeoManip: Geometric Constraints as General Interfaces for Robot Manipulation. <a href="https://arxiv.org/abs/2501.09783">https://arxiv.org/abs/2501.09783</a></li>
+  </ol>
+</article>
+</main>
+</body>
+</html>

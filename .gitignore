@@ -1,0 +1,47 @@
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+.coverage
+htmlcov/
+.codex/
+.agents/
+.env
+.env.*
+.envrc
+.DS_Store
+.vscode/
+.idea/
+outputs/
+multirun/
+wandb/
+runs/
+artifacts/
+data/
+datasets/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.zarr/
+
+# Large duplicate / scratch directories (root-level only)
+/Trajectory_Multimodality/
+/scratch2/
+/dp3/
+/nitin/
+/step_00100000/
+
+# Run artifacts and media
+*.mp4
+*.rrd
+*.log
+*.logexit
+*.summary.json
+*.npz
+
+# Loose scratch files
+/a.txt
+/curved_traj.png

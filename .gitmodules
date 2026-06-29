@@ -1,0 +1,4 @@
+[submodule "external/dp3"]
+	path = external/dp3
+	url = git@github.com:krrish94/dp3-for-pg3d.git
+	branch = main

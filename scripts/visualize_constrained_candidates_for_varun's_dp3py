@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import argparse
+import importlib
+import importlib.util
+import sys
+import functools
+if not hasattr(functools, "cache"):
+    functools.cache = functools.lru_cache(maxsize=None)
+from pathlib import Path
+from typing import Any
+
+import torch
+
+
+def main(argv: list[str] | None = None) -> int:
+    args, passthrough = parse_wrapper_args(argv)
+    _install_external_dp3_loader(
+        external_repo=args.external_dp3_repo,
+        checkpoint_model=args.checkpoint_model,
+        num_inference_steps=args.external_num_inference_steps,
+        num_action_samples=args.external_num_action_samples,
+    )
+    visualizer = _import_existing_visualizer()
+    return int(visualizer.main(passthrough))
+
+
+def parse_wrapper_args(argv: list[str] | None) -> tuple[argparse.Namespace, list[str]]:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the constrained-candidate Rerun visualizer with checkpoints produced by "
+            "the external 3D-Diffusion-Policy TrainDP3Workspace."
+        ),
+        add_help=False,
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--external-dp3-repo",
+        type=Path,
+        default=Path("~/gnrs/3D-Diffusion-Policy/3D-Diffusion-Policy").expanduser(),
+        help="path containing the external diffusion_policy_3d package and train.py",
+    )
+    parser.add_argument(
+        "--candidate-source",
+        choices=["policy"],
+        default="policy",
+        help="accepted for compatibility; external DP3 checkpoints are visualized from policy rollouts",
+    )
+    parser.add_argument("--checkpoint-model", choices=["ema", "raw"], default="ema")
+    parser.add_argument(
+        "--external-num-inference-steps",
+        type=int,
+        default=None,
+        help="override policy.num_inference_steps after loading the checkpoint",
+    )
+    parser.add_argument(
+        "--external-num-action-samples",
+        type=int,
+        default=None,
+        help="override policy.num_action_samples after loading the checkpoint",
+    )
+    args, passthrough = parser.parse_known_args(argv)
+    if args.external_num_inference_steps is not None and args.external_num_inference_steps <= 0:
+        raise ValueError("--external-num-inference-steps must be positive")
+    if args.external_num_action_samples is not None and args.external_num_action_samples <= 0:
+        raise ValueError("--external-num-action-samples must be positive")
+
+    # The delegated visualizer also has --checkpoint-model. Preserve the user's value
+    # there so its summaries still describe which model branch was requested.
+    if "--checkpoint-model" not in passthrough:
+        passthrough = ["--checkpoint-model", args.checkpoint_model, *passthrough]
+    return args, passthrough
+
+
+def _import_existing_visualizer() -> Any:
+    try:
+        return importlib.import_module("scripts.visualize_constrained_candidates_rerun")
+    except ModuleNotFoundError:
+        script_path = Path(__file__).with_name("visualize_constrained_candidates_rerun.py")
+        spec = importlib.util.spec_from_file_location(
+            "visualize_constrained_candidates_rerun",
+            script_path,
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"could not import existing visualizer from {script_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+
+def _install_external_dp3_loader(
+    *,
+    external_repo: Path,
+    checkpoint_model: str,
+    num_inference_steps: int | None,
+    num_action_samples: int | None,
+) -> None:
+    repo = external_repo.expanduser().resolve()
+    if not repo.exists():
+        raise FileNotFoundError(f"external DP3 repo does not exist: {repo}")
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+
+    import dill  # noqa: F401
+    from omegaconf import OmegaConf
+
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+    checkpoint_module = importlib.import_module("pg3d.policies.dp3.checkpoint")
+
+    def load_external_dp3_policy_from_checkpoint(
+        path: Path,
+        *,
+        device: torch.device,
+        prefer_ema: bool = True,
+    ) -> Any:
+        del prefer_ema
+        return _load_external_dp3_policy(
+            path=path,
+            device=device,
+            repo=repo,
+            checkpoint_model=checkpoint_model,
+            num_inference_steps=num_inference_steps,
+            num_action_samples=num_action_samples,
+        )
+
+    checkpoint_module.load_reach_policy_from_checkpoint = load_external_dp3_policy_from_checkpoint
+
+
+def _load_external_dp3_policy(
+    *,
+    path: Path,
+    device: torch.device,
+    repo: Path,
+    checkpoint_model: str,
+    num_inference_steps: int | None,
+    num_action_samples: int | None,
+) -> Any:
+    import dill
+    from train import TrainDP3Workspace
+
+    checkpoint_path = path.expanduser()
+    payload = torch.load(checkpoint_path.open("rb"), pickle_module=dill, map_location="cpu")
+    workspace = TrainDP3Workspace(payload["cfg"])
+    workspace.load_payload(payload, exclude_keys=())
+    policy = workspace.ema_model if checkpoint_model == "ema" and workspace.ema_model is not None else workspace.model
+    if policy is None:
+        raise RuntimeError(f"checkpoint {checkpoint_path} did not contain a usable policy")
+    if num_inference_steps is not None:
+        policy.num_inference_steps = int(num_inference_steps)
+    if num_action_samples is not None:
+        policy.num_action_samples = int(num_action_samples)
+
+    # The shared KM visualizer reads these attributes when adding optional saliency
+    # markers. External DP3 checkpoints do not define them, so default to no markers.
+    if not hasattr(policy, "goal_marker_points"):
+        policy.goal_marker_points = 0
+    if not hasattr(policy, "goal_marker_radius"):
+        policy.goal_marker_radius = 0.045
+
+    policy.to(device)
+    policy.eval()
+    print(
+        "loaded external DP3 checkpoint: "
+        f"path={checkpoint_path} repo={repo} model={checkpoint_model} "
+        f"num_inference_steps={getattr(policy, 'num_inference_steps', None)} "
+        f"num_action_samples={getattr(policy, 'num_action_samples', None)}",
+        flush=True,
+    )
+    return policy
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
