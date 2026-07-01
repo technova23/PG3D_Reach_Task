@@ -98,8 +98,12 @@ class ReachEpisodeData:
         for name, array in arrays.items():
             if array.shape[0] != length:
                 raise ValueError(f"{name} length {array.shape[0]} != state length {length}")
-        if self.state.shape[1] != 9:
-            raise ValueError(f"state must have shape [T, 9], got {self.state.shape}")
+        # State is the robot qpos; its width is robot-dependent (Panda: 9 = 7 arm + 2
+        # gripper, xArm7 no-gripper: 7). Require at least the 7 arm joints rather than
+        # a fixed 9 so non-Panda arms are accepted; the DP3 loader reads state_dim from
+        # the zarr, so any consistent width works downstream.
+        if self.state.ndim != 2 or self.state.shape[1] < 7:
+            raise ValueError(f"state must be [T, D] with D >= 7, got {self.state.shape}")
         if self.action.shape[1] != 7:
             raise ValueError(f"action must have shape [T, 7], got {self.action.shape}")
         if self.point_cloud.shape[2] != 3:

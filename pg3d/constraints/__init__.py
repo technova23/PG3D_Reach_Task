@@ -1,6 +1,13 @@
 from pg3d.constraints.core import Constraint, SceneContext
-from pg3d.constraints.geometry import BoxRegion, Region, SphereRegion, region_from_json
+from pg3d.constraints.geometry import (
+    BoxRegion,
+    RectRegion2D,
+    Region,
+    SphereRegion,
+    region_from_json,
+)
 from pg3d.constraints.programs import (
+    AvoidProjection,
     AvoidRegion,
     SmoothnessCost,
     constraint_from_json,
@@ -10,9 +17,11 @@ from pg3d.constraints.programs import (
 )
 
 __all__ = [
+    "AvoidProjection",
     "AvoidRegion",
     "BoxRegion",
     "Constraint",
+    "RectRegion2D",
     "Region",
     "SceneContext",
     "SmoothnessCost",

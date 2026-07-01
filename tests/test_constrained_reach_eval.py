@@ -43,7 +43,10 @@ from scripts.eval_constrained_reach import (
     _build_multichunk_candidates,
     _constraint_source_summary,
     _constraints_for_episode,
+    _effective_projection_half_extents,
+    _local_path_points_xy,
     _obs_windows_to_torch,
+    _point_at_arc_fraction_xy,
     _read_episode_indices_file,
     _seed_torch,
 )
@@ -51,6 +54,70 @@ from scripts.eval_constrained_reach import (
     parse_args as parse_eval_args,
 )
 from scripts.rollout_dp3_reach_policy import RolloutSpec
+
+
+def test_point_at_arc_fraction_xy_ignores_vertical_lift() -> None:
+    # Straight in XY (start x=0 -> goal x=0.3) but with a large vertical arch. The
+    # placement must follow XY arc length, so the 0.5 point sits at the XY midpoint
+    # regardless of how much arc length the lift consumes.
+    t = np.linspace(0.0, 1.0, 41, dtype=np.float32)[:, None]
+    path = np.concatenate([t * 0.3, np.zeros_like(t), 0.2 + 0.4 * np.sin(np.pi * t)], axis=1)
+
+    point = _point_at_arc_fraction_xy(path.astype(np.float32), fraction=0.5)
+
+    np.testing.assert_allclose(point[:2], np.asarray([0.15, 0.0], dtype=np.float32), atol=1e-3)
+
+
+def test_local_path_points_xy_restricts_to_window() -> None:
+    path = np.stack(
+        [np.linspace(0.0, 1.0, 11), np.zeros(11), np.full(11, 0.2)], axis=1
+    ).astype(np.float32)
+
+    local = _local_path_points_xy(path, fraction=0.5, window=0.15)
+
+    # Only points within +/-0.15 arc fraction of the midpoint survive (x in [0.35, 0.65]).
+    assert local.shape[1] == 2
+    assert float(local[:, 0].min()) >= 0.35 - 1e-6
+    assert float(local[:, 0].max()) <= 0.65 + 1e-6
+
+
+def test_projection_half_extents_local_not_corridor_spanning() -> None:
+    # A long, nearly straight reach. Whole-path spread along the travel axis would be
+    # huge; the local window must keep the travel-axis half-extent near the floor so
+    # the rectangle does not become a corridor-spanning bar.
+    t = np.linspace(0.0, 1.0, 51, dtype=np.float32)[:, None]
+    paths = [
+        np.concatenate([t * 0.4, 0.01 * np.sin(np.pi * t) * sign, np.full_like(t, 0.2)], axis=1)
+        for sign in (-1.0, 0.0, 1.0)
+    ]
+    center_xy = _point_at_arc_fraction_xy(paths[1], fraction=0.5)[:2]
+
+    half = _effective_projection_half_extents(
+        center_xy=center_xy,
+        paths=[p.astype(np.float32) for p in paths],
+        fraction=0.5,
+        min_half_extents=np.asarray([0.025, 0.025], dtype=np.float32),
+    )
+
+    # Travel-axis (x) extent stays small -- far below the ~0.075 a whole-path
+    # 37.5th-percentile would give on a 0.4 m reach.
+    assert float(half[0]) <= 0.04
+    assert float(half[1]) >= 0.025 - 1e-6
+
+
+def test_projection_half_extents_floor_at_minimum() -> None:
+    # A bundle with essentially no spread floors at the requested minimum half-extents.
+    t = np.linspace(0.0, 1.0, 21, dtype=np.float32)[:, None]
+    path = np.concatenate([t * 0.3, np.zeros_like(t), np.full_like(t, 0.2)], axis=1)
+
+    half = _effective_projection_half_extents(
+        center_xy=_point_at_arc_fraction_xy(path.astype(np.float32), fraction=0.5)[:2],
+        paths=[path.astype(np.float32)],
+        fraction=0.5,
+        min_half_extents=np.asarray([0.03, 0.05], dtype=np.float32),
+    )
+
+    np.testing.assert_allclose(half, np.asarray([0.03, 0.05], dtype=np.float32), atol=1e-6)
 
 
 def test_direct_path_avoid_region_and_json_persistence(tmp_path: Path) -> None:

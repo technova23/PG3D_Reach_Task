@@ -1,0 +1,4 @@
+/home/skills/gnrs/coding-agents-steer-dp3_final/.venv/lib/python3.11/site-packages/gymnasium/spaces/box.py:234: UserWarning: [33mWARN: Box low's precision lowered by casting to float32, current low.dtype=float64[0m
+  gym.logger.warn(
+/home/skills/gnrs/coding-agents-steer-dp3_final/.venv/lib/python3.11/site-packages/gymnasium/spaces/box.py:304: UserWarning: [33mWARN: Box high's precision lowered by casting to float32, current high.dtype=float64[0m
+  gym.logger.warn(

@@ -5,9 +5,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pg3d.constraints import AvoidRegion, BoxRegion, SphereRegion
+from pg3d.constraints import AvoidProjection, AvoidRegion, BoxRegion, SphereRegion
 
 DEFAULT_AVOID_COLOR = (255, 64, 16)
+# Z range used to render the (height-agnostic) avoid_projection footprint as a
+# visible extruded box in Rerun. Display-only; the constraint itself is infinite in Z.
+PROJECTION_VISUAL_Z_RANGE = (0.0, 0.5)
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,23 @@ def avoid_region_line_visuals(
         raise ValueError("sphere_segments must be at least 8")
     visuals: list[ConstraintLineVisual] = []
     for constraint_idx, constraint in enumerate(constraints):
+        if isinstance(constraint, AvoidProjection):
+            region = constraint.region
+            z_lo, z_hi = PROJECTION_VISUAL_Z_RANGE
+            center3 = np.array(
+                [region.center[0], region.center[1], 0.5 * (z_lo + z_hi)], dtype=np.float32
+            )
+            half3 = np.array(
+                [region.half_extents[0], region.half_extents[1], 0.5 * (z_hi - z_lo)],
+                dtype=np.float32,
+            )
+            visuals.append(
+                ConstraintLineVisual(
+                    name=f"avoid_projection_{len(visuals)}",
+                    line_strips=box_wireframe(center3, half3),
+                )
+            )
+            continue
         if not isinstance(constraint, AvoidRegion):
             continue
         region = constraint.region

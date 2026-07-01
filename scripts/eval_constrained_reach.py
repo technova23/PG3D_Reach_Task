@@ -28,7 +28,13 @@ from pg3d.composition.scoring import (
     primary_constraint_penalty,
     trajectory_smoothness,
 )
-from pg3d.constraints import AvoidRegion, BoxRegion, SphereRegion
+from pg3d.constraints import (
+    AvoidProjection,
+    AvoidRegion,
+    BoxRegion,
+    RectRegion2D,
+    SphereRegion,
+)
 from pg3d.envs.maniskill_adapter import (
     ManiSkillGhostPandaGeometryProvider,
     register_pg3d_reach_envs,
@@ -97,6 +103,9 @@ from scripts.rollout_dp3_reach_policy import (
 EvalMethod = Literal["base", "rejection", "reranking"]
 GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
+# Z range used to extrude the height-agnostic avoid_projection footprint for the
+# overlay video. Display-only; the constraint itself penalizes XY at any height.
+_PROJECTION_OVERLAY_Z_RANGE = (0.0, 0.5)
 
 
 @dataclass
@@ -568,6 +577,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "available; otherwise fall back to all sampled paths."
         ),
     )
+    parser.add_argument(
+        "--constraint-type",
+        choices=["region", "projection"],
+        default="region",
+        help=(
+            "Constraint family to place. 'region' (default) is a 3-D keep-out volume "
+            "(sphere/box) penalizing the EEF/robot for entering it. 'projection' is the "
+            "no-overflight analog: a 2-D tabletop rectangle that penalizes the XY "
+            "projection of the EEF/robot for passing over it, regardless of height z. "
+            "Projection placement reuses the candidate_midpath logic; pass "
+            "--constraint-placement candidate_midpath."
+        ),
+    )
+    parser.add_argument(
+        "--projection-half-extents",
+        type=float,
+        nargs=2,
+        default=[0.025, 0.025],
+        metavar=("MIN_HX", "MIN_HY"),
+        help=(
+            "Minimum per-axis XY half-extents (meters) for --constraint-type projection. "
+            "The rectangle is sized per axis from the sampled candidate paths' XY spread "
+            "(37.5th percentile of deviations from the placed center, mirroring how the "
+            "sphere radius is computed), then floored at these values. The rectangle is "
+            "centered at the placed XY location and extends through all z."
+        ),
+    )
     parser.add_argument("--avoid-radius", type=float, default=0.08)
     parser.add_argument("--avoid-min-radius", type=float, default=0.025)
     parser.add_argument("--avoid-margin", type=float, default=0.0)
@@ -744,6 +780,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--policy-batch-size must be positive")
     if args.avoid_radius <= 0.0 or args.avoid_min_radius <= 0.0:
         raise ValueError("avoid radii must be positive")
+    if any(h <= 0.0 for h in args.projection_half_extents):
+        raise ValueError("--projection-half-extents components must be positive")
+    if args.constraint_type == "projection" and args.constraint_placement != "candidate_midpath":
+        raise ValueError(
+            "--constraint-type projection requires --constraint-placement candidate_midpath"
+        )
     if args.avoid_box_half_extents is not None and any(
         h <= 0.0 for h in args.avoid_box_half_extents
     ):
@@ -1725,6 +1767,53 @@ def _avoid_region_of_shape(
     return SphereRegion(center=center, radius=float(radius))
 
 
+def _build_placed_constraint(
+    *,
+    center: np.ndarray,
+    radius: float,
+    name: str,
+    args: argparse.Namespace,
+    projection_half_extents: np.ndarray | None = None,
+) -> AvoidRegion | AvoidProjection:
+    """Build the placed keep-out constraint of the configured family at ``center``.
+
+    'region' returns a 3-D AvoidRegion (sphere/box) sized by ``radius``/shape args;
+    'projection' returns an AvoidProjection over a 2-D XY rectangle (no-overflight)
+    using the XY of ``center``. The rectangle half-extents come from
+    ``projection_half_extents`` when provided (sized from the candidate bundle,
+    analogous to ``radius``); otherwise they fall back to the
+    --projection-half-extents floor. ``radius`` is ignored for projection.
+    """
+    if args.constraint_type == "projection":
+        half_extents = (
+            np.asarray(projection_half_extents, dtype=np.float32)
+            if projection_half_extents is not None
+            else np.asarray(args.projection_half_extents, dtype=np.float32)
+        )
+        return AvoidProjection(
+            region=RectRegion2D(
+                center=np.asarray(center, dtype=np.float32).reshape(3)[:2],
+                half_extents=half_extents,
+            ),
+            margin=float(args.avoid_margin),
+            weight=float(args.avoid_weight),
+            name=name,
+        )
+    return AvoidRegion(
+        region=_avoid_region_of_shape(center, radius, args),
+        margin=float(args.avoid_margin),
+        weight=float(args.avoid_weight),
+        name=name,
+    )
+
+
+def _placed_constraint_name(base: str, index: int, *, multi: bool, args: argparse.Namespace) -> str:
+    """Return the canonical placed-constraint name, reflecting the constraint family."""
+    suffix = "avoid_projection" if args.constraint_type == "projection" else "avoid_region"
+    stem = f"{base}_{suffix}"
+    return f"{stem}_{index}" if multi else stem
+
+
 def _collect_candidate_paths(
     env: Any,
     *,
@@ -1862,6 +1951,7 @@ def _widest_trajectory_constraints(
                 radius=radius,
                 path_fraction=frac,
                 constraint_index=i if multi else None,
+                projection_half_extents=None,
             )
         constraints.append(
             AvoidRegion(
@@ -1907,9 +1997,14 @@ def _candidate_midpath_constraints(
         raise RuntimeError("candidate_midpath constraint placement produced no candidate paths")
 
     constraints: list[AvoidRegion] = []
+    is_projection = args.constraint_type == "projection"
+    # For a height-agnostic projection only the XY footprint matters, so place the
+    # center by XY (tabletop) arc length -- a vertical lift must not shift where the
+    # rectangle lands. Region (sphere/box) placement stays on the 3-D arc length.
+    arc_at = _point_at_arc_fraction_xy if is_projection else _point_at_arc_fraction
     for i, frac in enumerate(fractions):
         centers = np.stack(
-            [_point_at_arc_fraction(path, fraction=frac) for path in selected_paths],
+            [arc_at(path, fraction=frac) for path in selected_paths],
             axis=0,
         )
         center = np.median(centers, axis=0).astype(np.float32)
@@ -1919,13 +2014,28 @@ def _candidate_midpath_constraints(
             requested_radius=float(args.avoid_radius),
             min_radius=float(args.avoid_min_radius),
         )
-        name = f"candidate_midpath_avoid_region_{i}" if multi else "candidate_midpath_avoid_region"
+        name = _placed_constraint_name("candidate_midpath", i, multi=multi, args=args)
+        projection_half_extents: np.ndarray | None = None
+        if is_projection:
+            projection_half_extents = _effective_projection_half_extents(
+                center_xy=center[:2],
+                paths=selected_paths,
+                fraction=frac,
+                min_half_extents=np.asarray(args.projection_half_extents, dtype=np.float32),
+            )
+            shape_desc = (
+                f"shape=rect2d half_extents={projection_half_extents.tolist()} "
+                f"min_half_extents={list(args.projection_half_extents)}"
+            )
+        else:
+            shape_desc = f"shape={args.avoid_shape} radius={radius:.4f}"
         print(
             f"candidate-midpath constraint [{i}]: "
             f"episode={spec.output_index} frac={frac:.2f} "
+            f"type={args.constraint_type} "
             f"sampled={len(paths)} successful={len(successful_paths)} "
             f"used={len(selected_paths)} center={center.tolist()} "
-            f"shape={args.avoid_shape} radius={radius:.4f}",
+            f"{shape_desc}",
             flush=True,
         )
         if getattr(args, "plot_candidate_paths", False) and output_dir is not None:
@@ -1939,13 +2049,15 @@ def _candidate_midpath_constraints(
                 radius=radius,
                 path_fraction=frac,
                 constraint_index=i if multi else None,
+                projection_half_extents=projection_half_extents,
             )
         constraints.append(
-            AvoidRegion(
-                region=_avoid_region_of_shape(center, radius, args),
-                margin=float(args.avoid_margin),
-                weight=float(args.avoid_weight),
+            _build_placed_constraint(
+                center=center,
+                radius=radius,
                 name=name,
+                args=args,
+                projection_half_extents=projection_half_extents,
             )
         )
     return constraints
@@ -2040,6 +2152,83 @@ def _effective_avoid_radius(
     return float(max(min_radius, spread_radius))
 
 
+def _effective_projection_half_extents(
+    *,
+    center_xy: np.ndarray,
+    paths: list[np.ndarray],
+    fraction: float,
+    min_half_extents: np.ndarray,
+    window: float = 0.15,
+    percentile: float = 37.5,
+) -> np.ndarray:
+    """Return the projection rectangle half-extents (= ``min_half_extents``).
+
+    The spread-based inflation was removed because it sized the rectangle to
+    match the path-bundle width at the chokepoint, which — for a height-agnostic
+    projection constraint — left no lateral escape route and caused every candidate
+    to fail. The caller supplies the desired obstacle footprint via
+    ``--projection-half-extents``; that value is used directly.
+    """
+    min_half = np.asarray(min_half_extents, dtype=np.float32).reshape(2)
+    if np.any(min_half <= 0.0):
+        raise ValueError("projection min half-extents must be positive")
+    return min_half.copy()
+
+
+def _point_at_arc_fraction_xy(path: np.ndarray, *, fraction: float) -> np.ndarray:
+    """Like ``_point_at_arc_fraction`` but parameterized by XY (tabletop) arc length.
+
+    The along-path position is chosen by cumulative XY distance so a vertical lift
+    does not move where the projection footprint lands. The returned value is the
+    full interpolated 3-D point (its z is ignored by the rectangle).
+    """
+    points = np.asarray(path, dtype=np.float32).reshape(-1, 3)
+    if points.shape[0] == 0:
+        raise ValueError("path must contain at least one point")
+    if points.shape[0] == 1:
+        return points[0].astype(np.float32, copy=True)
+    segment_lengths = np.linalg.norm(np.diff(points[:, :2], axis=0), axis=1)
+    total = float(np.sum(segment_lengths))
+    if total <= 1e-8:
+        return points[0].astype(np.float32, copy=True)
+    target = float(np.clip(fraction, 0.0, 1.0)) * total
+    cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+    idx = int(np.searchsorted(cumulative, target, side="right") - 1)
+    idx = min(max(idx, 0), points.shape[0] - 2)
+    segment = float(segment_lengths[idx])
+    alpha = 0.0 if segment <= 1e-8 else (target - float(cumulative[idx])) / segment
+    return ((1.0 - alpha) * points[idx] + alpha * points[idx + 1]).astype(np.float32)
+
+
+def _local_path_points_xy(
+    path: np.ndarray,
+    *,
+    fraction: float,
+    window: float,
+) -> np.ndarray:
+    """Return the XY points of ``path`` within ``+/- window`` (XY arc fraction) of ``fraction``.
+
+    Always returns at least one point -- the interpolated XY point at ``fraction`` --
+    so callers can concatenate across candidate paths without special-casing empties.
+    """
+    points = np.asarray(path, dtype=np.float32).reshape(-1, 3)
+    if points.shape[0] == 0:
+        raise ValueError("path must contain at least one point")
+    if points.shape[0] == 1:
+        return points[:, :2].astype(np.float32, copy=True)
+    segment_lengths = np.linalg.norm(np.diff(points[:, :2], axis=0), axis=1)
+    total = float(np.sum(segment_lengths))
+    if total <= 1e-8:
+        return points[:1, :2].astype(np.float32, copy=True)
+    cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)]) / total
+    mask = (cumulative >= float(fraction) - float(window)) & (
+        cumulative <= float(fraction) + float(window)
+    )
+    if not np.any(mask):
+        return _point_at_arc_fraction_xy(path, fraction=fraction)[:2].reshape(1, 2)
+    return points[mask, :2].astype(np.float32, copy=False)
+
+
 def _plot_candidate_paths(
     *,
     output_dir: Path,
@@ -2051,9 +2240,11 @@ def _plot_candidate_paths(
     radius: float,
     path_fraction: float,
     constraint_index: int | None = None,
+    projection_half_extents: np.ndarray | None = None,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
         from matplotlib.lines import Line2D
         from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
     except Exception as exc:
@@ -2063,6 +2254,7 @@ def _plot_candidate_paths(
         )
         return
 
+    is_projection = projection_half_extents is not None
     successful_set = {id(p) for p in successful_paths}
     selected_set = {id(p) for p in selected_paths}
 
@@ -2081,14 +2273,29 @@ def _plot_candidate_paths(
         ax3d.scatter(pts[0, 0], pts[0, 1], pts[0, 2], color="tab:blue", s=18, zorder=5)
         ax3d.scatter(pts[-1, 0], pts[-1, 1], pts[-1, 2], color="tab:red", s=18, zorder=5)
 
-    # draw sphere as wireframe
-    u = np.linspace(0, 2 * np.pi, 30)
-    v = np.linspace(0, np.pi, 20)
-    sx = center[0] + radius * np.outer(np.cos(u), np.sin(v))
-    sy = center[1] + radius * np.outer(np.sin(u), np.sin(v))
-    sz = center[2] + radius * np.outer(np.ones_like(u), np.cos(v))
-    ax3d.plot_wireframe(sx, sy, sz, color="crimson", alpha=0.25, linewidth=0.6)
-    ax3d.scatter(*center, color="crimson", s=60, zorder=10, label=f"center r={radius:.3f}m")
+    if is_projection:
+        # Draw projection rectangle extruded over the visible z range.
+        hx, hy = float(projection_half_extents[0]), float(projection_half_extents[1])
+        cx, cy = float(center[0]), float(center[1])
+        z_lo, z_hi = _PROJECTION_OVERLAY_Z_RANGE
+        xs = [cx - hx, cx + hx, cx + hx, cx - hx, cx - hx]
+        ys = [cy - hy, cy - hy, cy + hy, cy + hy, cy - hy]
+        for z in (z_lo, z_hi):
+            ax3d.plot(xs, ys, [z] * 5, color="crimson", alpha=0.5, linewidth=1.2)
+        for xc, yc in zip(xs[:-1], ys[:-1]):
+            ax3d.plot([xc, xc], [yc, yc], [z_lo, z_hi], color="crimson", alpha=0.3, linewidth=0.8)
+        ax3d.scatter(cx, cy, 0.5 * (z_lo + z_hi), color="crimson", s=60, zorder=10)
+        constraint_legend_label = f"projection {2*hx:.3f}×{2*hy:.3f}m"
+    else:
+        # Draw sphere wireframe.
+        u = np.linspace(0, 2 * np.pi, 30)
+        v = np.linspace(0, np.pi, 20)
+        sx = center[0] + radius * np.outer(np.cos(u), np.sin(v))
+        sy = center[1] + radius * np.outer(np.sin(u), np.sin(v))
+        sz = center[2] + radius * np.outer(np.ones_like(u), np.cos(v))
+        ax3d.plot_wireframe(sx, sy, sz, color="crimson", alpha=0.25, linewidth=0.6)
+        ax3d.scatter(*center, color="crimson", s=60, zorder=10)
+        constraint_legend_label = f"sphere r={radius:.3f}m"
 
     ax3d.set_xlabel("x")
     ax3d.set_ylabel("y")
@@ -2099,11 +2306,12 @@ def _plot_candidate_paths(
         Line2D([0], [0], color="tab:gray", lw=0.8, alpha=0.5, label=f"failed ({len(paths) - len(successful_paths)})"),
         Line2D([0], [0], color="tab:blue", marker="o", lw=0, markersize=5, label="start"),
         Line2D([0], [0], color="tab:red", marker="o", lw=0, markersize=5, label="end"),
-        Line2D([0], [0], color="crimson", lw=1, label=f"sphere r={radius:.3f}m"),
+        Line2D([0], [0], color="crimson", lw=1, label=constraint_legend_label),
     ]
     ax3d.legend(handles=legend_handles, fontsize=7, loc="upper left")
 
     # --- XY top-down view ---
+    arc_fn = _point_at_arc_fraction_xy if is_projection else _point_at_arc_fraction
     ax2d = fig.add_subplot(1, 2, 2)
     for path in paths:
         pts = np.asarray(path, dtype=np.float32).reshape(-1, 3)
@@ -2116,16 +2324,29 @@ def _plot_candidate_paths(
         ax2d.scatter(pts[-1, 0], pts[-1, 1], color="tab:red", s=18, zorder=5)
         # mark the arc-fraction point used for center computation
         try:
-            arc_pt = _point_at_arc_fraction(pts, fraction=path_fraction)
+            arc_pt = arc_fn(pts, fraction=path_fraction)
             ax2d.scatter(arc_pt[0], arc_pt[1], color="gold", s=22, zorder=6, marker="x")
         except Exception:
             pass
 
-    circle = plt.Circle(
-        (center[0], center[1]), radius, color="crimson", fill=False, linewidth=1.5, label=f"sphere r={radius:.3f}m"
-    )
-    ax2d.add_patch(circle)
-    ax2d.scatter(center[0], center[1], color="crimson", s=60, zorder=10)
+    if is_projection:
+        hx, hy = float(projection_half_extents[0]), float(projection_half_extents[1])
+        rect = mpatches.Rectangle(
+            (float(center[0]) - hx, float(center[1]) - hy),
+            2 * hx, 2 * hy,
+            linewidth=1.5, edgecolor="crimson", facecolor="crimson", alpha=0.15,
+            label=f"projection {2*hx:.3f}×{2*hy:.3f}m",
+        )
+        ax2d.add_patch(rect)
+        ax2d.scatter(center[0], center[1], color="crimson", s=60, zorder=10)
+    else:
+        circle = plt.Circle(
+            (center[0], center[1]), radius, color="crimson", fill=False, linewidth=1.5,
+            label=f"sphere r={radius:.3f}m",
+        )
+        ax2d.add_patch(circle)
+        ax2d.scatter(center[0], center[1], color="crimson", s=60, zorder=10)
+
     ax2d.set_aspect("equal")
     ax2d.set_xlabel("x")
     ax2d.set_ylabel("y")
@@ -2140,7 +2361,7 @@ def _plot_candidate_paths(
     fig.suptitle(
         f"Candidate midpath — episode {episode_index}{constraint_tag} | "
         f"sampled={n_total} success={n_success} selected={n_selected} | "
-        f"arc_frac={path_fraction:.2f} sphere_r={radius:.3f}m",
+        f"arc_frac={path_fraction:.2f} {constraint_legend_label}",
         fontsize=9,
     )
     fig.tight_layout()
@@ -2219,6 +2440,8 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
         }
     return {
         "type": str(args.constraint_placement),
+        "constraint_type": str(args.constraint_type),
+        "projection_half_extents": [float(h) for h in args.projection_half_extents],
         "constraint_placement_candidates": int(args.constraint_placement_candidates),
         "constraint_placement_steps": (
             None if args.constraint_placement_steps is None else int(args.constraint_placement_steps)
@@ -2451,6 +2674,24 @@ def _add_constraint_overlay_actors(
                 body_type="kinematic",
                 add_collision=False,
                 initial_pose=sapien.Pose(p=region.center.tolist()),
+            )
+        elif isinstance(region, RectRegion2D):
+            # Render the height-agnostic XY footprint as an extruded box for visibility.
+            z_lo, z_hi = _PROJECTION_OVERLAY_Z_RANGE
+            actors.build_box(
+                scene,
+                half_sizes=[
+                    float(region.half_extents[0]),
+                    float(region.half_extents[1]),
+                    0.5 * (z_hi - z_lo),
+                ],
+                color=rgba,
+                name=name,
+                body_type="kinematic",
+                add_collision=False,
+                initial_pose=sapien.Pose(
+                    p=[float(region.center[0]), float(region.center[1]), 0.5 * (z_lo + z_hi)]
+                ),
             )
     update_render = getattr(scene, "update_render", None)
     if callable(update_render):

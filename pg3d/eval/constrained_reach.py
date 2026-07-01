@@ -11,6 +11,7 @@ from typing import Any, Literal
 import numpy as np
 
 from pg3d.constraints import (
+    AvoidProjection,
     AvoidRegion,
     BoxRegion,
     SceneContext,
@@ -258,10 +259,10 @@ def load_episode_constraints(path: Path) -> list[AvoidRegion]:
     constraints = constraints_from_json(payload)
     avoid_regions: list[AvoidRegion] = []
     for idx, constraint in enumerate(constraints):
-        if not isinstance(constraint, AvoidRegion):
+        if not isinstance(constraint, (AvoidRegion, AvoidProjection)):
             raise ValueError(
-                f"only AvoidRegion constraints are supported for constrained reach; "
-                f"{path} item {idx} is {type(constraint).__name__}"
+                f"only AvoidRegion/AvoidProjection constraints are supported for "
+                f"constrained reach; {path} item {idx} is {type(constraint).__name__}"
             )
         avoid_regions.append(constraint)
     return avoid_regions
@@ -277,7 +278,7 @@ def scene_context_for_constraints(
     regions = {
         constraint.name: constraint.region
         for constraint in constraints
-        if isinstance(constraint, AvoidRegion)
+        if isinstance(constraint, (AvoidRegion, AvoidProjection))
     }
     return SceneContext(
         target_position=np.asarray(target_position, dtype=np.float32),

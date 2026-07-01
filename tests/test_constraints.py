@@ -8,8 +8,10 @@ import numpy as np
 import pytest
 
 from pg3d.constraints import (
+    AvoidProjection,
     AvoidRegion,
     BoxRegion,
+    RectRegion2D,
     SmoothnessCost,
     SphereRegion,
     constraint_from_json,
@@ -40,6 +42,67 @@ def test_sphere_and_box_signed_distance() -> None:
         )
     )
     np.testing.assert_allclose(distances, np.asarray([-1.0, 1.0, 0.0], dtype=np.float32))
+
+
+def test_rect2d_signed_distance_ignores_height() -> None:
+    rect = RectRegion2D(center=[0.5, 0.0], half_extents=[0.08, 0.08])
+    # XY inside the footprint -> negative regardless of z; XY outside -> positive.
+    points = np.asarray(
+        [
+            [0.5, 0.0, 0.05],  # centered, low
+            [0.5, 0.0, 0.90],  # centered, very high -> still inside (z ignored)
+            [1.0, 0.0, 0.05],  # far in x -> outside
+        ],
+        dtype=np.float32,
+    )
+    distances = rect.signed_distance(points)
+    np.testing.assert_allclose(distances, np.asarray([-0.08, -0.08, 0.42], dtype=np.float32))
+    # Accepts [N, 2] as well and yields the same XY result.
+    np.testing.assert_allclose(distances, rect.signed_distance(points[:, :2]))
+
+
+def test_avoid_projection_penalizes_xy_overflight_at_any_height() -> None:
+    # EEF flies high over the restricted footprint; only the XY projection matters.
+    rollout = _rollout(eef_path=[[0.2, 0.0, 0.2], [0.5, 0.0, 0.9], [0.8, 0.0, 0.2]])
+    constraint = AvoidProjection(region=RectRegion2D(center=[0.5, 0.0], half_extents=[0.08, 0.08]))
+
+    costs = constraint.cost(rollout)
+
+    assert costs["avoid_projection"] > 0.0
+    assert costs["avoid_projection/max_violation"] == pytest.approx(0.08)
+    assert costs["avoid_projection/inside_count"] == 1.0
+    assert costs["avoid_projection/fraction_over"] == pytest.approx(1.0 / 3.0)
+    assert not constraint.satisfied(rollout)
+
+
+def test_avoid_projection_satisfied_when_path_skirts_footprint() -> None:
+    # Same x sweep but offset in y so the XY projection never enters the rectangle.
+    rollout = _rollout(eef_path=[[0.2, 0.5, 0.2], [0.5, 0.5, 0.2], [0.8, 0.5, 0.2]])
+    constraint = AvoidProjection(region=RectRegion2D(center=[0.5, 0.0], half_extents=[0.08, 0.08]))
+
+    costs = constraint.cost(rollout)
+
+    assert costs["avoid_projection"] == 0.0
+    assert costs["avoid_projection/inside_count"] == 0.0
+    assert constraint.satisfied(rollout)
+
+
+def test_avoid_projection_json_round_trip() -> None:
+    constraint = AvoidProjection(
+        region=RectRegion2D(center=[0.4, -0.1], half_extents=[0.1, 0.05]),
+        margin=0.01,
+        weight=2.0,
+        name="candidate_midpath_avoid_projection",
+    )
+    [restored] = constraints_from_json(constraints_to_json([constraint]))
+    assert isinstance(restored, AvoidProjection)
+    assert isinstance(restored.region, RectRegion2D)
+    assert restored.name == "candidate_midpath_avoid_projection"
+    assert restored.weight == pytest.approx(2.0)
+    np.testing.assert_allclose(restored.region.center, np.asarray([0.4, -0.1], dtype=np.float32))
+    np.testing.assert_allclose(
+        restored.region.half_extents, np.asarray([0.1, 0.05], dtype=np.float32)
+    )
 
 
 def test_avoid_region_cost_detects_eef_path_violation() -> None:

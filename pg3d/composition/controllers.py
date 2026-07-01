@@ -209,7 +209,16 @@ def _fallback_result(
 ) -> ControllerResult:
     if not candidates:
         raise RuntimeError("policy returned no candidate action chunks")
-    selected = min(candidates, key=lambda candidate: candidate.total_score)
+    # No candidate fully satisfies the constraints, so rank by constraint penalty
+    # first and break ties by total_score. Ranking on total_score alone lets the
+    # (much larger) goal_distance term dominate, which would pick the candidate
+    # that barrels straight through the keep-out region whenever that path is the
+    # shortest to the goal -- the "avoids none" failure. Constraint-first keeps the
+    # fallback choosing the least-violating candidate it has.
+    selected = min(
+        candidates,
+        key=lambda candidate: (candidate.constraint_penalty, candidate.total_score),
+    )
     return _result(selected, candidates, attempted, "least_bad_fallback")
 
 

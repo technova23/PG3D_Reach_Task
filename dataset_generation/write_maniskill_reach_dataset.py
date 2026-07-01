@@ -68,10 +68,6 @@ class TrajectoryFamilySpec:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        import gymnasium as gym
-        import mani_skill
-        import mani_skill.envs  # noqa: F401
-        import sapien
         from mani_skill.examples.motionplanning.panda.motionplanner import (
             PandaArmMotionPlanningSolver,
         )
@@ -86,8 +82,42 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    return run_generation(
+        args,
+        planner_cls=PandaArmMotionPlanningSolver,
+        register_envs=register_pg3d_reach_envs,
+        planner_name="PandaArmMotionPlanningSolver.move_to_pose_with_screw",
+    )
 
-    register_pg3d_reach_envs()
+
+def run_generation(
+    args: argparse.Namespace,
+    *,
+    planner_cls: Any,
+    register_envs: Any,
+    planner_name: str,
+) -> int:
+    """Shared reach data-generation loop. Robot-specific bits (planner, env
+    registration, planner label) are injected so multiple robots (Panda, xArm7)
+    reuse the same sampling/replay/zarr pipeline."""
+    try:
+        import gymnasium as gym
+        import mani_skill
+        import mani_skill.envs  # noqa: F401
+        import sapien
+    except Exception as exc:
+        print(
+            f"Failed to import ManiSkill stack: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        print(
+            "Install with: "
+            "uv sync --extra cu129 --extra maniskill --group dev --group notebooks",
+            file=sys.stderr,
+        )
+        return 2
+
+    register_envs()
     crop_config = PointCloudCropConfig(
         bounds=np.asarray(args.workspace_bounds),
         num_points=args.num_points,
@@ -140,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 settle_steps=args.settle_steps,
                 gripper_open=args.gripper_open,
                 sapien=sapien,
-                planner_cls=PandaArmMotionPlanningSolver,
+                planner_cls=planner_cls,
                 variants_per_reset=args.trajectory_variants_per_reset,
                 waypoint_attempts=args.waypoint_attempts,
                 min_base_clearance=args.min_base_clearance,
@@ -260,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
             "acceptance_success_distance": args.acceptance_success_distance,
             "allow_partial_variant_sets": args.allow_partial_variant_sets,
             "show_planner_output": args.show_planner_output,
-            "planner": "PandaArmMotionPlanningSolver.move_to_pose_with_screw",
+            "planner": planner_name,
             "trajectory_families": [
                 {
                     "trajectory_family_id": spec.family_id,
