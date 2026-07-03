@@ -224,3 +224,5 @@ See `docs/worklog/`.
   builder, precomputed constraint loading for constrained eval, and pure tests for the new fixed
   subset protocol. The first 25-episode held-out gate for the 20k checkpoint selected only 7
   base-success episodes, so the main constrained eval was intentionally not run.
+  A small extraction helper now supports `--episode-index` for exporting a single reach trajectory
+  from a saved Zarr to `.npz` or a one-episode Zarr.

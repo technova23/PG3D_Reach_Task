@@ -39,6 +39,7 @@ from pg3d.envs.maniskill_adapter import (
     ManiSkillGhostPandaGeometryProvider,
     register_pg3d_reach_envs,
 )
+from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import (
     PointCloudCropConfig,
     load_reach_metadata,
@@ -229,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     register_pg3d_reach_envs()
+    register_pg3d_xarm7_gripper_reach_envs()
     metadata = load_reach_metadata(args.dataset)
     device = select_device(args.device)
     _seed_torch(args.seed)
@@ -651,17 +653,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "penalizes the whole arm and base using the imagined robot point clouds. "
             "'robot' requires --geometry-mode exact for guidance methods (fast mode imagines "
             "no robot cloud). The whole-robot evaluation metric (--robot-clearance-metric) is "
-            "independent of this flag and stays on by default."
+            "independent of this flag and defaults to off."
         ),
     )
     parser.add_argument(
         "--robot-clearance-metric",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
             "Evaluate constraint_satisfied against the whole robot (URDF/mesh point cloud "
-            "sampled across the executed trajectory) rather than only the TCP. The TCP-only "
-            "result is still reported under constraint_satisfied_tcp / min_clearance_tcp."
+            "sampled across the executed trajectory) rather than only the TCP. Off by default "
+            "since guidance (rejection/reranking) only ever avoids with the TCP/EEF path under "
+            "the default --geometry-mode fast (which imagines no robot point cloud), so grading "
+            "against the whole robot body checks a signal guidance was never steering against. "
+            "The whole-robot result is still reported under constraint_satisfied / min_clearance "
+            "when enabled; the TCP-only result is always reported under constraint_satisfied_tcp "
+            "/ min_clearance_tcp."
         ),
     )
     parser.add_argument(
@@ -876,7 +883,7 @@ def run_eval_episode(
     video_env_factory: Callable[[], Any] | None = None,
     constraint_overlay_alpha: float = 0.25,
     constraint_overlay_color: tuple[float, float, float] = (1.0, 0.25, 0.05),
-    robot_clearance_metric: bool = True,
+    robot_clearance_metric: bool = False,
     robot_clearance_stride: int = 4,
     zarr_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:

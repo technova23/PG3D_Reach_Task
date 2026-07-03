@@ -59,7 +59,7 @@ def _save_mp4(frames: list[np.ndarray], path: Path, fps: int) -> None:
 
 # ── replay with frame capture ─────────────────────────────────────────────────
 
-_ACCEPTANCE_DIST = 0.030  # matches data-gen --acceptance-success-distance default
+_ACCEPTANCE_DIST = 0.025  # matches env goal threshold + data-gen acceptance (2.5 cm)
 
 
 def _replay_and_record(
@@ -106,6 +106,7 @@ def _replay_and_record(
 
     env_success = False
     first_success_step = None
+    hold_qpos = None  # qpos captured where success was first reached (hold locks to it)
     planned_step_limit = max(1, max_steps - settle_steps)
     settle_recorded = 0
     hold_recorded   = 0
@@ -114,6 +115,9 @@ def _replay_and_record(
 
     def _dist(info: Any) -> float:
         return float(_float_info(info, "tcp_to_goal_dist", default=float("inf")))
+
+    def _cur_qpos() -> np.ndarray:
+        return np.asarray(env.unwrapped.agent.robot.qpos).reshape(-1)
 
     # planned steps
     for pos in positions[:planned_step_limit]:
@@ -126,6 +130,7 @@ def _replay_and_record(
         if _bool_info(info, "success"):
             env_success = True
             first_success_step = len(frames)
+            hold_qpos = _cur_qpos()
             break
         if _bool_any(terminated) or _bool_any(truncated):
             break
@@ -142,19 +147,21 @@ def _replay_and_record(
         if _bool_info(info, "success"):
             env_success = True
             first_success_step = len(frames)
+            hold_qpos = _cur_qpos()
             break
         if _bool_any(truncated):
             break
 
-    # apply data-gen acceptance rule: near-miss within 3 cm still counts
+    # apply data-gen acceptance rule: near-miss within threshold still counts
     min_dist = float(min(distances)) if distances else float("inf")
     accepted = env_success or (min_dist <= _ACCEPTANCE_DIST)
     if accepted and first_success_step is None:
         first_success_step = int(np.argmin(np.asarray(distances, dtype=np.float32))) + 1
 
-    # hold steps (at the closest/goal position)
+    # hold steps: lock to the pose where success was first reached (falls back to the
+    # current qpos for near-miss acceptances that never tripped the strict flag).
     while first_success_step is not None and hold_recorded < hold_steps:
-        sim_action = _hold_sim_action(env, gripper_open=gripper_open)
+        sim_action = _hold_sim_action(env, gripper_open=gripper_open, qpos=hold_qpos)
         obs, _r, _term, truncated, info = env.step(sim_action)
         f = _render_frame(env)
         if f is not None:
@@ -217,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
         + _bounds_flag("--workspace-bounds", XARM7_WORKSPACE_BOUNDS)
         + ["--num-demos", "12"]  # 1 seed = 12 families
     )
+    if args.curved_paths:
+        injected += ["--curved-paths", "--curvature-std", str(args.curvature_std)]
     gen_args = _parse_args_gen(injected)
 
     # Camera for a nice 3rd-person view (same as preview script)
@@ -354,6 +363,9 @@ def main(argv: list[str] | None = None) -> int:
                 seed=seed,
                 start_qpos=start_qpos,
                 suppress_planner_output=True,
+                smooth_trajectory=gen_args.smooth_trajectory,
+                curved_paths=gen_args.curved_paths,
+                curvature_std=gen_args.curvature_std,
             )
         finally:
             planner.close()
@@ -399,6 +411,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fps", type=int, default=10, help="Video FPS (default: 10)")
     p.add_argument("--output-dir", type=Path, default=Path("artifacts/datagen_debug"),
                    help="Directory to write per-family MP4s")
+    p.add_argument("--curved-paths", action="store_true", default=False,
+                   help="Reproduce curved-path waypoint sampling (matches production data-gen).")
+    p.add_argument("--curvature-std", type=float, default=0.10,
+                   help="Gaussian curvature std when --curved-paths (default matches production: 0.10).")
     return p.parse_args(argv if argv is not None else sys.argv[1:])
 
 

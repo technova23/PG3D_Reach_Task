@@ -198,6 +198,10 @@ def run_generation(
                 saliency_config=_point_cloud_saliency_config(args),
                 require_complete_variant_set=not args.allow_partial_variant_sets,
                 suppress_planner_output=not args.show_planner_output,
+                smooth_trajectory=args.smooth_trajectory,
+                curved_paths=args.curved_paths,
+                curvature_std=args.curvature_std,
+                verbose_waypoints=args.verbose_waypoints,
                 viewer_step_delay=args.viewer_step_delay if args.viewer else 0.0,
             )
             if not new_episodes:
@@ -284,6 +288,9 @@ def run_generation(
             "lateral_z_offset": args.lateral_z_offset,
             "vertical_lateral_offset": args.vertical_lateral_offset,
             "min_curve_offset": args.min_curve_offset,
+            "smooth_trajectory": args.smooth_trajectory,
+            "curved_paths": args.curved_paths,
+            "curvature_std": args.curvature_std,
             "max_joint_step": args.max_joint_step,
             "max_joint_accel": args.max_joint_accel,
             "max_raw_plan_multiplier": args.max_raw_plan_multiplier,
@@ -487,10 +494,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--acceptance-success-distance",
         type=float,
-        default=0.030,
+        default=0.025,
         help=(
-            "writer-side success tolerance in meters; keeps near-threshold controller "
-            "misses that are visually/replay close to the goal"
+            "writer-side success tolerance in meters; matches the env goal threshold "
+            "(2.5 cm) so an accepted demo means the TCP genuinely reached the goal"
         ),
     )
     parser.add_argument(
@@ -540,6 +547,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=0.10,
         help="minimum maximum Cartesian deviation from the start-goal line for non-shallow families",
+    )
+    parser.add_argument(
+        "--smooth-trajectory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "re-time multi-segment planned trajectories to constant joint-space speed "
+            "(arc-length reparameterization) so the end-effector does not decelerate at each "
+            "intermediate waypoint seam; terminal deceleration into the goal is preserved. "
+            "Pass --no-smooth-trajectory to disable for ablation."
+        ),
+    )
+    parser.add_argument(
+        "--curved-paths",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "sample waypoint path-fractions randomly in [0.2, 0.8] and add Gaussian curvature "
+            "(std=--curvature-std) on top of each family's mean offset, instead of placing "
+            "waypoints at the family's fixed path ratios. Produces a unique curved shape per "
+            "episode. Gated on --smooth-trajectory to avoid re-introducing seam deceleration; "
+            "unconditioned, so keep --curvature-std modest to avoid harder mode-averaging."
+        ),
+    )
+    parser.add_argument(
+        "--curvature-std",
+        type=float,
+        default=0.10,
+        help="std of the Gaussian curvature offset (in family-scale units) when --curved-paths",
+    )
+    parser.add_argument(
+        "--verbose-waypoints",
+        action="store_true",
+        default=False,
+        help=(
+            "print per-family path ratios for each waypoint-sampling attempt; useful for "
+            "debugging trajectory diversity"
+        ),
     )
     parser.add_argument(
         "--max-joint-step",
@@ -794,6 +839,10 @@ def _collect_multimodal_episodes(
     saliency_config: PointCloudSaliencyConfig,
     require_complete_variant_set: bool,
     suppress_planner_output: bool,
+    smooth_trajectory: bool = True,
+    curved_paths: bool = False,
+    curvature_std: float = 0.10,
+    verbose_waypoints: bool = False,
     viewer_step_delay: float = 0.0,
 ) -> list[ReachEpisodeData]:
     obs, info = env.reset(seed=seed, options={"reconfigure": True})
@@ -924,6 +973,10 @@ def _collect_multimodal_episodes(
             seed=seed,
             start_qpos=start_qpos,
             suppress_planner_output=suppress_planner_output,
+            smooth_trajectory=smooth_trajectory,
+            curved_paths=curved_paths,
+            curvature_std=curvature_std,
+            verbose_waypoints=verbose_waypoints,
         )
     finally:
         planner.close()
@@ -1035,6 +1088,7 @@ def _replay_planned_positions_as_episode(
     distances: list[float] = []
     first_success_step: int | None = None
     pre_hold_final_distance: float | None = None
+    hold_qpos: np.ndarray | None = None  # qpos captured where success was first reached
     hold_steps_recorded = 0
     settle_steps_recorded = 0
     planned_step_limit = max(1, max_steps - settle_steps)
@@ -1061,6 +1115,7 @@ def _replay_planned_positions_as_episode(
         if success:
             first_success_step = len(rows)
             pre_hold_final_distance = distance
+            hold_qpos = _to_numpy(unwrapped.agent.robot.qpos).reshape(-1)
             break
         if _bool_any(terminated) or _bool_any(truncated):
             break
@@ -1097,6 +1152,7 @@ def _replay_planned_positions_as_episode(
         if success:
             first_success_step = len(rows)
             pre_hold_final_distance = distance
+            hold_qpos = _to_numpy(unwrapped.agent.robot.qpos).reshape(-1)
             break
         if _bool_any(truncated):
             break
@@ -1106,7 +1162,10 @@ def _replay_planned_positions_as_episode(
         and hold_steps_recorded < hold_steps
         and len(rows) < max_steps
     ):
-        sim_action = _hold_sim_action(env, gripper_open=gripper_open)
+        # Lock the hold to the pose where success was first reached so the TCP stays
+        # inside the goal threshold rather than drifting toward the (possibly slightly
+        # off-target) final planned qpos.
+        sim_action = _hold_sim_action(env, gripper_open=gripper_open, qpos=hold_qpos)
         row = _dataset_row_from_obs(
             obs=obs,
             info=info,
@@ -1197,6 +1256,10 @@ def generate_multimodal_waypoints(
     seed: int,
     start_qpos: np.ndarray,
     suppress_planner_output: bool = True,
+    smooth_trajectory: bool = True,
+    curved_paths: bool = False,
+    curvature_std: float = 0.10,
+    verbose_waypoints: bool = False,
 ) -> list[dict[str, Any]]:
     """Sample waypoint-conditioned variants while keeping the official planner in charge."""
     start = np.asarray(current_tcp_pose[:3], dtype=np.float64)
@@ -1237,6 +1300,9 @@ def generate_multimodal_waypoints(
                 lateral_z_offset=lateral_z_offset,
                 vertical_lateral_offset=vertical_lateral_offset,
                 rng=rng,
+                curved_paths=curved_paths,
+                curvature_std=curvature_std,
+                verbose_waypoints=verbose_waypoints,
             )
             if waypoints is None:
                 if attempt_idx % progress_interval == 0 or attempt_idx == max_attempts:
@@ -1261,6 +1327,7 @@ def generate_multimodal_waypoints(
                 poses=[*waypoint_poses, goal_pose],
                 start_qpos=start_qpos,
                 suppress_planner_output=suppress_planner_output,
+                smooth_trajectory=smooth_trajectory,
             )
             if plan_result is None:
                 planner_failures += 1
@@ -1559,6 +1626,9 @@ def _sample_waypoint_set(
     lateral_z_offset: float,
     vertical_lateral_offset: float,
     rng: np.random.Generator,
+    curved_paths: bool = False,
+    curvature_std: float = 0.10,
+    verbose_waypoints: bool = False,
 ) -> tuple[np.ndarray, list[dict[str, Any]]] | tuple[None, list[dict[str, Any]]]:
     delta = goal - start
     distance = float(np.linalg.norm(delta))
@@ -1635,16 +1705,43 @@ def _sample_waypoint_set(
     }
     center = (len(spec.ratios) - 1) / 2.0
     per_waypoint_attempts = 4
+    # Curved-path mode: replace the family's fixed path ratios with random, sorted fractions
+    # in [0.2, 0.8] so each episode traces a unique curve. Sorting keeps multi-waypoint paths
+    # monotonic along start->goal. Gaussian curvature is added per waypoint in the offset below.
+    curved_ratios = (
+        np.sort(rng.uniform(0.2, 0.8, size=len(spec.ratios))) if curved_paths else None
+    )
+    if verbose_waypoints:
+        ratios_str = (
+            "[" + ", ".join(f"{r:.3f}" for r in curved_ratios.tolist()) + "]"
+            if curved_paths and curved_ratios is not None
+            else "[" + ", ".join(f"{r:.3f}" for r in spec.ratios) + "]"
+        )
+        print(
+            f"  [wpt] family {spec.family_id}:{spec.name} path_ratios={ratios_str}",
+            flush=True,
+        )
     for idx, ratio in enumerate(spec.ratios):
         accepted: tuple[np.ndarray, dict[str, Any]] | None = None
         for local_attempt in range(1, per_waypoint_attempts + 1):
-            ratio_jitter = float(rng.uniform(-0.035, 0.035))
-            path_ratio = float(np.clip(ratio + ratio_jitter, 0.14, 0.86))
+            if curved_paths and curved_ratios is not None:
+                path_ratio = float(np.clip(curved_ratios[idx], 0.14, 0.86))
+                lateral_curve = float(rng.normal(0.0, curvature_std))
+                vertical_curve = float(rng.normal(0.0, curvature_std))
+            else:
+                ratio_jitter = float(rng.uniform(-0.035, 0.035))
+                path_ratio = float(np.clip(ratio + ratio_jitter, 0.14, 0.86))
+                lateral_curve = 0.0
+                vertical_curve = 0.0
             envelope = 1.0 + 0.10 * (1.0 - abs(idx - center) / max(center, 1.0))
             lateral_noise = float(rng.uniform(-spec.lateral_jitter, spec.lateral_jitter))
             vertical_noise = float(rng.uniform(-spec.vertical_jitter, spec.vertical_jitter))
-            lateral_offset = (lateral_scale + lateral_noise) * lateral_mag * envelope
-            vertical_offset = (vertical_scale + vertical_noise) * vertical_mag * envelope
+            lateral_offset = (
+                (lateral_scale + lateral_noise + lateral_curve) * lateral_mag * envelope
+            )
+            vertical_offset = (
+                (vertical_scale + vertical_noise + vertical_curve) * vertical_mag * envelope
+            )
             vertical_offset = float(
                 np.clip(
                     vertical_offset,
@@ -1805,6 +1902,46 @@ def _is_waypoint_valid(
     return horizontal_clearance >= min_base_clearance
 
 
+def _retime_trajectory_constant_speed(
+    positions: np.ndarray,
+    *,
+    taper_fraction: float = 0.18,
+) -> np.ndarray:
+    """Resample a joint-space path at constant arc-length spacing.
+
+    The multi-segment planner stops (zero joint velocity) at every intermediate waypoint, so the
+    concatenated ``positions`` cluster near segment seams and the replayed end-effector
+    decelerates there. Reparameterizing by cumulative joint-space arc length and resampling at
+    uniform spacing removes those seam pinches (constant joint speed through the detour).
+
+    The final ``taper_fraction`` of the path is blended back toward the original (decelerating)
+    timing so the arm still settles into the goal instead of slamming it at full speed.
+    """
+    positions = np.asarray(positions, dtype=np.float32)
+    n = int(positions.shape[0])
+    if n < 3:
+        return positions
+    deltas = np.diff(positions, axis=0)
+    seg_len = np.linalg.norm(deltas, axis=1)
+    arc = np.concatenate([[0.0], np.cumsum(seg_len)]).astype(np.float64)
+    total = float(arc[-1])
+    if total < 1e-8:
+        return positions
+    uniform_s = np.linspace(0.0, total, n)
+    retimed = np.empty_like(positions)
+    for dim in range(positions.shape[1]):
+        retimed[:, dim] = np.interp(uniform_s, arc, positions[:, dim])
+    taper = float(np.clip(taper_fraction, 0.0, 0.9))
+    if taper > 0.0:
+        tail = max(1, int(round(n * taper)))
+        weights = np.linspace(0.0, 1.0, tail, dtype=np.float32)
+        for k in range(tail):
+            i = n - tail + k
+            w = float(weights[k])
+            retimed[i] = (1.0 - w) * retimed[i] + w * positions[i]
+    return retimed.astype(np.float32)
+
+
 def _plan_multisegment_trajectory(
     *,
     planner: Any,
@@ -1812,6 +1949,7 @@ def _plan_multisegment_trajectory(
     poses: list[Any],
     start_qpos: np.ndarray,
     suppress_planner_output: bool = True,
+    smooth_trajectory: bool = True,
 ) -> tuple[np.ndarray, str] | None:
     _set_robot_qpos(env, start_qpos)
     segments: list[np.ndarray] = []
@@ -1837,7 +1975,10 @@ def _plan_multisegment_trajectory(
         _set_robot_qpos(env, start_qpos)
     if not segments:
         return None
-    return np.concatenate(segments, axis=0).astype(np.float32), "+".join(statuses)
+    positions = np.concatenate(segments, axis=0).astype(np.float32)
+    if smooth_trajectory and len(segments) > 1:
+        positions = _retime_trajectory_constant_speed(positions)
+    return positions, "+".join(statuses)
 
 
 def _plan_to_pose(
@@ -2213,9 +2354,16 @@ def _format_sim_action(env: Any, planned_qpos: np.ndarray) -> np.ndarray:
     )
 
 
-def _hold_sim_action(env: Any, *, gripper_open: float) -> np.ndarray:
-    """Return a simulator action that asks Panda to hold the current arm qpos."""
-    qpos = _to_numpy(env.unwrapped.agent.robot.qpos).reshape(-1)
+def _hold_sim_action(env: Any, *, gripper_open: float, qpos: np.ndarray | None = None) -> np.ndarray:
+    """Return a simulator action that holds an arm qpos.
+
+    By default holds the robot's *current* qpos. Pass ``qpos`` to hold a fixed
+    configuration instead — used to lock the TCP at the pose where success was first
+    reached, so it stays inside the goal threshold instead of drifting during hold.
+    """
+    if qpos is None:
+        qpos = _to_numpy(env.unwrapped.agent.robot.qpos).reshape(-1)
+    qpos = np.asarray(qpos).reshape(-1)
     action_dim = int(np.prod(env.action_space.shape))
     if qpos.shape[0] < 7:
         raise ValueError(f"robot qpos must have at least 7 values, got {qpos.shape}")

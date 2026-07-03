@@ -151,6 +151,10 @@ def crop_point_cloud(
         axis=1,
     )
     cropped_indices = np.flatnonzero(in_bounds)
+    if config.robot_point_fraction >= 1.0:
+        # Robot-only: drop scene/background points entirely rather than letting
+        # them backfill leftover slots when robot points fall short of num_points.
+        cropped_indices = cropped_indices[source_robot_mask[cropped_indices]]
     if cropped_indices.size > config.num_points:
         cropped_indices = _downsample_with_robot_quota(
             cropped_indices,

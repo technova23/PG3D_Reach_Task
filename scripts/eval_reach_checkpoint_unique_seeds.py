@@ -14,6 +14,7 @@ import torch
 import zarr
 
 from pg3d.envs.maniskill_adapter import register_pg3d_reach_envs
+from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import load_reach_metadata
 from pg3d.policies.dp3.checkpoint import (
     latest_reach_checkpoint,
@@ -52,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     register_pg3d_reach_envs()
+    register_pg3d_xarm7_gripper_reach_envs()
     if args.dataset is not None:
         metadata = load_reach_metadata(args.dataset)
     else:

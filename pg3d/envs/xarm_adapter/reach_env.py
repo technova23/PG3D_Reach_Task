@@ -11,6 +11,7 @@ when you move past the spawn smoke test (marked TODO).
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -29,6 +30,8 @@ from pg3d.envs.xarm_adapter.agents import (  # noqa: F401 - registers agents
     XArm7Robotiq,
 )
 from pg3d.envs.xarm_adapter.reach_config import (
+    XARM7_CAM_CALIB_RMS_ROTATION_DEG,
+    XARM7_CAM_CALIB_RMS_TRANSLATION_M,
     XARM7_CAM_Q_WXYZ,
     XARM7_CAM_T_BASE,
     XARM7_CAM_VFOV_RAD,
@@ -37,6 +40,20 @@ from pg3d.envs.xarm_adapter.reach_config import (
 )
 
 ROBOT_BASE_POSE = sapien.Pose(p=[-0.615, 0.0, 0.0])
+
+
+def _quat_multiply_wxyz(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+    w1, x1, y1, z1 = q1.unbind(-1)
+    w2, x2, y2, z2 = q2.unbind(-1)
+    return torch.stack(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dim=-1,
+    )
 
 
 class PG3DReachXArm7Env(PG3DReachEnv):
@@ -61,13 +78,48 @@ class PG3DReachXArm7Env(PG3DReachEnv):
         qpos = torch.tensor(rest_qpos, dtype=torch.float32, device=self.device).unsqueeze(0).expand(b, -1)
         self.agent.reset(qpos)
         super()._initialize_episode(env_idx, options)
+        self._randomize_camera_pose()
+
+    def _randomize_camera_pose(self) -> None:
+        """Jitter base_camera each episode within the measured eye-to-hand calibration
+        error (RMS 12.5mm translation, 1.12deg rotation), so policies trained on this
+        data don't overfit to a perfectly known camera pose that won't hold exactly on
+        the real robot. No-op if the current obs mode didn't build any cameras.
+
+        set_local_pose only accepts one unbatched pose (applies to every parallel
+        sub-scene camera equally) — fine since data-gen always runs num_envs=1.
+        """
+        camera = self._sensors.get("base_camera")
+        if camera is None:
+            return
+        with torch.device(self.device):
+            trans_sigma = XARM7_CAM_CALIB_RMS_TRANSLATION_M / math.sqrt(3.0)
+            rot_sigma_rad = math.radians(XARM7_CAM_CALIB_RMS_ROTATION_DEG) / math.sqrt(3.0)
+            delta_p = torch.randn(3) * trans_sigma
+            rotvec = torch.randn(3) * rot_sigma_rad
+            angle = torch.linalg.norm(rotvec).clamp_min(1e-8)
+            axis = rotvec / angle
+            half = angle * 0.5
+            delta_q = torch.cat([torch.cos(half).unsqueeze(0), axis * torch.sin(half)])
+            nominal_q = torch.tensor(XARM7_CAM_Q_WXYZ, dtype=torch.float32)
+            jittered_q = _quat_multiply_wxyz(nominal_q, delta_q)
+        nominal_p = np.array(ROBOT_BASE_POSE.p) + XARM7_CAM_T_BASE
+        jittered_p = nominal_p + delta_p.cpu().numpy()
+        camera.camera.set_local_pose(sapien.Pose(p=jittered_p.tolist(), q=jittered_q.cpu().tolist()))
 
     @property
     def _default_sensor_configs(self) -> list[CameraConfig]:
         # Camera pose from eye-to-hand calibration on real xArm7.
         # Position: robot base frame → world frame by adding ROBOT_BASE_POSE.p.
-        # Orientation: SAPIEN [w,x,y,z] quaternion from the calibration rotation matrix
-        # (OpenCV convention: +z optical, +y down — matches SAPIEN's camera model).
+        # Orientation: SAPIEN [w,x,y,z] quaternion converted from the calibration
+        # rotation matrix. The calibration script outputs an OpenCV/pinhole-optical
+        # rotation (+z forward, +y down, +x right); SAPIEN's own convention is
+        # (forward, right, up) = (+x, -y, +z) (see mani_skill.utils.sapien_utils.
+        # look_at docstring) — a different axis assignment, not a relabeling. The
+        # conversion lives in reach_config._opencv_camera_rotation_to_sapien;
+        # passing the raw OpenCV matrix straight into SAPIEN silently pointed the
+        # camera ~90° away from the workspace (confirmed empirically: 0/16384 raw
+        # points ever landed inside the crop bounds before this was fixed).
         cam_p = (np.array(ROBOT_BASE_POSE.p) + XARM7_CAM_T_BASE).tolist()
         pose = sapien.Pose(p=cam_p, q=XARM7_CAM_Q_WXYZ.tolist())
         # near/far match RealSense D455 practical range (0.4 m – 6 m).

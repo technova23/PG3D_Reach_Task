@@ -32,6 +32,7 @@ from pg3d.envs.maniskill_adapter import (
     ManiSkillGhostPandaGeometryProvider,
     register_pg3d_reach_envs,
 )
+from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import (
     PointCloudCropConfig,
     load_reach_metadata,
@@ -214,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     register_pg3d_reach_envs()
+    register_pg3d_xarm7_gripper_reach_envs()
     metadata = load_reach_metadata(args.dataset)
     device = select_device(args.device)
     _seed_torch(args.seed)

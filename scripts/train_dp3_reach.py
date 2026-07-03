@@ -762,6 +762,7 @@ def _log_checkpoint_rollouts(
     import mani_skill.envs  # noqa: F401
     import wandb
     from pg3d.envs.maniskill_adapter import register_pg3d_reach_envs
+    from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
     from scripts.rollout_dp3_reach_policy import (
         _action_mode,
         crop_config_from_metadata,
@@ -778,6 +779,7 @@ def _log_checkpoint_rollouts(
         return
 
     register_pg3d_reach_envs()
+    register_pg3d_xarm7_gripper_reach_envs()
     crop_config = crop_config_from_metadata(metadata)
     action_mode = _action_mode(str(metadata.get("action_mode", "abs_joint")))
     env_kwargs = dict(metadata.get("env_kwargs", {}))

@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import sapien
 
+from dataset_generation.write_maniskill_reach_dataset import _goal_pose
 from pg3d.envs.maniskill_adapter import adapt_observation, register_pg3d_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import (
     DEFAULT_WORKSPACE_BOUNDS,
@@ -1023,6 +1025,15 @@ def _collect_multimodal_episodes(
             info=info,
             gripper_open=gripper_open,
         )
+        print("=" * 80)
+        print(f"Seed {seed}, Family {variant['trajectory_type']}:{variant['name']}")
+
+        print("Goal site CPU:",
+      np.asarray(env.unwrapped.goal_site.pose.p))
+
+        planner_goal = _goal_pose(env.unwrapped, sapien)
+        print("Planner goal:",
+      np.asarray(planner_goal.p))
         _render_viewer_frame(env, viewer_step_delay)
         episode = _replay_planned_positions_as_episode(
             env=env,

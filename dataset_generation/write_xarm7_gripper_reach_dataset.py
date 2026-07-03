@@ -39,6 +39,9 @@ _XARM7_GRIPPER_DEFAULTS: list[str] = [
     "--waypoint-xy-noise", "0.03",
     "--waypoint-z-noise", "0.02",
     "--min-start-goal-distance", "0.14",
+    "--goal-marker-points", "192",
+    "--tcp-marker-points", "0",
+    "--robot-point-fraction", "1.0",
     "--output", "artifacts/pg3d_xarm7_gripper_reach.zarr",
 ]
 
