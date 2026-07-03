@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-05-27
+Last updated: 2026-07-03
 
 ## Current objective
 
@@ -12,6 +12,23 @@ Bootstrap a sim-only research codebase for programmatic geometric guidance of 3D
 - world model: kinematic robot-geometry point-cloud imagination from joint-action chunks,
 - first constraint: `avoid_region` over the end-effector path,
 - first composition operator: candidate rejection/reranking, not energy guidance.
+
+## ITPS baseline branch
+
+Work for the inference-time policy steering baseline is now isolated on the
+`itps-stochastic-sampling-baseline` branch. The current branch adds:
+
+- a new `SimpleDP3.stochastic_sample(...)` denoising hook with optional
+  gradient-based steering during reverse diffusion,
+- a dedicated `scripts/eval_itps_stochastic_reach.py` entrypoint for the
+  stochastic-sampling baseline,
+- an initial action-space proxy guidance loss that keeps the baseline separate
+  from the main rejection/reranking path.
+
+The first pass is intentionally conservative: it replicates the ITPS sampling
+shape at inference time, but the obstacle-avoidance guidance still uses an
+action-space proxy rather than a differentiable FK-based EEF cost. That is the
+next refinement if this baseline proves worth keeping.
 
 ## Current phase
 

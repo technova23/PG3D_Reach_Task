@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
-from typing import TypedDict
+from typing import Callable, TypedDict
 
 import torch
 import torch.nn.functional as F
@@ -227,6 +227,56 @@ class SimpleDP3(BasePolicy):
                 global_cond=global_cond,
             )
             trajectory = self.noise_scheduler.step(model_output, timestep, trajectory).prev_sample
+        trajectory[condition_mask] = condition_data[condition_mask]
+        return trajectory
+
+    def stochastic_sample(
+        self,
+        condition_data: torch.Tensor,
+        condition_mask: torch.Tensor,
+        global_cond: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
+        guidance_fn: Callable[[torch.Tensor], torch.Tensor | float] | None = None,
+        guidance_scale: float = 0.0,
+        guidance_steps: int = 1,
+    ) -> torch.Tensor:
+        """Run denoising with optional gradient-based steering.
+
+        This mirrors the ITPS idea of biasing the reverse diffusion process during
+        inference rather than post-hoc reranking. The guidance function receives the
+        current trajectory tensor and should return a scalar loss that encourages the
+        desired behavior, such as obstacle clearance.
+        """
+        if guidance_steps <= 0:
+            raise ValueError("guidance_steps must be positive")
+        trajectory = torch.randn(
+            size=condition_data.shape,
+            dtype=condition_data.dtype,
+            device=condition_data.device,
+            generator=generator,
+        )
+        self.noise_scheduler.set_timesteps(self.num_inference_steps)
+        for timestep in self.noise_scheduler.timesteps:
+            trajectory[condition_mask] = condition_data[condition_mask]
+            if guidance_fn is not None and guidance_scale != 0.0:
+                guided = trajectory
+                for _ in range(guidance_steps):
+                    guided = guided.detach().requires_grad_(True)
+                    loss = guidance_fn(guided)
+                    if not torch.is_tensor(loss):
+                        loss = torch.as_tensor(loss, device=guided.device, dtype=guided.dtype)
+                    grad = torch.autograd.grad(loss, guided, retain_graph=False, create_graph=False)[0]
+                    trajectory = (guided - float(guidance_scale) * grad).detach()
+                    trajectory[condition_mask] = condition_data[condition_mask]
+                model_input = trajectory
+            else:
+                model_input = trajectory
+            model_output = self.model(
+                sample=model_input,
+                timestep=timestep,
+                global_cond=global_cond,
+            )
+            trajectory = self.noise_scheduler.step(model_output, timestep, model_input).prev_sample
         trajectory[condition_mask] = condition_data[condition_mask]
         return trajectory
 
