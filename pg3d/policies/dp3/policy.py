@@ -264,21 +264,22 @@ class SimpleDP3(BasePolicy):
             if guidance_fn is not None and guidance_scale != 0.0:
                 guided = trajectory
                 for _ in range(guidance_steps):
-                    result = guidance_fn(guided)
-                    if isinstance(result, tuple):
-                        loss, grad = result
-                        if not torch.is_tensor(grad):
-                            grad = torch.as_tensor(grad, device=guided.device, dtype=guided.dtype)
-                        trajectory = (guided - float(guidance_scale) * grad).detach()
-                    else:
+                    with torch.enable_grad():
                         guided = guided.detach().requires_grad_(True)
-                        loss = result
-                        if not torch.is_tensor(loss):
-                            loss = torch.as_tensor(loss, device=guided.device, dtype=guided.dtype)
-                        grad = torch.autograd.grad(
-                            loss, guided, retain_graph=False, create_graph=False
-                        )[0]
-                        trajectory = (guided - float(guidance_scale) * grad).detach()
+                        result = guidance_fn(guided)
+                        if isinstance(result, tuple):
+                            loss, grad = result
+                            if not torch.is_tensor(grad):
+                                grad = torch.as_tensor(grad, device=guided.device, dtype=guided.dtype)
+                            trajectory = (guided - float(guidance_scale) * grad).detach()
+                        else:
+                            loss = result
+                            if not torch.is_tensor(loss):
+                                loss = torch.as_tensor(loss, device=guided.device, dtype=guided.dtype)
+                            grad = torch.autograd.grad(
+                                loss, guided, retain_graph=False, create_graph=False
+                            )[0]
+                            trajectory = (guided - float(guidance_scale) * grad).detach()
                     trajectory[condition_mask] = condition_data[condition_mask]
                 model_input = trajectory
             else:
@@ -292,53 +293,35 @@ class SimpleDP3(BasePolicy):
         trajectory[condition_mask] = condition_data[condition_mask]
         return trajectory
 
+    def stochastic_sample_from_obs(
+        self,
+        obs_dict: ObsDict,
+        *,
+        generator: torch.Generator | None = None,
+        guidance_fn: Callable[
+            [torch.Tensor], torch.Tensor | float | tuple[torch.Tensor | float, torch.Tensor]
+        ]
+        | None = None,
+        guidance_scale: float = 0.0,
+        guidance_steps: int = 1,
+    ) -> torch.Tensor:
+        """Run guided denoising using the same observation conditioning as predict_action."""
+        cond_data, cond_mask, global_cond = self._build_conditioning(obs_dict)
+        return self.stochastic_sample(
+            cond_data,
+            cond_mask,
+            global_cond=global_cond,
+            generator=generator,
+            guidance_fn=guidance_fn,
+            guidance_scale=guidance_scale,
+            guidance_steps=guidance_steps,
+        )
+
     def predict_action(self, obs_dict: ObsDict, generator: torch.Generator | None = None) -> PolicyOutput:
         """Sample an action sequence and return the chunk used by receding horizon."""
-        nobs = self.normalizer.normalize(obs_dict)
-        assert isinstance(nobs, dict)
-        if self.use_goal_encoder:
-            nobs["goal_rel"] = self._goal_rel(obs_dict)
-        if not self.use_pc_color:
-            nobs["point_cloud"] = nobs["point_cloud"][..., :3]
-
-        value = next(iter(nobs.values()))
-        batch_size = value.shape[0]
-        horizon = self.horizon
+        cond_data, cond_mask, global_cond = self._build_conditioning(obs_dict)
         action_dim = self.action_dim
         obs_steps = self.n_obs_steps
-        device = self.device
-        dtype = self.dtype
-
-        global_cond = None
-        if self.obs_as_global_cond:
-            # Collapse the observed time window into a single conditioning vector.
-            this_nobs = dict_apply(
-                nobs,
-                lambda x: x[:, :obs_steps, ...].reshape(-1, *x.shape[2:]),
-            )
-            nobs_features = self.obs_encoder(this_nobs)
-            if "cross_attention" in self.condition_type:
-                global_cond = nobs_features.reshape(batch_size, obs_steps, -1)
-            else:
-                global_cond = nobs_features.reshape(batch_size, -1)
-            cond_data = torch.zeros(
-                size=(batch_size, horizon, action_dim),
-                device=device,
-                dtype=dtype,
-            )
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-        else:
-            # Keep encoded observations inside the denoised trajectory itself.
-            this_nobs = dict_apply(nobs, lambda x: x[:, :horizon, ...].reshape(-1, *x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs).reshape(batch_size, horizon, -1)
-            cond_data = torch.zeros(
-                size=(batch_size, horizon, action_dim + self.obs_feature_dim),
-                device=device,
-                dtype=dtype,
-            )
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-            cond_data[:, :obs_steps, action_dim:] = nobs_features[:, :obs_steps]
-            cond_mask[:, :obs_steps, action_dim:] = True
 
         nsample = self.conditional_sample(cond_data, cond_mask, global_cond=global_cond, generator=generator)
         naction_pred = nsample[..., :action_dim]
@@ -417,6 +400,54 @@ class SimpleDP3(BasePolicy):
         loss = loss * loss_mask.type(loss.dtype)
         loss = loss.reshape(loss.shape[0], -1).mean(dim=1).mean()
         return loss, {"bc_loss": float(loss.detach().cpu())}
+
+    def _build_conditioning(
+        self, obs_dict: ObsDict
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        nobs = self.normalizer.normalize(obs_dict)
+        assert isinstance(nobs, dict)
+        if self.use_goal_encoder:
+            nobs["goal_rel"] = self._goal_rel(obs_dict)
+        if not self.use_pc_color:
+            nobs["point_cloud"] = nobs["point_cloud"][..., :3]
+
+        value = next(iter(nobs.values()))
+        batch_size = value.shape[0]
+        horizon = self.horizon
+        action_dim = self.action_dim
+        obs_steps = self.n_obs_steps
+        device = self.device
+        dtype = self.dtype
+
+        global_cond = None
+        if self.obs_as_global_cond:
+            this_nobs = dict_apply(
+                nobs,
+                lambda x: x[:, :obs_steps, ...].reshape(-1, *x.shape[2:]),
+            )
+            nobs_features = self.obs_encoder(this_nobs)
+            if "cross_attention" in self.condition_type:
+                global_cond = nobs_features.reshape(batch_size, obs_steps, -1)
+            else:
+                global_cond = nobs_features.reshape(batch_size, -1)
+            cond_data = torch.zeros(
+                size=(batch_size, horizon, action_dim),
+                device=device,
+                dtype=dtype,
+            )
+            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+        else:
+            this_nobs = dict_apply(nobs, lambda x: x[:, :horizon, ...].reshape(-1, *x.shape[2:]))
+            nobs_features = self.obs_encoder(this_nobs).reshape(batch_size, horizon, -1)
+            cond_data = torch.zeros(
+                size=(batch_size, horizon, action_dim + self.obs_feature_dim),
+                device=device,
+                dtype=dtype,
+            )
+            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+            cond_data[:, :obs_steps, action_dim:] = nobs_features[:, :obs_steps]
+            cond_mask[:, :obs_steps, action_dim:] = True
+        return cond_data, cond_mask, global_cond
 
     def _goal_rel(self, obs: ObsDict) -> torch.Tensor:
         if "goal_xyz" not in obs or "ee_position" not in obs:

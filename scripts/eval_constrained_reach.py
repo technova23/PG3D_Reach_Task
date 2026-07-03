@@ -76,6 +76,7 @@ from pg3d.utils.arrays import frame_to_numpy as _frame_to_numpy
 from pg3d.utils.devices import select_device
 from pg3d.utils.serialization import jsonable as _jsonable
 from pg3d.world_model import ActionChunk, GeometricWorldModel, ImaginedRollout
+from pg3d.world_model.panda_fk import panda_end_effector_position
 from pg3d.world_model.chunks import interpret_joint_chunk
 from pg3d.world_model.compositor import compose_robot_cloud, static_scene_from_robot_mask
 from scripts.compare_world_model_rollout import (
@@ -101,7 +102,7 @@ from scripts.rollout_dp3_reach_policy import (
     select_rollout_specs,
 )
 
-EvalMethod = Literal["base", "rejection", "reranking"]
+EvalMethod = Literal["base", "rejection", "reranking", "itps"]
 GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
 # Z range used to extrude the height-agnostic avoid_projection footprint for the
@@ -533,7 +534,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        choices=["base", "rejection", "reranking"],
+        choices=["base", "rejection", "reranking", "itps"],
         default=["base", "rejection", "reranking"],
     )
     parser.add_argument("--max-steps", type=int, default=80)
@@ -1133,6 +1134,20 @@ def _select_decision(
             candidate_total=0,
             selection_reason=None,
         )
+    if method == "itps":
+        return EvalDecisionSummary(
+            selected_chunk=_select_itps_chunk(
+                policy=adapter.policy,
+                obs_window=obs_window,
+                current_entry=current_entry,
+                constraints=constraints,
+                rng=rng,
+            ),
+            result=None,
+            candidate_feasible=0,
+            candidate_total=0,
+            selection_reason="itps",
+        )
     if world_model is None or provider is None:
         raise RuntimeError("controller methods require a world model and ghost provider")
     if match_current_robot_points:
@@ -1239,6 +1254,109 @@ def _select_multichunk(
         raise RuntimeError("policy returned no candidate action chunks")
     selected = min(candidates, key=lambda candidate: candidate.total_score)
     return _controller_result(selected, candidates, attempted, "least_bad_fallback")
+
+
+def _select_itps_chunk(
+    *,
+    policy: SimpleDP3,
+    obs_window: list[Entry],
+    current_entry: Entry,
+    constraints: list[AvoidRegion],
+    rng: np.random.Generator,
+) -> ActionChunk:
+    device = policy.device
+    obs_batch = _repeat_obs_window_to_torch(
+        obs_window,
+        k=1,
+        device=device,
+        goal_marker_points=int(getattr(policy, "goal_marker_points", 0)),
+        goal_marker_radius=float(getattr(policy, "goal_marker_radius", DEFAULT_GOAL_MARKER_RADIUS)),
+    )
+    obstacle = _itps_obstacle_from_constraints(
+        constraints,
+        current_entry=current_entry,
+        device=device,
+        dtype=policy.dtype,
+    )
+
+    def guidance_fn(traj: torch.Tensor) -> torch.Tensor:
+        q = traj[..., :7]
+        eef_path = panda_end_effector_position(q)
+        violations = _itps_clearance_violation(eef_path, obstacle)
+        return torch.amax(violations)
+
+    sample = policy.stochastic_sample_from_obs(
+        obs_batch,
+        generator=torch.Generator(device=device).manual_seed(int(rng.integers(0, 2**31 - 1))),
+        guidance_fn=guidance_fn,
+        guidance_scale=0.25,
+        guidance_steps=1,
+    )
+    action = policy.normalizer["action"].unnormalize(sample[..., : policy.action_dim])[0]
+    return ActionChunk(
+        actions=action.detach().cpu().numpy().astype(np.float32, copy=True),
+        action_mode=_action_mode("abs_joint"),
+        dt=1.0,
+        metadata={"method": "itps"},
+    )
+
+
+def _itps_obstacle_from_constraints(
+    constraints: list[AvoidRegion],
+    *,
+    current_entry: Entry,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, torch.Tensor | float | str]:
+    target = np.asarray(current_entry["target_position"], dtype=np.float32).reshape(3)
+    if not constraints:
+        return {
+            "kind": "sphere",
+            "center": torch.as_tensor(target, device=device, dtype=dtype),
+            "radius": 0.08,
+        }
+    region = getattr(constraints[0], "region", None)
+    if isinstance(region, RectRegion2D):
+        center = np.asarray(region.center, dtype=np.float32).reshape(2)
+        half_extents = np.asarray(region.half_extents, dtype=np.float32).reshape(2)
+        return {
+            "kind": "rect2d",
+            "center": torch.as_tensor(center, device=device, dtype=dtype),
+            "half_extents": torch.as_tensor(half_extents, device=device, dtype=dtype),
+        }
+    if hasattr(region, "center"):
+        center = np.asarray(region.center, dtype=np.float32).reshape(3)
+        radius = float(getattr(region, "radius", 0.08))
+        return {
+            "kind": "sphere",
+            "center": torch.as_tensor(center, device=device, dtype=dtype),
+            "radius": radius,
+        }
+    return {
+        "kind": "sphere",
+        "center": torch.as_tensor(target, device=device, dtype=dtype),
+        "radius": 0.08,
+    }
+
+
+def _itps_clearance_violation(
+    eef_path: torch.Tensor,
+    obstacle: dict[str, torch.Tensor | float | str],
+) -> torch.Tensor:
+    kind = obstacle["kind"]
+    if kind == "rect2d":
+        center = obstacle["center"]
+        half_extents = obstacle["half_extents"]
+        xy = eef_path[..., :2]
+        q = torch.abs(xy - center.view(1, 1, 2)) - half_extents.view(1, 1, 2)
+        outside = torch.linalg.norm(torch.clamp(q, min=0.0), dim=-1)
+        inside = torch.minimum(torch.amax(q, dim=-1), torch.zeros((), device=eef_path.device, dtype=eef_path.dtype))
+        signed_distance = outside + inside
+        return torch.clamp(-signed_distance, min=0.0)
+    center = obstacle["center"]
+    radius = float(obstacle["radius"])
+    distances = torch.linalg.norm(eef_path - center.view(1, 1, 3), dim=-1)
+    return torch.clamp(radius - distances, min=0.0)
 
 
 def _build_multichunk_candidates(
