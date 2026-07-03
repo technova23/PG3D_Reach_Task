@@ -24,6 +24,7 @@ from pg3d.composition import (
 )
 from pg3d.composition.scoring import (
     consensus_deviations,
+    directional_preference,
     goal_distance,
     primary_constraint_penalty,
     trajectory_smoothness,
@@ -391,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
                         robot_clearance_metric=args.robot_clearance_metric,
                         robot_clearance_stride=args.robot_clearance_stride,
                         zarr_context=zarr_context,
+                        directional_sign=_steer_sign(args.steer),
+                        directional_weight=args.steer_weight,
                     )
                     rows.append(row)
                     with timer.time("json_write", artifact="metrics"):
@@ -658,6 +661,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--steer",
+        choices=["none", "left", "right"],
+        default="none",
+        help=(
+            "Bias candidate selection toward paths that bow to one side of the "
+            "start-to-goal sightline (TCP-only, ground-plane XY). 'left'/'right' are "
+            "relative to facing from the path start toward the goal at each replan "
+            "step, not fixed world axes. Adds a soft term to total_score (weight "
+            "--steer-weight) that only breaks ties among already-feasible candidates; "
+            "it never overrides constraint satisfaction. Default 'none' disables the "
+            "term entirely -- no directional cost is computed when evaluating plain "
+            "avoid-region/projection constraints."
+        ),
+    )
+    parser.add_argument(
+        "--steer-weight",
+        type=float,
+        default=1.0,
+        help="Weight for --steer's directional cost term (meters, same scale as "
+        "goal_distance). Ignored when --steer none.",
+    )
+    parser.add_argument(
         "--robot-clearance-metric",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -845,6 +870,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def _steer_sign(steer: str) -> int:
+    """Map --steer's CLI choice to directional_preference's sign convention."""
+    return {"none": 0, "left": 1, "right": -1}[steer]
+
+
 def resolve_checkpoint_path(checkpoint: Path | None, checkpoint_dir: Path | None) -> Path:
     """Resolve an explicit checkpoint or the latest step-named checkpoint in a directory."""
     if checkpoint is not None:
@@ -887,6 +917,8 @@ def run_eval_episode(
     robot_clearance_metric: bool = False,
     robot_clearance_stride: int = 4,
     zarr_context: dict[str, Any] | None = None,
+    directional_sign: int = 0,
+    directional_weight: float = 1.0,
 ) -> dict[str, Any]:
     if zarr_context is not None:
         sim_obs, sim_info = _reset_to_zarr_episode(
@@ -968,6 +1000,8 @@ def run_eval_episode(
                 match_current_robot_points=match_current_robot_points,
                 rng=rng,
                 timer=timer,
+                directional_sign=directional_sign,
+                directional_weight=directional_weight,
             )
             replans += 1
             if decision.result is not None:
@@ -1124,6 +1158,8 @@ def _select_decision(
     match_current_robot_points: bool,
     rng: np.random.Generator,
     timer: TimingRecorder,
+    directional_sign: int = 0,
+    directional_weight: float = 1.0,
 ) -> EvalDecisionSummary:
     if method == "base":
         chunk = adapter.sample_action_chunks(obs_window, k=1, rng=rng)[0]
@@ -1168,6 +1204,8 @@ def _select_decision(
                 world_model=world_model,
                 constraints=constraints,
                 k_schedule=k_schedule,
+                score_weights=ScoreWeights(directional=directional_weight),
+                directional_sign=directional_sign,
             ).select(controller_input, rng=rng)
     else:
         result = _select_multichunk(
@@ -1186,6 +1224,8 @@ def _select_decision(
             k_schedule=k_schedule,
             rng=rng,
             timer=timer,
+            directional_sign=directional_sign,
+            directional_weight=directional_weight,
         )
     feasible = sum(1 for candidate in result.candidates if candidate.feasible)
     return EvalDecisionSummary(
@@ -1214,6 +1254,8 @@ def _select_multichunk(
     k_schedule: tuple[int, ...],
     rng: np.random.Generator,
     timer: TimingRecorder,
+    directional_sign: int = 0,
+    directional_weight: float = 1.0,
 ) -> ControllerResult:
     candidates: list[CandidateDiagnostics] = []
     attempted: list[int] = []
@@ -1241,6 +1283,8 @@ def _select_multichunk(
                 start_index=len(candidates),
                 rng=rng,
                 timer=timer,
+                directional_sign=directional_sign,
+                directional_weight=directional_weight,
             )
         candidates.extend(batch)
         feasible = [candidate for candidate in candidates if candidate.feasible]
@@ -1265,6 +1309,7 @@ def _select_itps_chunk(
     rng: np.random.Generator,
 ) -> ActionChunk:
     device = policy.device
+    policy.set_scheduler("ddpm", num_inference_steps=policy.num_inference_steps)
     obs_batch = _repeat_obs_window_to_torch(
         obs_window,
         k=1,
@@ -1290,7 +1335,7 @@ def _select_itps_chunk(
         generator=torch.Generator(device=device).manual_seed(int(rng.integers(0, 2**31 - 1))),
         guidance_fn=guidance_fn,
         guidance_scale=0.25,
-        guidance_steps=1,
+        guidance_steps=3,
     )
     action = policy.normalizer["action"].unnormalize(sample[..., : policy.action_dim])[0]
     return ActionChunk(
@@ -1376,6 +1421,8 @@ def _build_multichunk_candidates(
     start_index: int,
     rng: np.random.Generator,
     timer: TimingRecorder,
+    directional_sign: int = 0,
+    directional_weight: float = 1.0,
 ) -> list[CandidateDiagnostics]:
     first_chunks = adapter.sample_action_chunks(obs_window, k=attempted_k, rng=rng)
     branch_entries = [_copy_entry(current_entry) for _ in first_chunks]
@@ -1458,6 +1505,8 @@ def _build_multichunk_candidates(
             scene=scene,
             constraints=constraints,
             consensus_deviation=consensus[idx],
+            directional_sign=directional_sign,
+            directional_weight=directional_weight,
         )
         for idx, rollout in enumerate(branch_rollouts)
     ]
@@ -1472,6 +1521,8 @@ def _candidate_diagnostics(
     scene: Any,
     constraints: list[AvoidRegion],
     consensus_deviation: float,
+    directional_sign: int = 0,
+    directional_weight: float = 1.0,
 ) -> CandidateDiagnostics:
     constraint_costs: dict[str, float] = {}
     constraint_satisfied: dict[str, bool] = {}
@@ -1485,12 +1536,18 @@ def _candidate_diagnostics(
     distance = goal_distance(rollout, scene.target_position)
     smoothness = trajectory_smoothness(rollout, order=2)
     penalty = primary_constraint_penalty(constraint_costs)
+    directional = (
+        directional_preference(rollout, scene.target_position, sign=directional_sign)
+        if directional_sign != 0
+        else 0.0
+    )
     weights = ScoreWeights()
     total_score = (
         weights.constraint * penalty
         + weights.goal_distance * (0.0 if distance is None else distance)
         + weights.smoothness * smoothness
         + weights.consensus * consensus_deviation
+        + directional_weight * directional
     )
     return CandidateDiagnostics(
         index=index,
@@ -1506,6 +1563,7 @@ def _candidate_diagnostics(
         consensus_deviation=consensus_deviation,
         policy_surrogate=None,
         total_score=float(total_score),
+        directional=directional,
     )
 
 
@@ -1623,6 +1681,7 @@ def _write_decision(
                 "selected_goal_distance": result.selected.goal_distance,
                 "selected_constraint_penalty": result.selected.constraint_penalty,
                 "selected_smoothness": result.selected.smoothness,
+                "selected_directional": result.selected.directional,
                 "selected_constraint_costs": result.selected.constraint_costs,
                 "score_min": min(scores) if scores else None,
                 "score_mean": float(np.mean(scores)) if scores else None,

@@ -252,6 +252,8 @@ class SimpleDP3(BasePolicy):
         """
         if guidance_steps <= 0:
             raise ValueError("guidance_steps must be positive")
+        if guidance_scale < 0.0:
+            raise ValueError("guidance_scale must be non-negative")
         trajectory = torch.randn(
             size=condition_data.shape,
             dtype=condition_data.dtype,
@@ -260,18 +262,16 @@ class SimpleDP3(BasePolicy):
         )
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
         for timestep in self.noise_scheduler.timesteps:
-            trajectory[condition_mask] = condition_data[condition_mask]
-            if guidance_fn is not None and guidance_scale != 0.0:
-                guided = trajectory
-                for _ in range(guidance_steps):
+            for _ in range(guidance_steps):
+                trajectory[condition_mask] = condition_data[condition_mask]
+                if guidance_fn is not None and guidance_scale != 0.0:
                     with torch.enable_grad():
-                        guided = guided.detach().requires_grad_(True)
+                        guided = trajectory.detach().requires_grad_(True)
                         result = guidance_fn(guided)
                         if isinstance(result, tuple):
-                            loss, grad = result
+                            _loss, grad = result
                             if not torch.is_tensor(grad):
                                 grad = torch.as_tensor(grad, device=guided.device, dtype=guided.dtype)
-                            trajectory = (guided - float(guidance_scale) * grad).detach()
                         else:
                             loss = result
                             if not torch.is_tensor(loss):
@@ -279,17 +279,14 @@ class SimpleDP3(BasePolicy):
                             grad = torch.autograd.grad(
                                 loss, guided, retain_graph=False, create_graph=False
                             )[0]
-                            trajectory = (guided - float(guidance_scale) * grad).detach()
-                    trajectory[condition_mask] = condition_data[condition_mask]
-                model_input = trajectory
-            else:
-                model_input = trajectory
-            model_output = self.model(
-                sample=model_input,
-                timestep=timestep,
-                global_cond=global_cond,
-            )
-            trajectory = self.noise_scheduler.step(model_output, timestep, model_input).prev_sample
+                        trajectory = (guided - float(guidance_scale) * grad).detach()
+                trajectory[condition_mask] = condition_data[condition_mask]
+                model_output = self.model(
+                    sample=trajectory,
+                    timestep=timestep,
+                    global_cond=global_cond,
+                )
+                trajectory = self.noise_scheduler.step(model_output, timestep, trajectory).prev_sample
         trajectory[condition_mask] = condition_data[condition_mask]
         return trajectory
 
