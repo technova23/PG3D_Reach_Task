@@ -236,7 +236,10 @@ class SimpleDP3(BasePolicy):
         condition_mask: torch.Tensor,
         global_cond: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
-        guidance_fn: Callable[[torch.Tensor], torch.Tensor | float] | None = None,
+        guidance_fn: Callable[
+            [torch.Tensor], torch.Tensor | float | tuple[torch.Tensor | float, torch.Tensor]
+        ]
+        | None = None,
         guidance_scale: float = 0.0,
         guidance_steps: int = 1,
     ) -> torch.Tensor:
@@ -261,12 +264,21 @@ class SimpleDP3(BasePolicy):
             if guidance_fn is not None and guidance_scale != 0.0:
                 guided = trajectory
                 for _ in range(guidance_steps):
-                    guided = guided.detach().requires_grad_(True)
-                    loss = guidance_fn(guided)
-                    if not torch.is_tensor(loss):
-                        loss = torch.as_tensor(loss, device=guided.device, dtype=guided.dtype)
-                    grad = torch.autograd.grad(loss, guided, retain_graph=False, create_graph=False)[0]
-                    trajectory = (guided - float(guidance_scale) * grad).detach()
+                    result = guidance_fn(guided)
+                    if isinstance(result, tuple):
+                        loss, grad = result
+                        if not torch.is_tensor(grad):
+                            grad = torch.as_tensor(grad, device=guided.device, dtype=guided.dtype)
+                        trajectory = (guided - float(guidance_scale) * grad).detach()
+                    else:
+                        guided = guided.detach().requires_grad_(True)
+                        loss = result
+                        if not torch.is_tensor(loss):
+                            loss = torch.as_tensor(loss, device=guided.device, dtype=guided.dtype)
+                        grad = torch.autograd.grad(
+                            loss, guided, retain_graph=False, create_graph=False
+                        )[0]
+                        trajectory = (guided - float(guidance_scale) * grad).detach()
                     trajectory[condition_mask] = condition_data[condition_mask]
                 model_input = trajectory
             else:

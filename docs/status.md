@@ -22,13 +22,14 @@ Work for the inference-time policy steering baseline is now isolated on the
   gradient-based steering during reverse diffusion,
 - a dedicated `scripts/eval_itps_stochastic_reach.py` entrypoint for the
   stochastic-sampling baseline,
-- an initial action-space proxy guidance loss that keeps the baseline separate
-  from the main rejection/reranking path.
+- a differentiable Panda FK clearance loss that scores the full predicted EEF
+  path against an obstacle sphere, keeping the baseline separate from the main
+  rejection/reranking path.
 
-The first pass is intentionally conservative: it replicates the ITPS sampling
-shape at inference time, but the obstacle-avoidance guidance still uses an
-action-space proxy rather than a differentiable FK-based EEF cost. That is the
-next refinement if this baseline proves worth keeping.
+The current pass is the first geometrically meaningful steering baseline:
+it keeps the reverse-diffusion ITPS shape, but now the guidance signal comes
+from a differentiable Panda FK objective over the full action horizon rather
+than the earlier joint-space proxy.
 
 ## Current phase
 
