@@ -2664,7 +2664,7 @@ def _maybe_create_overlay_video_env(
 def _add_constraint_overlay_actors(
     env: Any,
     *,
-    constraints: list[AvoidRegion],
+    constraints: list[AvoidRegion | CartesianPoseConstraint],
     color: tuple[float, float, float],
     alpha: float,
 ) -> None:
@@ -2676,6 +2676,15 @@ def _add_constraint_overlay_actors(
     scene = unwrapped.scene
     rgba = [float(color[0]), float(color[1]), float(color[2]), float(alpha)]
     for constraint_idx, constraint in enumerate(constraints):
+        if isinstance(constraint, CartesianPoseConstraint):
+            _add_cartesian_pose_overlay_actors(
+                scene,
+                constraint=constraint,
+                actors=actors,
+                sapien=sapien,
+                alpha=alpha,
+            )
+            continue
         region = constraint.region
         name = f"pg3d_avoid_region_overlay_{constraint_idx}"
         if isinstance(region, SphereRegion):
@@ -2719,6 +2728,91 @@ def _add_constraint_overlay_actors(
     update_render = getattr(scene, "update_render", None)
     if callable(update_render):
         update_render()
+
+
+def _add_cartesian_pose_overlay_actors(
+    scene: Any,
+    *,
+    constraint: CartesianPoseConstraint,
+    actors: Any,
+    sapien: Any,
+    alpha: float,
+) -> None:
+    position = np.asarray(constraint.target_position, dtype=np.float32).reshape(3)
+    orientation = np.asarray(constraint.target_orientation, dtype=np.float32).reshape(-1)
+    rotation = _rotation_matrix_from_pose_orientation(orientation)
+    rgba_origin = [1.0, 1.0, 1.0, float(alpha)]
+    actors.build_sphere(
+        scene,
+        radius=0.01,
+        color=rgba_origin,
+        name=f"{constraint.name}_target_position",
+        body_type="kinematic",
+        add_collision=False,
+        initial_pose=sapien.Pose(p=position.tolist()),
+    )
+    axis_specs = [
+        ("x", (1.0, 0.3, 0.3, alpha)),
+        ("y", (0.3, 1.0, 0.3, alpha)),
+        ("z", (0.3, 0.5, 1.0, alpha)),
+    ]
+    for axis_idx, (label, rgba) in enumerate(axis_specs):
+        axis = rotation[:, axis_idx]
+        length = 0.04
+        center = position + axis * (0.5 * length)
+        quat = _quat_from_two_vectors(np.array([0.0, 0.0, 1.0], dtype=np.float32), axis)
+        actors.build_box(
+            scene,
+            half_sizes=[0.003, 0.003, 0.5 * length],
+            color=list(map(float, rgba)),
+            name=f"{constraint.name}_{label}_axis",
+            body_type="kinematic",
+            add_collision=False,
+            initial_pose=sapien.Pose(p=center.tolist(), q=quat.tolist()),
+        )
+
+
+def _rotation_matrix_from_pose_orientation(orientation: np.ndarray) -> np.ndarray:
+    q = np.asarray(orientation, dtype=np.float32).reshape(-1)
+    if q.shape == (4,):
+        return _quat_to_matrix(q)
+    if q.shape == (9,):
+        return q.reshape(3, 3)
+    raise ValueError(f"unsupported target_orientation shape: {q.shape}")
+
+
+def _quat_to_matrix(quat: np.ndarray) -> np.ndarray:
+    q = np.asarray(quat, dtype=np.float32).reshape(4)
+    norm = float(np.linalg.norm(q))
+    if norm <= 0.0 or not np.isfinite(norm):
+        raise ValueError("quaternion must be finite and non-zero")
+    w, x, y, z = q / norm
+    return np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _quat_from_two_vectors(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    a = np.asarray(u, dtype=np.float32)
+    b = np.asarray(v, dtype=np.float32)
+    a /= max(float(np.linalg.norm(a)), 1e-8)
+    b /= max(float(np.linalg.norm(b)), 1e-8)
+    dot = float(np.clip(np.dot(a, b), -1.0, 1.0))
+    if dot < -0.999999:
+        axis = np.cross(a, np.array([1.0, 0.0, 0.0], dtype=np.float32))
+        if float(np.linalg.norm(axis)) < 1e-6:
+            axis = np.cross(a, np.array([0.0, 1.0, 0.0], dtype=np.float32))
+        axis /= max(float(np.linalg.norm(axis)), 1e-8)
+        return np.asarray([0.0, axis[0], axis[1], axis[2]], dtype=np.float32)
+    cross = np.cross(a, b)
+    q = np.asarray([1.0 + dot, cross[0], cross[1], cross[2]], dtype=np.float32)
+    q /= max(float(np.linalg.norm(q)), 1e-8)
+    return q
 
 
 def _render_video_frame(sim_env: Any, video_env: Any | None) -> Any:

@@ -11,10 +11,10 @@ from typing import Any, Literal
 import numpy as np
 
 from pg3d.constraints import (
-    CartesianPoseConstraint,
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
+    CartesianPoseConstraint,
     CylinderPassageConstraint,
     SceneContext,
     SphereRegion,
@@ -312,7 +312,7 @@ def min_constraint_clearance(
         raise ValueError(f"tcp_positions must have shape [T, 3], got {path.shape}")
     clearances: list[float] = []
     for constraint in constraints:
-        if not hasattr(constraint, "region"):
+        if not isinstance(constraint, (AvoidRegion, AvoidProjection)):
             continue
         signed = constraint.region.signed_distance(path)
         clearances.append(float(np.min(signed - float(getattr(constraint, "margin", 0.0)))))
@@ -334,18 +334,25 @@ def _episode_path_satisfies_constraints(path: EpisodePath, constraints: list[Any
                 return False
             continue
         if isinstance(constraint, CartesianPoseConstraint):
-            if orientations is None or constraint.waypoint >= path.tcp_array.shape[0]:
+            if orientations is None or path.tcp_array.shape[0] == 0:
                 return False
-            pos_error = float(
-                np.linalg.norm(path.tcp_array[constraint.waypoint] - constraint.target_position)
+            pos_errors = np.linalg.norm(
+                path.tcp_array - constraint.target_position.reshape(1, 3), axis=1
             )
-            rot_error = _quaternion_distance(
-                orientations[constraint.waypoint],
-                constraint.target_orientation,
+            rot_errors = np.asarray(
+                [
+                    _quaternion_distance(orientation, constraint.target_orientation)
+                    for orientation in orientations
+                ],
+                dtype=np.float32,
             )
-            if pos_error > float(constraint.position_tolerance) + 1e-6:
-                return False
-            if rot_error > float(constraint.rotation_tolerance) + 1e-6:
+            satisfied = bool(
+                np.any(
+                    (pos_errors <= float(constraint.position_tolerance) + 1e-6)
+                    & (rot_errors <= float(constraint.rotation_tolerance) + 1e-6)
+                )
+            )
+            if not satisfied:
                 return False
             continue
         if isinstance(constraint, CylinderPassageConstraint):
@@ -389,6 +396,11 @@ def path_satisfies_constraints(
     """Return whether an executed TCP path stays outside all avoid regions."""
     if isinstance(tcp_positions, EpisodePath):
         return _episode_path_satisfies_constraints(tcp_positions, constraints)
+    if any(
+        isinstance(c, (CartesianPoseConstraint, CylinderPassageConstraint))
+        for c in constraints
+    ):
+        return False
     path = np.asarray(tcp_positions, dtype=np.float32)
     if path.size == 0:
         return True
@@ -398,21 +410,71 @@ def path_satisfies_constraints(
     if clearance is None:
         return True
     tolerance = max(
-        (float(getattr(constraint, "tolerance", 1e-6)) for constraint in constraints if hasattr(constraint, "region")),
+        (
+            float(getattr(constraint, "tolerance", 1e-6))
+            for constraint in constraints
+            if isinstance(constraint, (AvoidRegion, AvoidProjection))
+        ),
         default=1e-6,
     )
     return clearance >= -tolerance
 
 
 def _quaternion_distance(actual: Any, target: Any) -> float:
-    actual_q = np.asarray(actual, dtype=np.float32).reshape(-1)
-    target_q = np.asarray(target, dtype=np.float32).reshape(-1)
-    if actual_q.shape != (4,) or target_q.shape != (4,):
-        return 0.0
-    actual_q = actual_q / max(float(np.linalg.norm(actual_q)), 1e-8)
-    target_q = target_q / max(float(np.linalg.norm(target_q)), 1e-8)
-    dot = float(np.clip(np.abs(np.dot(actual_q, target_q)), -1.0, 1.0))
-    return float(2.0 * np.arccos(dot))
+    actual_orientation = np.asarray(actual, dtype=np.float32).reshape(-1)
+    target_orientation = np.asarray(target, dtype=np.float32).reshape(-1)
+    if actual_orientation.shape == (4,) and target_orientation.shape == (4,):
+        actual_q = _normalize_quaternion(actual_orientation)
+        target_q = _normalize_quaternion(target_orientation)
+        dot = float(np.clip(np.abs(np.dot(actual_q, target_q)), -1.0, 1.0))
+        return float(2.0 * np.arccos(dot))
+    if actual_orientation.shape == (4,):
+        actual_rotation = _quaternion_to_matrix(actual_orientation)
+    elif actual_orientation.shape == (9,):
+        actual_rotation = _normalize_rotation_matrix(actual_orientation.reshape(3, 3))
+    else:
+        raise ValueError(f"unsupported actual orientation shape {actual_orientation.shape}")
+    if target_orientation.shape == (4,):
+        target_rotation = _quaternion_to_matrix(target_orientation)
+    elif target_orientation.shape == (9,):
+        target_rotation = _normalize_rotation_matrix(target_orientation.reshape(3, 3))
+    else:
+        raise ValueError(f"unsupported target orientation shape {target_orientation.shape}")
+    delta = actual_rotation @ target_rotation.T
+    trace = float(np.trace(delta))
+    return float(np.arccos(np.clip((trace - 1.0) * 0.5, -1.0, 1.0)))
+
+
+def _normalize_quaternion(quaternion: Any) -> np.ndarray:
+    quat = np.asarray(quaternion, dtype=np.float32).reshape(4)
+    norm = float(np.linalg.norm(quat))
+    if norm <= 0.0 or not np.isfinite(norm):
+        raise ValueError("quaternion must be a non-zero finite vector")
+    return quat / norm
+
+
+def _normalize_rotation_matrix(matrix: Any) -> np.ndarray:
+    rotation = np.asarray(matrix, dtype=np.float32).reshape(3, 3)
+    if not np.all(np.isfinite(rotation)):
+        raise ValueError("rotation matrix must contain only finite values")
+    u, _, vh = np.linalg.svd(rotation)
+    rotation = u @ vh
+    if np.linalg.det(rotation) < 0.0:
+        u[:, -1] *= -1.0
+        rotation = u @ vh
+    return rotation.astype(np.float32, copy=False)
+
+
+def _quaternion_to_matrix(quaternion: Any) -> np.ndarray:
+    w, x, y, z = _normalize_quaternion(quaternion)
+    return np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float32,
+    )
 
 
 def q_trajectory_smoothness(q: Any, *, order: int = 2) -> float:
@@ -456,10 +518,21 @@ def episode_metric_row(
     distances = np.asarray(path.target_distances, dtype=np.float32)
     finite_distances = distances[np.isfinite(distances)]
     tcp_min_clearance = min_constraint_clearance(path.tcp_array, constraints)
-    tcp_satisfied = path_satisfies_constraints(path.tcp_array, constraints)
+    tcp_satisfied = path_satisfies_constraints(path, constraints)
     if robot_clearance_points is not None:
         min_clearance = min_constraint_clearance(robot_clearance_points, constraints)
-        constraint_satisfied = path_satisfies_constraints(robot_clearance_points, constraints)
+        robot_clearance_constraints = [
+            c for c in constraints if isinstance(c, (AvoidRegion, AvoidProjection))
+        ]
+        executed_pose_constraints = [
+            c
+            for c in constraints
+            if isinstance(c, (CartesianPoseConstraint, CylinderPassageConstraint))
+        ]
+        constraint_satisfied = path_satisfies_constraints(
+            robot_clearance_points,
+            robot_clearance_constraints,
+        ) and path_satisfies_constraints(path, executed_pose_constraints)
         constraint_target = "robot"
     else:
         min_clearance = tcp_min_clearance
@@ -638,7 +711,11 @@ def concatenate_rollouts(
         metadata=chunk_metadata,
         eef_orientations=(
             np.concatenate(
-                [rollout.eef_orientations for rollout in rollouts if rollout.eef_orientations is not None],
+                [
+                    rollout.eef_orientations
+                    for rollout in rollouts
+                    if rollout.eef_orientations is not None
+                ],
                 axis=0,
             )
             if all(rollout.eef_orientations is not None for rollout in rollouts)

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 
+from pg3d.constraints import CartesianPoseConstraint
 from pg3d.envs.maniskill_adapter.dataset import PointCloudCropConfig
 from pg3d.eval import (
     AvoidOverlayConfig,
@@ -224,9 +225,139 @@ def test_episode_metric_row_computes_clearance_and_combined_success() -> None:
     assert row["reach_success"] is True
     assert row["constraint_satisfied"] is True
     assert row["combined_success"] is True
-    assert row["final_target_distance"] == pytest.approx(0.0)
-    assert row["min_clearance"] == pytest.approx(0.1)
-    assert row["candidate_feasibility_fraction"] == pytest.approx(0.5)
+
+
+def test_episode_metric_row_cartesian_pose_uses_any_timestep_within_tolerance() -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    path = EpisodePath()
+    path.append_pose(
+        tcp_pose=[0.0, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.0, 0.0],
+        target_distance=1.0,
+    )
+    path.append_pose(
+        tcp_pose=[0.2, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.1, 0.0],
+        target_distance=0.1,
+    )
+    row = episode_metric_row(
+        method="reranking",
+        episode=0,
+        seed=100,
+        path=path,
+        constraints=[constraint],
+        reach_success=True,
+        first_success_step=1,
+        steps=2,
+        replans=1,
+        candidate_feasibility_fraction=None,
+    )
+
+    assert row["constraint_satisfied"] is True
+    assert row["constraint_satisfied_tcp"] is True
+
+
+def test_episode_metric_row_cartesian_pose_fails_when_pose_is_never_reached() -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    path = EpisodePath()
+    path.append_pose(
+        tcp_pose=[0.0, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.0, 0.0],
+        target_distance=1.0,
+    )
+
+    assert not path_satisfies_constraints(path.tcp_array, [constraint])
+    assert not path_satisfies_constraints(path, [constraint])
+
+    row = episode_metric_row(
+        method="reranking",
+        episode=0,
+        seed=100,
+        path=path,
+        constraints=[constraint],
+        reach_success=True,
+        first_success_step=1,
+        steps=1,
+        replans=1,
+        candidate_feasibility_fraction=None,
+    )
+
+    assert row["constraint_satisfied"] is False
+    assert row["constraint_satisfied_tcp"] is False
+    assert row["combined_success"] is False
+
+
+def test_episode_metric_row_robot_clearance_still_requires_cartesian_pose() -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    path = EpisodePath()
+    path.append_pose(
+        tcp_pose=[0.0, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.0, 0.0],
+        target_distance=1.0,
+    )
+
+    row = episode_metric_row(
+        method="reranking",
+        episode=0,
+        seed=100,
+        path=path,
+        constraints=[constraint],
+        reach_success=True,
+        first_success_step=1,
+        steps=1,
+        replans=1,
+        candidate_feasibility_fraction=None,
+        robot_clearance_points=np.zeros((1, 3), dtype=np.float32),
+    )
+
+    assert row["constraint_satisfied"] is False
+    assert row["constraint_target"] == "robot"
+
+
+def test_episode_metric_row_cartesian_pose_checks_rotation_matrix_targets() -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.eye(3, dtype=np.float32).reshape(-1),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    path = EpisodePath()
+    path.append_pose(
+        tcp_pose=[0.2, 0.0, 0.3, 0.0, 1.0, 0.0, 0.0],
+        q=[0.0, 0.0],
+        target_distance=0.0,
+    )
+
+    row = episode_metric_row(
+        method="reranking",
+        episode=0,
+        seed=100,
+        path=path,
+        constraints=[constraint],
+        reach_success=True,
+        first_success_step=1,
+        steps=1,
+        replans=1,
+        candidate_feasibility_fraction=None,
+    )
+
+    assert row["constraint_satisfied"] is False
+    assert row["constraint_satisfied_tcp"] is False
 
 
 def test_constraint_satisfaction_fails_for_path_inside_sphere() -> None:

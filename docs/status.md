@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-05-27
+Last updated: 2026-07-06
 
 ## Current objective
 
@@ -60,7 +60,9 @@ fixed dataset episode-index file, so nominal-path avoid regions can be built onc
 rollouts and reused across base/rejection/reranking comparisons.
 Cartesian pose constraint rollouts now keep the target pose visible in Rerun exports as a
 static position marker plus orientation triad, so you can inspect the intended EEF pose next to
-the executed rollout.
+the executed rollout. Executed-episode Cartesian pose metrics now evaluate the full recorded
+`EpisodePath` instead of dropping to position-only TCP arrays, so pose-only constraints no longer
+default to satisfied when the EEF never reaches the requested pose.
 P11 starts the base-reach reliability pass. DP3 reach policy inputs now reserve an ordered tail
 slice of the XYZ point cloud for deterministic goal tokens by default
 (`goal_marker_points=16`, `goal_marker_radius=0.015`), while keeping public policy keys limited to
