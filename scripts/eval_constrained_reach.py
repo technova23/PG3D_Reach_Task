@@ -333,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             for spec in specs:
                 zarr_context = (
-                    _zarr_episode_context(zarr_root, spec.dataset_episode_index)
+                    _zarr_episode_context_with_paths(zarr_root, spec.dataset_episode_index)
                     if zarr_root is not None and spec.dataset_episode_index is not None
                     else None
                 )
@@ -589,7 +589,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--constraint-type",
-        choices=["region", "projection"],
+        choices=["region", "projection", "cartesian_pose"],
         default="region",
         help=(
             "Constraint family to place. 'region' (default) is a 3-D keep-out volume "
@@ -597,9 +597,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "no-overflight analog: a 2-D tabletop rectangle that penalizes the XY "
             "projection of the EEF/robot for passing over it, regardless of height z. "
             "Projection placement reuses the candidate_midpath logic; pass "
-            "--constraint-placement candidate_midpath."
+            "--constraint-placement candidate_midpath. 'cartesian_pose' samples one "
+            "EEF pose from the selected dataset episode's saved /data/tcp_pose trajectory."
         ),
     )
+    parser.add_argument(
+        "--cartesian-pose-path-fraction",
+        type=float,
+        default=0.5,
+        help=(
+            "Arc-length fraction in the selected zarr episode's /data/tcp_pose path used "
+            "as the Cartesian pose target when --constraint-type cartesian_pose."
+        ),
+    )
+    parser.add_argument("--cartesian-pose-position-tolerance", type=float, default=0.02)
+    parser.add_argument("--cartesian-pose-rotation-tolerance", type=float, default=0.35)
+    parser.add_argument("--cartesian-pose-weight", type=float, default=1.0)
     parser.add_argument(
         "--projection-half-extents",
         type=float,
@@ -801,6 +814,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError(
             "--constraint-type projection requires --constraint-placement candidate_midpath"
         )
+    if args.constraint_type == "cartesian_pose" and args.constraints_dir is None:
+        if args.source != "dataset":
+            raise ValueError("--constraint-type cartesian_pose requires --source dataset")
+        if not 0.0 <= args.cartesian_pose_path_fraction <= 1.0:
+            raise ValueError("--cartesian-pose-path-fraction must be in [0, 1]")
+        if args.cartesian_pose_position_tolerance < 0.0:
+            raise ValueError("--cartesian-pose-position-tolerance must be non-negative")
+        if args.cartesian_pose_rotation_tolerance < 0.0:
+            raise ValueError("--cartesian-pose-rotation-tolerance must be non-negative")
+        if not math.isfinite(float(args.cartesian_pose_weight)):
+            raise ValueError("--cartesian-pose-weight must be finite")
     if args.avoid_box_half_extents is not None and any(
         h <= 0.0 for h in args.avoid_box_half_extents
     ):
@@ -869,7 +893,7 @@ def run_eval_episode(
     adapter: DP3ChunkPolicyAdapter,
     method: EvalMethod,
     spec: RolloutSpec,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     action_mode: ActionMode,
     crop_config: PointCloudCropConfig,
     goal_thresh: float,
@@ -1151,7 +1175,7 @@ def _select_decision(
     current_entry: Entry,
     obs_window: list[Entry],
     scene: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     crop_config: PointCloudCropConfig,
     goal_thresh: float,
     planning_horizon_chunks: int,
@@ -1228,7 +1252,7 @@ def _select_multichunk(
     current_entry: Entry,
     obs_window: list[Entry],
     scene: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     crop_config: PointCloudCropConfig,
     goal_thresh: float,
     planning_horizon_chunks: int,
@@ -1286,7 +1310,7 @@ def _build_multichunk_candidates(
     current_entry: Entry,
     obs_window: list[Entry],
     scene: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     crop_config: PointCloudCropConfig,
     goal_thresh: float,
     planning_horizon_chunks: int,
@@ -1389,7 +1413,7 @@ def _candidate_diagnostics(
     action_chunk: ActionChunk,
     rollout: ImaginedRollout,
     scene: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     consensus_deviation: float,
 ) -> CandidateDiagnostics:
     constraint_costs: dict[str, float] = {}
@@ -1825,20 +1849,102 @@ def _episode_start_robot_points(
     return _entry_robot_points(entry)
 
 
+def _zarr_episode_context_with_paths(zarr_root: Any, episode_index: int) -> dict[str, Any]:
+    """Return reset context plus full per-step arrays needed for dataset-derived constraints."""
+    context = _zarr_episode_context(zarr_root, episode_index)
+    episode_ends = np.asarray(zarr_root["meta"]["episode_ends"][:], dtype=np.int64)
+    episode_start = int(context["episode_start"])
+    episode_end = int(episode_ends[episode_index])
+    data = zarr_root["data"]
+    context["episode_end"] = episode_end
+    context["tcp_pose_path"] = np.asarray(
+        data["tcp_pose"][episode_start:episode_end],
+        dtype=np.float32,
+    ).copy()
+    return context
+
+
+def _tcp_pose_index_at_arc_fraction(tcp_poses: Any, *, fraction: float) -> int:
+    """Select an exact recorded TCP pose index nearest an arc-length fraction."""
+    poses = np.asarray(tcp_poses, dtype=np.float32)
+    if poses.ndim != 2 or poses.shape[1] < 7:
+        raise ValueError(f"tcp_poses must have shape [T, >=7], got {poses.shape}")
+    if poses.shape[0] == 0:
+        raise ValueError("tcp_poses must contain at least one pose")
+    fraction = float(np.clip(fraction, 0.0, 1.0))
+    if poses.shape[0] == 1:
+        return 0
+    positions = poses[:, :3]
+    segment_lengths = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+    total = float(np.sum(segment_lengths))
+    if total <= 1e-8:
+        return int(round(fraction * float(poses.shape[0] - 1)))
+    cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+    target = fraction * total
+    return int(np.argmin(np.abs(cumulative - target)))
+
+
+def _cartesian_pose_constraint_from_zarr_path(
+    *,
+    spec: RolloutSpec,
+    zarr_context: dict[str, Any] | None,
+    args: argparse.Namespace,
+) -> CartesianPoseConstraint:
+    if zarr_context is None:
+        raise ValueError("dataset-derived Cartesian pose constraints require zarr context")
+    tcp_poses = np.asarray(zarr_context.get("tcp_pose_path"), dtype=np.float32)
+    pose_index = _tcp_pose_index_at_arc_fraction(
+        tcp_poses,
+        fraction=float(args.cartesian_pose_path_fraction),
+    )
+    pose = tcp_poses[pose_index]
+    episode_start = int(zarr_context.get("episode_start", 0))
+    metadata = {
+        "source": "zarr_tcp_pose_path",
+        "dataset_episode_index": spec.dataset_episode_index,
+        "episode_output_index": spec.output_index,
+        "episode_seed": spec.seed,
+        "episode_start": episode_start,
+        "episode_end": zarr_context.get("episode_end"),
+        "local_frame_index": int(pose_index),
+        "global_frame_index": int(episode_start + pose_index),
+        "path_fraction": float(args.cartesian_pose_path_fraction),
+    }
+    return CartesianPoseConstraint(
+        target_position=pose[:3],
+        target_orientation=pose[3:7],
+        position_tolerance=float(args.cartesian_pose_position_tolerance),
+        rotation_tolerance=float(args.cartesian_pose_rotation_tolerance),
+        weight=float(args.cartesian_pose_weight),
+        name="cartesian_pose",
+        metadata=metadata,
+    )
+
+
 def _constraints_for_episode(
     env: Any,
     *,
     spec: RolloutSpec,
-    policy: SimpleDP3,
-    adapter: DP3ChunkPolicyAdapter,
-    action_mode: ActionMode,
     crop_config: PointCloudCropConfig,
-    goal_thresh: float,
     args: argparse.Namespace,
+    policy: SimpleDP3 | None = None,
+    adapter: DP3ChunkPolicyAdapter | None = None,
+    action_mode: ActionMode | None = None,
+    goal_thresh: float | None = None,
     zarr_context: dict[str, Any] | None = None,
-) -> list[AvoidRegion]:
+) -> list[Any]:
     if args.constraints_dir is not None:
         return load_episode_constraints(_precomputed_constraint_path(args.constraints_dir, spec))
+    if args.constraint_type == "cartesian_pose":
+        return [
+            _cartesian_pose_constraint_from_zarr_path(
+                spec=spec,
+                zarr_context=zarr_context,
+                args=args,
+            )
+        ]
+    if policy is None or adapter is None or action_mode is None or goal_thresh is None:
+        raise ValueError("generated avoid/projection constraints require policy rollout context")
     if args.constraint_placement == "candidate_midpath":
         constraints = _candidate_midpath_constraints(
             env,
@@ -2637,6 +2743,19 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
                 str(args.episode_indices_file) if args.episode_indices_file is not None else None
             ),
         }
+    if args.constraint_type == "cartesian_pose":
+        return {
+            "type": "dataset_cartesian_pose",
+            "constraint_type": "cartesian_pose",
+            "cartesian_pose_path_fraction": float(args.cartesian_pose_path_fraction),
+            "cartesian_pose_position_tolerance": float(
+                args.cartesian_pose_position_tolerance
+            ),
+            "cartesian_pose_rotation_tolerance": float(
+                args.cartesian_pose_rotation_tolerance
+            ),
+            "cartesian_pose_weight": float(args.cartesian_pose_weight),
+        }
     return {
         "type": str(args.constraint_placement),
         "constraint_type": str(args.constraint_type),
@@ -2809,7 +2928,7 @@ def _maybe_create_overlay_video_env(
     *,
     video_env_factory: Callable[[], Any] | None,
     spec: RolloutSpec,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     color: tuple[float, float, float],
     alpha: float,
 ) -> Any | None:

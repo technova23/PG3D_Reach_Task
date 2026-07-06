@@ -45,6 +45,7 @@ from scripts.eval_constrained_reach import (
     EvalDecisionSummary,
     _artifact_selection_summary,
     _build_multichunk_candidates,
+    _cartesian_pose_constraint_from_zarr_path,
     _constraint_source_summary,
     _constraints_for_episode,
     _effective_projection_half_extents,
@@ -53,6 +54,7 @@ from scripts.eval_constrained_reach import (
     _point_at_arc_fraction_xy,
     _read_episode_indices_file,
     _seed_torch,
+    _tcp_pose_index_at_arc_fraction,
     _write_decision,
     _write_step_trace,
 )
@@ -124,6 +126,125 @@ def test_projection_half_extents_floor_at_minimum() -> None:
     )
 
     np.testing.assert_allclose(half, np.asarray([0.03, 0.05], dtype=np.float32), atol=1e-6)
+
+
+def test_tcp_pose_index_at_arc_fraction_selects_recorded_pose_by_path_length() -> None:
+    tcp_poses = np.asarray(
+        [
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [1.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    assert _tcp_pose_index_at_arc_fraction(tcp_poses, fraction=0.0) == 0
+    assert _tcp_pose_index_at_arc_fraction(tcp_poses, fraction=0.5) == 1
+    assert _tcp_pose_index_at_arc_fraction(tcp_poses, fraction=0.9) == 2
+    assert _tcp_pose_index_at_arc_fraction(tcp_poses, fraction=1.0) == 2
+
+
+def test_dataset_cartesian_pose_constraint_uses_zarr_tcp_pose_frame(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "eval"),
+            "--source",
+            "dataset",
+            "--constraint-type",
+            "cartesian_pose",
+            "--cartesian-pose-path-fraction",
+            "0.5",
+            "--cartesian-pose-position-tolerance",
+            "0.03",
+            "--cartesian-pose-rotation-tolerance",
+            "0.4",
+        ]
+    )
+    tcp_poses = np.asarray(
+        [
+            [0.0, 0.0, 0.2, 1.0, 0.0, 0.0, 0.0],
+            [0.1, 0.0, 0.2, 0.0, 1.0, 0.0, 0.0],
+            [0.3, 0.0, 0.2, 0.0, 0.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    constraint = _cartesian_pose_constraint_from_zarr_path(
+        spec=RolloutSpec(
+            output_index=4,
+            seed=123,
+            source="dataset",
+            dataset_episode_index=9,
+        ),
+        zarr_context={
+            "episode_start": 100,
+            "episode_end": 103,
+            "tcp_pose_path": tcp_poses,
+        },
+        args=args,
+    )
+
+    assert isinstance(constraint, CartesianPoseConstraint)
+    np.testing.assert_allclose(constraint.target_position, [0.1, 0.0, 0.2])
+    np.testing.assert_allclose(constraint.target_orientation, [0.0, 1.0, 0.0, 0.0])
+    assert constraint.position_tolerance == pytest.approx(0.03)
+    assert constraint.rotation_tolerance == pytest.approx(0.4)
+    assert constraint.metadata["dataset_episode_index"] == 9
+    assert constraint.metadata["local_frame_index"] == 1
+    assert constraint.metadata["global_frame_index"] == 101
+
+    path = tmp_path / "episode_000.json"
+    save_episode_constraints(path, [constraint])
+    [loaded] = load_episode_constraints(path)
+    assert isinstance(loaded, CartesianPoseConstraint)
+    assert loaded.metadata["source"] == "zarr_tcp_pose_path"
+    assert loaded.metadata["global_frame_index"] == 101
+
+
+def test_eval_dataset_cartesian_pose_constraint_source_summary(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "eval"),
+            "--source",
+            "dataset",
+            "--constraint-type",
+            "cartesian_pose",
+            "--cartesian-pose-path-fraction",
+            "0.6",
+        ]
+    )
+
+    summary = _constraint_source_summary(args)
+
+    assert summary["type"] == "dataset_cartesian_pose"
+    assert summary["cartesian_pose_path_fraction"] == pytest.approx(0.6)
+
+
+def test_eval_dataset_cartesian_pose_requires_dataset_source(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="source dataset"):
+        parse_eval_args(
+            [
+                "--checkpoint",
+                str(tmp_path / "policy.pt"),
+                "--dataset",
+                str(tmp_path / "dataset.zarr"),
+                "--output-dir",
+                str(tmp_path / "eval"),
+                "--source",
+                "fresh",
+                "--constraint-type",
+                "cartesian_pose",
+            ]
+        )
 
 
 def test_direct_path_avoid_region_and_json_persistence(tmp_path: Path) -> None:

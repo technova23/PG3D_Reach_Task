@@ -682,6 +682,41 @@ uv run python scripts/eval_constrained_reach.py \
   --allow-failure
 ```
 
+Dataset-derived Cartesian pose waypoint comparison:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset "$VAL_DATASET" \
+  --checkpoint "$CKPT" \
+  --methods reranking \
+  --source dataset \
+  --episodes 10 \
+  --unique-dataset-seeds \
+  --device cuda \
+  --seed 0 \
+  --constraint-type cartesian_pose \
+  --cartesian-pose-path-fraction 0.5 \
+  --cartesian-pose-position-tolerance 0.02 \
+  --cartesian-pose-rotation-tolerance 0.35 \
+  --planning-horizon-chunks 2 \
+  --execution-horizon-chunks 1 \
+  --geometry-mode fast \
+  --k-schedule 32 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --constraint-overlay-video \
+  --output-dir "$EVAL_OUT" \
+  --allow-failure
+```
+
+With `--constraint-type cartesian_pose`, constrained eval samples the target EEF pose from the
+selected dataset episode's saved `/data/tcp_pose` path at the requested arc-length fraction. The
+generated `constraints/episode_XXX.json` stores the pose plus zarr provenance metadata including
+dataset episode index, local frame index, global frame index, and path fraction. This mode requires
+`--source dataset`; use the same generated constraints with `--constraints-dir` when comparing
+multiple horizon or method settings exactly.
+
 Balanced 20k nominal-path starter:
 
 ```bash

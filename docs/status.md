@@ -66,7 +66,10 @@ default to satisfied when the EEF never reaches the requested pose. Constrained 
 writes per-step `step_traces.jsonl` rows with executed TCP pose, policy/simulator action,
 task-goal distance, and Cartesian pose errors, plus richer `decisions.jsonl` selected-branch
 records with chosen action chunks, imagined EEF/q rollouts, and compact candidate summaries for
-world-model reproducibility checks.
+world-model reproducibility checks. Cartesian pose constraints can now also be generated directly
+from the selected dataset episode's saved `/data/tcp_pose` demonstration path at a configured
+arc-length fraction, so waypoint-pose experiments can use known demonstrated EEF poses instead of
+opaque precomputed targets.
 P11 starts the base-reach reliability pass. DP3 reach policy inputs now reserve an ordered tail
 slice of the XYZ point cloud for deterministic goal tokens by default
 (`goal_marker_points=16`, `goal_marker_radius=0.015`), while keeping public policy keys limited to

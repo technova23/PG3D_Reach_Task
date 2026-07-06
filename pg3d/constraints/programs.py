@@ -31,6 +31,7 @@ class CartesianPoseConstraint:
     weight: float = 1.0
     name: str = "cartesian_pose"
     constraint_type: str = "cartesian_pose"
+    metadata: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.target != "eef":
@@ -51,6 +52,7 @@ class CartesianPoseConstraint:
         _validate_nonnegative(self.position_tolerance, "position_tolerance")
         _validate_nonnegative(self.rotation_tolerance, "rotation_tolerance")
         _validate_finite(self.weight, "weight")
+        object.__setattr__(self, "metadata", dict(self.metadata or {}))
 
     def cost(self, rollout: ImaginedRollout, scene: SceneContext | None = None) -> dict[str, float]:
         positions = np.asarray(rollout.eef_path, dtype=np.float32)
@@ -76,8 +78,14 @@ class CartesianPoseConstraint:
             self.name: float(self.weight) * best_total,
             f"{self.name}/position_error": best_pos_error,
             f"{self.name}/rotation_error": best_rot_error,
-            f"{self.name}/position_violation": max(best_pos_error - float(self.position_tolerance), 0.0),
-            f"{self.name}/rotation_violation": max(best_rot_error - float(self.rotation_tolerance), 0.0),
+            f"{self.name}/position_violation": max(
+                best_pos_error - float(self.position_tolerance),
+                0.0,
+            ),
+            f"{self.name}/rotation_violation": max(
+                best_rot_error - float(self.rotation_tolerance),
+                0.0,
+            ),
             f"{self.name}/best_index": float(best_idx),
         }
 
@@ -99,7 +107,7 @@ class CartesianPoseConstraint:
         )
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        payload = {
             "type": self.constraint_type,
             "target": self.target,
             "target_position": self.target_position.tolist(),
@@ -109,6 +117,9 @@ class CartesianPoseConstraint:
             "weight": self.weight,
             "name": self.name,
         }
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -331,10 +342,19 @@ class CylinderPassageConstraint:
         signed_distance = self.region.signed_distance(segment)
         axial = self.region.project_axial(segment).reshape(-1)
         axial_span = float(np.max(axial) - np.min(axial)) if axial.size else 0.0
-        max_radial_violation = float(np.max(np.maximum(signed_distance, 0.0))) if signed_distance.size else 0.0
+        max_radial_violation = (
+            float(np.max(np.maximum(signed_distance, 0.0)))
+            if signed_distance.size
+            else 0.0
+        )
         passage_violation = max(float(self.region.length) - axial_span, 0.0)
         pose_rotation_error = float(
-            np.max(_rotation_distance_series(rollout.eef_orientations[start : end + 1], self.target_orientation))
+            np.max(
+                _rotation_distance_series(
+                    rollout.eef_orientations[start : end + 1],
+                    self.target_orientation,
+                )
+            )
         ) if segment.size else 0.0
         pose_rotation_violation = max(pose_rotation_error - float(self.rotation_tolerance), 0.0)
         total = float(self.weight) * (passage_violation + pose_rotation_violation)
@@ -456,6 +476,7 @@ def constraint_from_json(
             target=config.get("target", "eef"),
             weight=float(config.get("weight", 1.0)),
             name=str(config.get("name", "cartesian_pose")),
+            metadata=dict(config.get("metadata", {})),
         )
     if constraint_type == "cylinder_passage":
         return CylinderPassageConstraint(
@@ -487,7 +508,11 @@ def constraints_to_json(
 def constraints_from_json(
     configs: list[dict[str, Any]],
 ) -> list[
-    AvoidRegion | AvoidProjection | SmoothnessCost | CartesianPoseConstraint | CylinderPassageConstraint
+    AvoidRegion
+    | AvoidProjection
+    | SmoothnessCost
+    | CartesianPoseConstraint
+    | CylinderPassageConstraint
 ]:
     """Deserialize a list of constraints."""
     return [constraint_from_json(config) for config in configs]
@@ -549,7 +574,16 @@ def _rotation_distance_series(orientations: Array | None, target_orientation: Ar
         target_q = _normalize_quaternion(target_orientation.reshape(4))
         return np.asarray(
             [
-                float(2.0 * np.arccos(np.clip(np.abs(np.dot(_normalize_quaternion(actual), target_q)), -1.0, 1.0)))
+                float(
+                    2.0
+                    * np.arccos(
+                        np.clip(
+                            np.abs(np.dot(_normalize_quaternion(actual), target_q)),
+                            -1.0,
+                            1.0,
+                        )
+                    )
+                )
                 for actual in orientations
             ],
             dtype=np.float32,
