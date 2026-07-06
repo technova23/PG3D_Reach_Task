@@ -947,6 +947,8 @@ def run_eval_episode(
     _append_path(path, sim_entry)
     timeline = [sim_entry.copy()]
     frames = []
+    raw_action_log = output_dir / "debug" / method / f"episode_{spec.output_index:03d}_actions.jsonl"
+    raw_action_log.parent.mkdir(parents=True, exist_ok=True)
     if video:
         video_env = _maybe_create_overlay_video_env(
             video_env_factory=video_env_factory,
@@ -1032,7 +1034,10 @@ def run_eval_episode(
                     f"execution_horizon_chunks={execution_horizon_chunks} "
                     f"steps_to_execute={steps_to_execute}",
                     flush=True,
-                )
+            )
+            raw_chunk = np.asarray(decision.selected_chunk.actions, dtype=np.float32)
+            executed_actions: list[np.ndarray] = []
+            action_tcp_poses: list[np.ndarray] = [np.asarray(sim_entry["tcp_pose"], dtype=np.float32).copy()]
             for policy_action in decision.selected_chunk.actions[:steps_to_execute]:
                 sim_action = policy_action_to_sim_action(
                     policy_action,
@@ -1043,6 +1048,7 @@ def run_eval_episode(
                     high=getattr(sim_env.action_space, "high", None),
                     gripper_open=gripper_open,
                 )
+                executed_actions.append(np.asarray(sim_action, dtype=np.float32).copy())
                 with timer.time("sim_step", method=method):
                     sim_obs, _reward, terminated, truncated, sim_info = sim_env.step(sim_action)
                 steps += 1
@@ -1053,6 +1059,7 @@ def run_eval_episode(
                         env=sim_env,
                         crop_config=crop_config,
                     )
+                action_tcp_poses.append(np.asarray(sim_entry["tcp_pose"], dtype=np.float32).copy())
                 obs_window = append_obs_window(
                     obs_window,
                     sim_entry,
@@ -1087,6 +1094,28 @@ def run_eval_episode(
                     and observed_post_success_steps >= post_success_steps
                 ):
                     break
+            with raw_action_log.open("a", encoding="utf-8") as action_file:
+                action_file.write(
+                    json.dumps(
+                        _jsonable(
+                            {
+                                "episode": spec.output_index,
+                                "seed": spec.seed,
+                                "method": method,
+                                "replan_index": replans - 1,
+                                "step": steps,
+                                "selected_chunk_shape": list(raw_chunk.shape),
+                                "selected_chunk": raw_chunk,
+                                "executed_steps": int(steps_to_execute),
+                                "executed_actions": executed_actions,
+                                "tcp_poses": action_tcp_poses,
+                                "selected_chunk_metadata": decision.selected_chunk.metadata,
+                            }
+                        ),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
             if terminated_or_truncated:
                 break
     finally:

@@ -24,7 +24,10 @@ Work for the inference-time policy steering baseline is now isolated on the
   stochastic-sampling baseline,
 - a differentiable Panda FK clearance loss that scores the full predicted EEF
   path against an obstacle sphere, keeping the baseline separate from the main
-  rejection/reranking path.
+  rejection/reranking path,
+- per-replan JSONL logging of the raw diffusion action chunk and the executed
+  simulator action in constrained-eval runs, so first-chunk versus later-chunk
+  behavior can be inspected directly.
 
 The current pass is the first geometrically meaningful steering baseline:
 it keeps the reverse-diffusion ITPS shape, but now the guidance signal comes
