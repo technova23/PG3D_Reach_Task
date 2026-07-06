@@ -11,9 +11,11 @@ from typing import Any, Literal
 import numpy as np
 
 from pg3d.constraints import (
+    CartesianPoseConstraint,
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
+    CylinderPassageConstraint,
     SceneContext,
     SphereRegion,
     constraints_from_json,
@@ -65,6 +67,7 @@ class EpisodePath:
     """Executed simulator path used for constrained-reach metrics."""
 
     tcp_positions: list[np.ndarray] = field(default_factory=list)
+    tcp_orientations: list[np.ndarray] = field(default_factory=list)
     q: list[np.ndarray] = field(default_factory=list)
     target_distances: list[float] = field(default_factory=list)
 
@@ -78,6 +81,13 @@ class EpisodePath:
         self.tcp_positions.append(tcp)
         self.q.append(qpos)
         self.target_distances.append(float(target_distance))
+
+    def append_pose(self, *, tcp_pose: Any, q: Any, target_distance: float) -> None:
+        pose = np.asarray(tcp_pose, dtype=np.float32).reshape(-1)
+        if pose.shape[0] < 7:
+            raise ValueError("tcp_pose must contain position and orientation")
+        self.tcp_orientations.append(pose[3:7].astype(np.float32, copy=True))
+        self.append(tcp_position=pose[:3], q=q, target_distance=target_distance)
 
     @property
     def tcp_array(self) -> np.ndarray:
@@ -242,7 +252,7 @@ def nominal_path_avoid_region(
     )
 
 
-def save_episode_constraints(path: Path, constraints: list[AvoidRegion]) -> None:
+def save_episode_constraints(path: Path, constraints: list[Any]) -> None:
     """Persist one episode's constraint instances for repeatable evaluation."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -251,18 +261,21 @@ def save_episode_constraints(path: Path, constraints: list[AvoidRegion]) -> None
     )
 
 
-def load_episode_constraints(path: Path) -> list[AvoidRegion]:
-    """Load one episode's avoid-region constraints from JSON."""
+def load_episode_constraints(path: Path) -> list[Any]:
+    """Load one episode's constraints from JSON."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, list):
         raise ValueError(f"constraints file must contain a list: {path}")
     constraints = constraints_from_json(payload)
-    avoid_regions: list[AvoidRegion] = []
+    avoid_regions: list[Any] = []
     for idx, constraint in enumerate(constraints):
-        if not isinstance(constraint, (AvoidRegion, AvoidProjection)):
+        if not isinstance(
+            constraint,
+            (AvoidRegion, AvoidProjection, CartesianPoseConstraint, CylinderPassageConstraint),
+        ):
             raise ValueError(
-                f"only AvoidRegion/AvoidProjection constraints are supported for "
-                f"constrained reach; {path} item {idx} is {type(constraint).__name__}"
+                f"unsupported constraint type for constrained reach; "
+                f"{path} item {idx} is {type(constraint).__name__}"
             )
         avoid_regions.append(constraint)
     return avoid_regions
@@ -271,14 +284,14 @@ def load_episode_constraints(path: Path) -> list[AvoidRegion]:
 def scene_context_for_constraints(
     *,
     target_position: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     metadata: dict[str, Any] | None = None,
 ) -> SceneContext:
     """Build the scene context passed to composition controllers."""
     regions = {
         constraint.name: constraint.region
         for constraint in constraints
-        if isinstance(constraint, (AvoidRegion, AvoidProjection))
+        if hasattr(constraint, "region")
     }
     return SceneContext(
         target_position=np.asarray(target_position, dtype=np.float32),
@@ -289,7 +302,7 @@ def scene_context_for_constraints(
 
 def min_constraint_clearance(
     tcp_positions: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
 ) -> float | None:
     """Return minimum signed clearance to all avoid regions, after margins."""
     path = np.asarray(tcp_positions, dtype=np.float32)
@@ -299,21 +312,107 @@ def min_constraint_clearance(
         raise ValueError(f"tcp_positions must have shape [T, 3], got {path.shape}")
     clearances: list[float] = []
     for constraint in constraints:
+        if not hasattr(constraint, "region"):
+            continue
         signed = constraint.region.signed_distance(path)
-        clearances.append(float(np.min(signed - float(constraint.margin))))
+        clearances.append(float(np.min(signed - float(getattr(constraint, "margin", 0.0)))))
     return min(clearances) if clearances else None
+
+
+def _episode_path_satisfies_constraints(path: EpisodePath, constraints: list[Any]) -> bool:
+    orientations = (
+        np.stack(path.tcp_orientations, axis=0).astype(np.float32, copy=False)
+        if path.tcp_orientations
+        else None
+    )
+    for constraint in constraints:
+        if isinstance(constraint, (AvoidRegion, AvoidProjection)):
+            signed = constraint.region.signed_distance(path.tcp_array)
+            if float(
+                np.max(np.maximum(float(getattr(constraint, "margin", 0.0)) - signed, 0.0))
+            ) > float(getattr(constraint, "tolerance", 1e-6)):
+                return False
+            continue
+        if isinstance(constraint, CartesianPoseConstraint):
+            if orientations is None or constraint.waypoint >= path.tcp_array.shape[0]:
+                return False
+            pos_error = float(
+                np.linalg.norm(path.tcp_array[constraint.waypoint] - constraint.target_position)
+            )
+            rot_error = _quaternion_distance(
+                orientations[constraint.waypoint],
+                constraint.target_orientation,
+            )
+            if pos_error > float(constraint.position_tolerance) + 1e-6:
+                return False
+            if rot_error > float(constraint.rotation_tolerance) + 1e-6:
+                return False
+            continue
+        if isinstance(constraint, CylinderPassageConstraint):
+            if orientations is None:
+                return False
+            start = constraint.waypoint_start
+            end = constraint.waypoint_end
+            if end >= path.tcp_array.shape[0]:
+                return False
+            segment = path.tcp_array[start : end + 1]
+            signed_distance = constraint.region.signed_distance(segment)
+            axial = constraint.region.project_axial(segment).reshape(-1)
+            axial_span = float(np.max(axial) - np.min(axial)) if axial.size else 0.0
+            passage_violation = max(float(constraint.region.length) - axial_span, 0.0)
+            pose_rotation_error = max(
+                _quaternion_distance(orientations[idx], constraint.target_orientation)
+                for idx in range(start, end + 1)
+            )
+            if passage_violation > 1e-6:
+                return False
+            if pose_rotation_error > float(constraint.rotation_tolerance) + 1e-6:
+                return False
+            if (
+                float(np.max(np.maximum(signed_distance, 0.0)))
+                > float(constraint.position_tolerance) + 1e-6
+            ):
+                return False
+            continue
+        if hasattr(constraint, "region"):
+            signed = constraint.region.signed_distance(path.tcp_array)
+            clearance = float(np.min(signed - float(getattr(constraint, "margin", 0.0))))
+            if clearance < -float(getattr(constraint, "tolerance", 1e-6)):
+                return False
+    return True
 
 
 def path_satisfies_constraints(
     tcp_positions: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
 ) -> bool:
     """Return whether an executed TCP path stays outside all avoid regions."""
-    clearance = min_constraint_clearance(tcp_positions, constraints)
+    if isinstance(tcp_positions, EpisodePath):
+        return _episode_path_satisfies_constraints(tcp_positions, constraints)
+    path = np.asarray(tcp_positions, dtype=np.float32)
+    if path.size == 0:
+        return True
+    if path.ndim != 2 or path.shape[1] != 3:
+        raise ValueError(f"tcp_positions must have shape [T, 3], got {path.shape}")
+    clearance = min_constraint_clearance(path, constraints)
     if clearance is None:
         return True
-    tolerance = max((float(constraint.tolerance) for constraint in constraints), default=1e-6)
+    tolerance = max(
+        (float(getattr(constraint, "tolerance", 1e-6)) for constraint in constraints if hasattr(constraint, "region")),
+        default=1e-6,
+    )
     return clearance >= -tolerance
+
+
+def _quaternion_distance(actual: Any, target: Any) -> float:
+    actual_q = np.asarray(actual, dtype=np.float32).reshape(-1)
+    target_q = np.asarray(target, dtype=np.float32).reshape(-1)
+    if actual_q.shape != (4,) or target_q.shape != (4,):
+        return 0.0
+    actual_q = actual_q / max(float(np.linalg.norm(actual_q)), 1e-8)
+    target_q = target_q / max(float(np.linalg.norm(target_q)), 1e-8)
+    dot = float(np.clip(np.abs(np.dot(actual_q, target_q)), -1.0, 1.0))
+    return float(2.0 * np.arccos(dot))
 
 
 def q_trajectory_smoothness(q: Any, *, order: int = 2) -> float:
@@ -336,7 +435,7 @@ def episode_metric_row(
     episode: int,
     seed: int,
     path: EpisodePath,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     reach_success: bool,
     first_success_step: int | None,
     steps: int,
@@ -537,6 +636,14 @@ def concatenate_rollouts(
         robot_masks=[mask for rollout in rollouts for mask in rollout.robot_masks],
         action_chunk=action_chunk,
         metadata=chunk_metadata,
+        eef_orientations=(
+            np.concatenate(
+                [rollout.eef_orientations for rollout in rollouts if rollout.eef_orientations is not None],
+                axis=0,
+            )
+            if all(rollout.eef_orientations is not None for rollout in rollouts)
+            else None
+        ),
     )
 
 

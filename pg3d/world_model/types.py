@@ -81,6 +81,7 @@ class ImaginedRollout:
     robot_masks: list[Array]
     action_chunk: ActionChunk
     metadata: dict[str, Any] = field(default_factory=dict)
+    eef_orientations: Array | None = None
 
     def __post_init__(self) -> None:
         self.q = as_float_array(self.q, name="q", ndim=2)
@@ -90,6 +91,16 @@ class ImaginedRollout:
                 f"eef_path must have shape {(self.q.shape[0], 3)}, "
                 f"got {self.eef_path.shape}"
             )
+        if self.eef_orientations is not None:
+            self.eef_orientations = as_float_array(
+                self.eef_orientations, name="eef_orientations", ndim=2
+            )
+            if self.eef_orientations.shape[0] != self.q.shape[0]:
+                raise ValueError(
+                    "eef_orientations must have the same horizon as q when provided"
+                )
+            if self.eef_orientations.shape[1] not in (4, 9):
+                raise ValueError("eef_orientations must have shape [T, 4] or [T, 9]")
 
         horizon = int(self.q.shape[0])
         if self.action_chunk.horizon != horizon:

@@ -553,10 +553,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "re-time multi-segment planned trajectories to constant joint-space speed "
-            "(arc-length reparameterization) so the end-effector does not decelerate at each "
-            "intermediate waypoint seam; terminal deceleration into the goal is preserved. "
-            "Pass --no-smooth-trajectory to disable for ablation."
+            "re-time multi-segment planned trajectories with a single minimum-jerk (quintic) "
+            "time-law over the whole concatenated arc length, replacing mplib's native "
+            "per-segment trapezoidal timing. Removes both the deceleration-at-every-waypoint-"
+            "seam problem and the jerk (acceleration discontinuity) at launch/goal, since "
+            "velocity and acceleration are exactly zero at both endpoints and there are no "
+            "hard corners at intermediate waypoints. Pass --no-smooth-trajectory to disable "
+            "for ablation (raw mplib per-segment trapezoidal timing)."
         ),
     )
     parser.add_argument(
@@ -1902,20 +1905,36 @@ def _is_waypoint_valid(
     return horizontal_clearance >= min_base_clearance
 
 
-def _retime_trajectory_constant_speed(
+def _retime_trajectory_minimum_jerk(
     positions: np.ndarray,
     *,
-    taper_fraction: float = 0.18,
+    joint_vel_limits: np.ndarray | None = None,
+    control_timestep: float | None = None,
+    max_stretch_iters: int = 5,
 ) -> np.ndarray:
-    """Resample a joint-space path at constant arc-length spacing.
+    """Resample a joint-space path along one minimum-jerk (quintic) time-law.
 
-    The multi-segment planner stops (zero joint velocity) at every intermediate waypoint, so the
-    concatenated ``positions`` cluster near segment seams and the replayed end-effector
-    decelerates there. Reparameterizing by cumulative joint-space arc length and resampling at
-    uniform spacing removes those seam pinches (constant joint speed through the detour).
+    mplib's ``plan_screw`` times each segment with an accel-limited (trapezoidal)
+    profile: velocity ramps at a constant +/-accel between waypoints but the
+    *acceleration itself* is a step function (0 -> accel_limit instantly at the
+    start of every segment, including the very first one, leaving the robot's
+    rest state). That instantaneous jump in acceleration is jerk by definition,
+    and it is most visible at the very first step of an episode because that is
+    the only moment the arm goes from truly static to moving.
 
-    The final ``taper_fraction`` of the path is blended back toward the original (decelerating)
-    timing so the arm still settles into the goal instead of slamming it at full speed.
+    This replaces that per-segment trapezoidal timing with a single minimum-jerk
+    quintic ``s(tau) = 10*tau^3 - 15*tau^4 + 6*tau^5`` (Hogan/Flash minimum-jerk
+    law) applied once over the *whole* concatenated arc length, tau in [0, 1].
+    Unlike the old constant-speed-plus-tail-taper retiming, this has zero
+    velocity AND zero acceleration at both endpoints by construction -- no
+    special-casing needed for launch vs. goal-approach -- and it has no hard
+    corners at intermediate waypoints either, since the time-law depends only on
+    total arc length, not on segment boundaries.
+
+    A minimum-jerk profile's peak speed (1.875x its average speed) is higher
+    than a trapezoid's cruise speed covering the same distance in the same
+    time, so when ``joint_vel_limits`` is given the row count (total duration)
+    is stretched until every joint's peak speed is back within its limit.
     """
     positions = np.asarray(positions, dtype=np.float32)
     n = int(positions.shape[0])
@@ -1927,18 +1946,29 @@ def _retime_trajectory_constant_speed(
     total = float(arc[-1])
     if total < 1e-8:
         return positions
-    uniform_s = np.linspace(0.0, total, n)
-    retimed = np.empty_like(positions)
-    for dim in range(positions.shape[1]):
-        retimed[:, dim] = np.interp(uniform_s, arc, positions[:, dim])
-    taper = float(np.clip(taper_fraction, 0.0, 0.9))
-    if taper > 0.0:
-        tail = max(1, int(round(n * taper)))
-        weights = np.linspace(0.0, 1.0, tail, dtype=np.float32)
-        for k in range(tail):
-            i = n - tail + k
-            w = float(weights[k])
-            retimed[i] = (1.0 - w) * retimed[i] + w * positions[i]
+
+    def _resample(num_steps: int) -> np.ndarray:
+        tau = np.linspace(0.0, 1.0, num_steps)
+        s_of_tau = (10.0 * tau**3 - 15.0 * tau**4 + 6.0 * tau**5) * total
+        out = np.empty((num_steps, positions.shape[1]), dtype=np.float32)
+        for dim in range(positions.shape[1]):
+            out[:, dim] = np.interp(s_of_tau, arc, positions[:, dim])
+        return out
+
+    retimed = _resample(n)
+    limits = None
+    if joint_vel_limits is not None and control_timestep:
+        candidate = np.asarray(joint_vel_limits, dtype=np.float64).reshape(-1)
+        if candidate.shape[0] == positions.shape[1]:
+            limits = candidate
+    if limits is not None:
+        for _ in range(max_stretch_iters):
+            joint_vel = np.diff(retimed, axis=0) / control_timestep
+            peak_ratio = float(np.max(np.abs(joint_vel) / limits[None, :]))
+            if peak_ratio <= 1.0:
+                break
+            n = int(np.ceil(n * peak_ratio * 1.02))  # small safety margin
+            retimed = _resample(n)
     return retimed.astype(np.float32)
 
 
@@ -1977,7 +2007,11 @@ def _plan_multisegment_trajectory(
         return None
     positions = np.concatenate(segments, axis=0).astype(np.float32)
     if smooth_trajectory and len(segments) > 1:
-        positions = _retime_trajectory_constant_speed(positions)
+        positions = _retime_trajectory_minimum_jerk(
+            positions,
+            joint_vel_limits=getattr(planner, "joint_vel_limits", None),
+            control_timestep=float(env.unwrapped.control_timestep),
+        )
     return positions, "+".join(statuses)
 
 

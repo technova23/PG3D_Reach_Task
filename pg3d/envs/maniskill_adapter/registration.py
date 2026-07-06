@@ -9,5 +9,6 @@ def register_pg3d_reach_envs() -> None:
     if _REGISTERED_REACH_ENVS:
         return
     import pg3d.envs.maniskill_adapter.reach_env  # noqa: F401
+    import pg3d.envs.xarm_adapter.reach_env  # noqa: F401
 
     _REGISTERED_REACH_ENVS = True

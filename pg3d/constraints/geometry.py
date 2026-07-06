@@ -7,7 +7,7 @@ import numpy as np
 
 from pg3d.world_model.types import Array, as_float_array
 
-RegionType = Literal["sphere", "box", "rect2d"]
+RegionType = Literal["sphere", "box", "rect2d", "cylinder"]
 
 
 class Region(Protocol):
@@ -82,6 +82,67 @@ class BoxRegion:
 
 
 @dataclass(frozen=True)
+class CylinderRegion:
+    """Finite cylinder keep-out or passage region."""
+
+    center: Array
+    axis: Array
+    radius: float
+    length: float
+    region_type: RegionType = "cylinder"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "center", _vector3(self.center, name="center"))
+        axis = _vector3(self.axis, name="axis")
+        axis_norm = float(np.linalg.norm(axis))
+        if axis_norm <= 0.0 or not np.isfinite(axis_norm):
+            raise ValueError("axis must be a non-zero finite vector")
+        object.__setattr__(self, "axis", axis / axis_norm)
+        radius = float(self.radius)
+        if radius <= 0.0 or not np.isfinite(radius):
+            raise ValueError("radius must be a positive finite value")
+        object.__setattr__(self, "radius", radius)
+        length = float(self.length)
+        if length <= 0.0 or not np.isfinite(length):
+            raise ValueError("length must be a positive finite value")
+        object.__setattr__(self, "length", length)
+
+    @property
+    def half_length(self) -> float:
+        return float(self.length) * 0.5
+
+    def signed_distance(self, points: Array) -> Array:
+        points = _points(points)
+        rel = points - self.center.reshape(1, 3)
+        axial = rel @ self.axis.reshape(3, 1)
+        radial = rel - axial * self.axis.reshape(1, 3)
+        radial_norm = np.linalg.norm(radial, axis=1)
+        axial_excess = np.abs(axial[:, 0]) - self.half_length
+        outside_radial = np.maximum(radial_norm - self.radius, 0.0)
+        outside_axial = np.maximum(axial_excess, 0.0)
+        outside = np.linalg.norm(
+            np.stack([outside_radial, outside_axial], axis=1), axis=1
+        )
+        inside = np.minimum(np.maximum(radial_norm - self.radius, axial_excess), 0.0)
+        return outside + inside
+
+    def project_axial(self, points: Array) -> Array:
+        """Return signed axial coordinates relative to the cylinder center."""
+        points = _points(points)
+        rel = points - self.center.reshape(1, 3)
+        return rel @ self.axis.reshape(3, 1)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "type": self.region_type,
+            "center": self.center.tolist(),
+            "axis": self.axis.tolist(),
+            "radius": self.radius,
+            "length": self.length,
+        }
+
+
+@dataclass(frozen=True)
 class RectRegion2D:
     """Axis-aligned rectangle keep-out in the XY plane, infinite in Z.
 
@@ -128,6 +189,13 @@ def region_from_json(config: dict[str, Any]) -> Region:
         return BoxRegion(center=config["center"], half_extents=config["half_extents"])
     if region_type == "rect2d":
         return RectRegion2D(center=config["center"], half_extents=config["half_extents"])
+    if region_type == "cylinder":
+        return CylinderRegion(
+            center=config["center"],
+            axis=config["axis"],
+            radius=float(config["radius"]),
+            length=float(config["length"]),
+        )
     raise ValueError(f"unknown region type {region_type!r}")
 
 

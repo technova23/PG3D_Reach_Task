@@ -5,7 +5,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pg3d.constraints import AvoidProjection, AvoidRegion, BoxRegion, SphereRegion
+from pg3d.constraints import (
+    AvoidProjection,
+    AvoidRegion,
+    BoxRegion,
+    CartesianPoseConstraint,
+    SphereRegion,
+)
 
 DEFAULT_AVOID_COLOR = (255, 64, 16)
 # Z range used to render the (height-agnostic) avoid_projection footprint as a
@@ -79,6 +85,46 @@ def avoid_region_line_visuals(
     return visuals
 
 
+def cartesian_pose_line_visuals(
+    constraint: CartesianPoseConstraint,
+    *,
+    axis_length: float = 0.04,
+) -> list[ConstraintLineVisual]:
+    """Return a wireframe pose gizmo for a Cartesian pose target."""
+    position = np.asarray(constraint.target_position, dtype=np.float32).reshape(3)
+    orientation = np.asarray(constraint.target_orientation, dtype=np.float32).reshape(-1)
+    if orientation.shape == (4,):
+        rotation = _quat_to_matrix(orientation)
+    elif orientation.shape == (9,):
+        rotation = orientation.reshape(3, 3)
+    else:
+        raise ValueError(f"unsupported target_orientation shape: {orientation.shape}")
+    if not np.isfinite(axis_length) or axis_length <= 0.0:
+        raise ValueError("axis_length must be a positive finite value")
+
+    origin = position.reshape(1, 3)
+    axes = []
+    colors = [(255, 80, 80), (80, 255, 80), (80, 160, 255)]
+    labels = ("x", "y", "z")
+    for axis_idx, color in enumerate(colors):
+        axis = rotation[:, axis_idx] * float(axis_length)
+        axes.append(
+            ConstraintLineVisual(
+                name=f"{constraint.name}_{labels[axis_idx]}",
+                line_strips=[np.stack([position, position + axis], axis=0).astype(np.float32)],
+                color=color,
+            )
+        )
+    axes.append(
+        ConstraintLineVisual(
+            name=f"{constraint.name}_position",
+            line_strips=[origin.astype(np.float32)],
+            color=(255, 255, 255),
+        )
+    )
+    return axes
+
+
 def sphere_wireframe(
     center: np.ndarray,
     radius: float,
@@ -149,3 +195,19 @@ def _vector3(value: object, *, name: str) -> np.ndarray:
     if not np.all(np.isfinite(array)):
         raise ValueError(f"{name} must contain only finite values")
     return array
+
+
+def _quat_to_matrix(quat: np.ndarray) -> np.ndarray:
+    q = np.asarray(quat, dtype=np.float32).reshape(4)
+    norm = float(np.linalg.norm(q))
+    if norm <= 0.0 or not np.isfinite(norm):
+        raise ValueError("quaternion must be finite and non-zero")
+    w, x, y, z = q / norm
+    return np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float32,
+    )

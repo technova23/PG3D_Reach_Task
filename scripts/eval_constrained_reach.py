@@ -29,9 +29,11 @@ from pg3d.composition.scoring import (
     trajectory_smoothness,
 )
 from pg3d.constraints import (
+    CartesianPoseConstraint,
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
+    CylinderPassageConstraint,
     RectRegion2D,
     SphereRegion,
 )
@@ -1414,6 +1416,16 @@ def _fast_imagine_rollout(
         robot_masks=[np.zeros((0,), dtype=bool) for _ in range(horizon)],
         action_chunk=action_chunk,
         metadata={**metadata, "geometry_mode": "fast"},
+        eef_orientations=(
+            np.repeat(
+                np.asarray(observation.robot_state.tcp_pose[3:7], dtype=np.float32).reshape(1, 4),
+                repeats=horizon,
+                axis=0,
+            )
+            if observation.robot_state.tcp_pose is not None
+            and observation.robot_state.tcp_pose.shape[0] >= 7
+            else None
+        ),
     )
 
 
@@ -1449,6 +1461,11 @@ def _render_feedback_entry(
             metadata=rollout.action_chunk.metadata,
         ),
         metadata=rollout.metadata,
+        eef_orientations=(
+            rollout.eef_orientations[step_index].reshape(1, -1)
+            if rollout.eef_orientations is not None
+            else None
+        ),
     )
     return world_model_entry_from_rollout_step(
         one_step_rollout,
@@ -2549,9 +2566,8 @@ def _obs_windows_to_torch(
 
 
 def _append_path(path: EpisodePath, entry: Entry) -> None:
-    tcp = np.asarray(entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3]
-    path.append(
-        tcp_position=tcp,
+    path.append_pose(
+        tcp_pose=entry["tcp_pose"],
         q=np.asarray(entry["agent_pos"], dtype=np.float32),
         target_distance=float(np.asarray(entry["final_distance"], dtype=np.float32).reshape(-1)[0]),
     )

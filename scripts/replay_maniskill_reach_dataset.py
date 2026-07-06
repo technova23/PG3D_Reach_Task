@@ -24,11 +24,39 @@ from pg3d.utils.arrays import (
 )
 
 
+def _set_robot_qpos(env: Any, qpos: np.ndarray) -> None:
+    """Teleport the robot to `qpos` with zero velocity, no physics stepping.
+
+    Mirrors ``_set_robot_qpos`` in dataset_generation/write_maniskill_reach_dataset.py:
+    data-gen's recorded episode begins exactly at this configuration (the randomize-start
+    transit that got the robot here is never itself part of `sim_action`), so replay must
+    place the robot here directly rather than let a fresh env.reset() (which lands on the
+    agent's `rest` keyframe) and the first env.step() paper over the gap.
+    """
+    robot = env.unwrapped.agent.robot
+    current = np.asarray(
+        robot.get_qpos() if hasattr(robot, "get_qpos") else robot.qpos,
+        dtype=np.float32,
+    )
+    current_shape = current.shape
+    flat = current.reshape(-1).copy()
+    qpos = np.asarray(qpos, dtype=np.float32).reshape(-1)
+    flat[: qpos.shape[0]] = qpos
+    next_qpos = flat.reshape(current_shape)
+    if hasattr(robot, "set_qpos"):
+        robot.set_qpos(next_qpos)
+    else:
+        robot.qpos = next_qpos.reshape(-1)
+    if hasattr(robot, "set_qvel"):
+        robot.set_qvel(np.zeros_like(next_qpos, dtype=np.float32))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         import gymnasium as gym
         import mani_skill.envs  # noqa: F401
+        import sapien
     except Exception as exc:
         print(
             f"Failed to import ManiSkill/Gymnasium: {type(exc).__name__}: {exc}",
@@ -69,6 +97,25 @@ def main(argv: list[str] | None = None) -> int:
             episode_meta = metadata["episodes"][episode_idx]
             seed = int(episode_meta["seed"])
             env.reset(seed=seed, options={"reconfigure": True})
+            # A bare reset lands the robot at its `rest` keyframe, not the recorded
+            # episode's actual starting qpos: data-gen (with the default
+            # --randomize-start) moves the robot to a sampled start pose via its own
+            # planning phase *before* recording begins, so row 0 of `sim_action` is
+            # already far from the reset pose. Without this, the first env.step below
+            # asks the PD controller to close that whole gap in one 50ms tick -- a
+            # large, unrecorded jump that looks like a jerky "rush" at episode start.
+            _set_robot_qpos(env, sim_action[starts[episode_idx]])
+            # `start_site` (the red marker) is set once inside the env's own
+            # _initialize_episode -- during env.reset(), before the line above ever
+            # runs -- to whatever the TCP happened to be at *that* moment (the rest
+            # keyframe). It is never updated afterward, so it never reflected the
+            # true randomized start pose, even during the original data-gen recording.
+            # Re-point it at the actual recorded start TCP so the marker means what it
+            # looks like it means.
+            recorded_start_tcp = np.asarray(
+                data["tcp_pose"][starts[episode_idx], :3], dtype=np.float32
+            )
+            env.unwrapped.start_site.set_pose(sapien.Pose(p=recorded_start_tcp))
             frames: list[np.ndarray] = []
             if args.video_dir is not None:
                 frames.append(_frame_to_numpy(env.render()))

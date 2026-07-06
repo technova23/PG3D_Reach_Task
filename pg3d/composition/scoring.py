@@ -25,6 +25,38 @@ def trajectory_smoothness(rollout: ImaginedRollout, *, order: int = 2) -> float:
     return mean_squared_norm(np.diff(rollout.q, n=order, axis=0))
 
 
+def directional_preference(
+    rollout: ImaginedRollout,
+    target_position: np.ndarray | None,
+    *,
+    sign: int,
+) -> float:
+    """Return a lower-is-better cost that prefers TCP paths bowing to one side.
+
+    "Left" and "right" are defined relative to the sightline from the path start
+    toward the goal, projected onto the ground (XY) plane: forward points at the
+    goal, world +Z is up, and ``left = up x forward`` (a 90 deg CCW turn of the
+    forward vector). The signed lateral offset of every TCP point from the start is
+    averaged over the path; ``sign=+1`` rewards positive (left) offsets, ``sign=-1``
+    rewards right, and ``sign=0`` disables the term. Start and goal are shared across
+    candidates, so this only ranks how far a candidate bows to the chosen side.
+    """
+    if sign == 0 or target_position is None:
+        return 0.0
+    path = np.asarray(rollout.eef_path, dtype=np.float32).reshape(-1, 3)
+    if path.shape[0] < 2:
+        return 0.0
+    start = path[0]
+    forward = np.asarray(target_position, dtype=np.float32).reshape(3)[:2] - start[:2]
+    forward_norm = float(np.linalg.norm(forward))
+    if forward_norm <= 1e-8:
+        return 0.0
+    forward /= forward_norm
+    left_dir = np.array([-forward[1], forward[0]], dtype=np.float32)
+    lateral = (path[:, :2] - start[:2].reshape(1, 2)) @ left_dir
+    return float(-sign * np.mean(lateral))
+
+
 def consensus_deviations(chunks: list[ActionChunk]) -> list[float]:
     """Return per-chunk mean squared deviation from compatible candidate consensus."""
     deviations = [0.0 for _ in chunks]

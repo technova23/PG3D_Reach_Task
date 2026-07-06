@@ -6,6 +6,7 @@ import numpy as np
 
 from pg3d.composition.scoring import (
     consensus_deviations,
+    directional_preference,
     goal_distance,
     optional_policy_surrogate,
     primary_constraint_penalty,
@@ -35,6 +36,7 @@ class BaseController:
         k_schedule: tuple[int, ...] = (16, 32, 64),
         score_weights: ScoreWeights | None = None,
         smoothness_order: int = 2,
+        directional_sign: int = 0,
     ) -> None:
         self.policy = policy
         self.world_model = world_model
@@ -44,6 +46,9 @@ class BaseController:
         if smoothness_order not in {1, 2}:
             raise ValueError("smoothness_order must be 1 or 2")
         self.smoothness_order = smoothness_order
+        if directional_sign not in {-1, 0, 1}:
+            raise ValueError("directional_sign must be -1, 0, or 1")
+        self.directional_sign = directional_sign
 
     def select(
         self,
@@ -110,6 +115,15 @@ class BaseController:
         constraint_penalty = primary_constraint_penalty(constraint_costs)
         distance = goal_distance(rollout, controller_input.scene.target_position)
         smoothness = trajectory_smoothness(rollout, order=self.smoothness_order)
+        directional = (
+            directional_preference(
+                rollout,
+                controller_input.scene.target_position,
+                sign=self.directional_sign,
+            )
+            if self.directional_sign != 0
+            else 0.0
+        )
         total_score = (
             self.score_weights.constraint * constraint_penalty
             + self.score_weights.goal_distance * (0.0 if distance is None else distance)
@@ -117,6 +131,7 @@ class BaseController:
             + self.score_weights.consensus * consensus_deviation
             + self.score_weights.policy_surrogate
             * (0.0 if policy_surrogate is None else policy_surrogate)
+            + self.score_weights.directional * directional
         )
         return CandidateDiagnostics(
             index=index,
@@ -132,6 +147,7 @@ class BaseController:
             consensus_deviation=consensus_deviation,
             policy_surrogate=policy_surrogate,
             total_score=float(total_score),
+            directional=directional,
         )
 
 

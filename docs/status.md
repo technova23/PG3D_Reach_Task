@@ -38,8 +38,10 @@ robot geometry from a simulator-free provider interface, and writes synthetic ro
 visual inspection. The first comparison path now adds a lazy ManiSkill ghost-env Panda geometry
 provider plus a checkpoint rollout comparison script that feeds imagined point clouds back into
 the policy and writes per-episode Rerun overlays for world-model versus simulator rollouts. P08 now
-adds the first handwritten constraint objects: sphere/box regions, `AvoidRegion(target="eef")`,
-trajectory smoothness, an obstructing direct-path region helper, and JSON round-trip helpers. P09
+adds the first handwritten constraint objects: sphere/box/cylinder regions,
+`AvoidRegion(target="eef")`, Cartesian waypoint pose constraints, cylindrical passage
+constraints, trajectory smoothness, an obstructing direct-path region helper, and JSON round-trip
+helpers. P09
 adds pure rejection and reranking controllers with K fallback, hard-then-score feasibility,
 candidate diagnostics, and a policy-input seam for future DP3 rolling-window adapters. P10 now
 adds the first constrained-reach evaluation scaffold connecting DP3, ManiSkill, the ghost-env world
@@ -56,6 +58,9 @@ best-effort separate render-only ManiSkill env so visual overlays do not alter p
 or simulator control. The eval runner can also consume precomputed per-episode constraints and a
 fixed dataset episode-index file, so nominal-path avoid regions can be built once from base
 rollouts and reused across base/rejection/reranking comparisons.
+Cartesian pose constraint rollouts now keep the target pose visible in Rerun exports as a
+static position marker plus orientation triad, so you can inspect the intended EEF pose next to
+the executed rollout.
 P11 starts the base-reach reliability pass. DP3 reach policy inputs now reserve an ordered tail
 slice of the XYZ point cloud for deterministic goal tokens by default
 (`goal_marker_points=16`, `goal_marker_radius=0.015`), while keeping public policy keys limited to

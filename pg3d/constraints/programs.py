@@ -6,11 +6,109 @@ from typing import Any, Literal
 import numpy as np
 
 from pg3d.constraints.core import SceneContext, mean_squared_norm, trajectory_points
-from pg3d.constraints.geometry import RectRegion2D, Region, SphereRegion, region_from_json
+from pg3d.constraints.geometry import (
+    CylinderRegion,
+    RectRegion2D,
+    Region,
+    SphereRegion,
+    region_from_json,
+)
 from pg3d.world_model.types import Array, ImaginedRollout, as_float_array
 
 ConstraintTarget = Literal["eef", "robot"]
 SmoothnessTarget = Literal["q", "eef"]
+
+
+@dataclass(frozen=True)
+class CartesianPoseConstraint:
+    """Soft Cartesian pose target over the whole rollout."""
+
+    target_position: Array
+    target_orientation: Array
+    position_tolerance: float
+    rotation_tolerance: float
+    target: ConstraintTarget = "eef"
+    weight: float = 1.0
+    name: str = "cartesian_pose"
+    constraint_type: str = "cartesian_pose"
+
+    def __post_init__(self) -> None:
+        if self.target != "eef":
+            raise ValueError("CartesianPoseConstraint currently supports only target='eef'")
+        object.__setattr__(
+            self,
+            "target_position",
+            _vector3(self.target_position, name="target_position"),
+        )
+        orientation = as_float_array(self.target_orientation, name="target_orientation", ndim=1)
+        if orientation.shape not in {(4,), (9,)}:
+            raise ValueError("target_orientation must have shape (4,) or (9,)")
+        if orientation.shape == (4,):
+            orientation = _normalize_quaternion(orientation)
+        else:
+            orientation = _normalize_rotation_matrix(orientation.reshape(3, 3)).reshape(9)
+        object.__setattr__(self, "target_orientation", orientation)
+        _validate_nonnegative(self.position_tolerance, "position_tolerance")
+        _validate_nonnegative(self.rotation_tolerance, "rotation_tolerance")
+        _validate_finite(self.weight, "weight")
+
+    def cost(self, rollout: ImaginedRollout, scene: SceneContext | None = None) -> dict[str, float]:
+        positions = np.asarray(rollout.eef_path, dtype=np.float32)
+        if positions.ndim != 2 or positions.shape[1] != 3:
+            raise ValueError(f"eef_path must have shape [T, 3], got {positions.shape}")
+        positions = positions.reshape(-1, 3)
+        pos_errors = np.linalg.norm(positions - self.target_position.reshape(1, 3), axis=1)
+        rot_errors = _rotation_distance_series(rollout.eef_orientations, self.target_orientation)
+        combined = np.maximum(pos_errors - float(self.position_tolerance), 0.0) + np.maximum(
+            rot_errors - float(self.rotation_tolerance), 0.0
+        )
+        if combined.size == 0:
+            best_idx = -1
+            best_total = float("inf")
+            best_pos_error = float("inf")
+            best_rot_error = float("inf")
+        else:
+            best_idx = int(np.argmin(combined))
+            best_total = float(combined[best_idx])
+            best_pos_error = float(pos_errors[best_idx])
+            best_rot_error = float(rot_errors[best_idx])
+        return {
+            self.name: float(self.weight) * best_total,
+            f"{self.name}/position_error": best_pos_error,
+            f"{self.name}/rotation_error": best_rot_error,
+            f"{self.name}/position_violation": max(best_pos_error - float(self.position_tolerance), 0.0),
+            f"{self.name}/rotation_violation": max(best_rot_error - float(self.rotation_tolerance), 0.0),
+            f"{self.name}/best_index": float(best_idx),
+        }
+
+    def satisfied(
+        self,
+        rollout: ImaginedRollout,
+        scene: SceneContext | None = None,
+    ) -> bool:
+        positions = np.asarray(rollout.eef_path, dtype=np.float32)
+        if positions.ndim != 2 or positions.shape[1] != 3 or positions.shape[0] == 0:
+            return False
+        pos_errors = np.linalg.norm(positions - self.target_position.reshape(1, 3), axis=1)
+        rot_errors = _rotation_distance_series(rollout.eef_orientations, self.target_orientation)
+        return bool(
+            np.any(
+                (pos_errors <= float(self.position_tolerance))
+                & (rot_errors <= float(self.rotation_tolerance))
+            )
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "type": self.constraint_type,
+            "target": self.target,
+            "target_position": self.target_position.tolist(),
+            "target_orientation": self.target_orientation.tolist(),
+            "position_tolerance": self.position_tolerance,
+            "rotation_tolerance": self.rotation_tolerance,
+            "weight": self.weight,
+            "name": self.name,
+        }
 
 
 @dataclass(frozen=True)
@@ -192,6 +290,98 @@ class SmoothnessCost:
         }
 
 
+@dataclass(frozen=True)
+class CylinderPassageConstraint:
+    """Hold orientation while the EEF traverses a finite cylinder corridor."""
+
+    region: CylinderRegion
+    target_orientation: Array
+    waypoint_start: int
+    waypoint_end: int
+    position_tolerance: float
+    rotation_tolerance: float
+    weight: float = 1.0
+    name: str = "cylinder_passage"
+    constraint_type: str = "cylinder_passage"
+
+    def __post_init__(self) -> None:
+        orientation = as_float_array(self.target_orientation, name="target_orientation", ndim=1)
+        if orientation.shape not in {(4,), (9,)}:
+            raise ValueError("target_orientation must have shape (4,) or (9,)")
+        if orientation.shape == (4,):
+            orientation = _normalize_quaternion(orientation)
+        else:
+            orientation = _normalize_rotation_matrix(orientation.reshape(3, 3)).reshape(9)
+        object.__setattr__(self, "target_orientation", orientation)
+        waypoint_start = int(self.waypoint_start)
+        waypoint_end = int(self.waypoint_end)
+        if waypoint_start < 0 or waypoint_end < 0:
+            raise ValueError("waypoint bounds must be non-negative")
+        if waypoint_end < waypoint_start:
+            raise ValueError("waypoint_end must be >= waypoint_start")
+        object.__setattr__(self, "waypoint_start", waypoint_start)
+        object.__setattr__(self, "waypoint_end", waypoint_end)
+        _validate_nonnegative(self.position_tolerance, "position_tolerance")
+        _validate_nonnegative(self.rotation_tolerance, "rotation_tolerance")
+        _validate_finite(self.weight, "weight")
+
+    def cost(self, rollout: ImaginedRollout, scene: SceneContext | None = None) -> dict[str, float]:
+        start, end = self._resolve_window(rollout)
+        segment = rollout.eef_path[start : end + 1]
+        signed_distance = self.region.signed_distance(segment)
+        axial = self.region.project_axial(segment).reshape(-1)
+        axial_span = float(np.max(axial) - np.min(axial)) if axial.size else 0.0
+        max_radial_violation = float(np.max(np.maximum(signed_distance, 0.0))) if signed_distance.size else 0.0
+        passage_violation = max(float(self.region.length) - axial_span, 0.0)
+        pose_rotation_error = float(
+            np.max(_rotation_distance_series(rollout.eef_orientations[start : end + 1], self.target_orientation))
+        ) if segment.size else 0.0
+        pose_rotation_violation = max(pose_rotation_error - float(self.rotation_tolerance), 0.0)
+        total = float(self.weight) * (passage_violation + pose_rotation_violation)
+        return {
+            self.name: total,
+            f"{self.name}/passage_violation": passage_violation,
+            f"{self.name}/axial_span": axial_span,
+            f"{self.name}/max_radial_violation": max_radial_violation,
+            f"{self.name}/position_violation": max_radial_violation,
+            f"{self.name}/rotation_violation": pose_rotation_violation,
+            f"{self.name}/waypoint_start": float(start),
+            f"{self.name}/waypoint_end": float(end),
+        }
+
+    def satisfied(
+        self,
+        rollout: ImaginedRollout,
+        scene: SceneContext | None = None,
+    ) -> bool:
+        costs = self.cost(rollout, scene)
+        return (
+            costs[f"{self.name}/passage_violation"] <= 1e-6
+            and costs[f"{self.name}/rotation_violation"] <= 1e-6
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "type": self.constraint_type,
+            "region": self.region.to_json(),
+            "target_orientation": self.target_orientation.tolist(),
+            "waypoint_start": self.waypoint_start,
+            "waypoint_end": self.waypoint_end,
+            "position_tolerance": self.position_tolerance,
+            "rotation_tolerance": self.rotation_tolerance,
+            "weight": self.weight,
+            "name": self.name,
+        }
+
+    def _resolve_window(self, rollout: ImaginedRollout) -> tuple[int, int]:
+        horizon = rollout.eef_path.shape[0]
+        if self.waypoint_end >= horizon:
+            raise IndexError(
+                f"waypoint_end {self.waypoint_end} is out of bounds for rollout horizon {horizon}"
+            )
+        return self.waypoint_start, self.waypoint_end
+
+
 def make_obstructing_avoid_region(
     start: Array,
     goal: Array,
@@ -214,7 +404,15 @@ def make_obstructing_avoid_region(
     )
 
 
-def constraint_from_json(config: dict[str, Any]) -> AvoidRegion | AvoidProjection | SmoothnessCost:
+def constraint_from_json(
+    config: dict[str, Any],
+) -> (
+    AvoidRegion
+    | AvoidProjection
+    | SmoothnessCost
+    | CartesianPoseConstraint
+    | CylinderPassageConstraint
+):
     """Load a constraint from a JSON-safe config."""
     constraint_type = config.get("type")
     if constraint_type == "avoid_region":
@@ -249,11 +447,38 @@ def constraint_from_json(config: dict[str, Any]) -> AvoidRegion | AvoidProjectio
             threshold=None if threshold is None else float(threshold),
             name=str(config.get("name", "smoothness")),
         )
+    if constraint_type == "cartesian_pose":
+        return CartesianPoseConstraint(
+            target_position=config["target_position"],
+            target_orientation=config["target_orientation"],
+            position_tolerance=float(config.get("position_tolerance", 0.0)),
+            rotation_tolerance=float(config.get("rotation_tolerance", 0.0)),
+            target=config.get("target", "eef"),
+            weight=float(config.get("weight", 1.0)),
+            name=str(config.get("name", "cartesian_pose")),
+        )
+    if constraint_type == "cylinder_passage":
+        return CylinderPassageConstraint(
+            region=region_from_json(config["region"]),
+            target_orientation=config["target_orientation"],
+            waypoint_start=int(config["waypoint_start"]),
+            waypoint_end=int(config["waypoint_end"]),
+            position_tolerance=float(config.get("position_tolerance", 0.0)),
+            rotation_tolerance=float(config.get("rotation_tolerance", 0.0)),
+            weight=float(config.get("weight", 1.0)),
+            name=str(config.get("name", "cylinder_passage")),
+        )
     raise ValueError(f"unknown constraint type {constraint_type!r}")
 
 
 def constraints_to_json(
-    constraints: list[AvoidRegion | AvoidProjection | SmoothnessCost],
+    constraints: list[
+        AvoidRegion
+        | AvoidProjection
+        | SmoothnessCost
+        | CartesianPoseConstraint
+        | CylinderPassageConstraint
+    ],
 ) -> list[dict[str, Any]]:
     """Serialize a list of constraints."""
     return [constraint.to_json() for constraint in constraints]
@@ -261,7 +486,9 @@ def constraints_to_json(
 
 def constraints_from_json(
     configs: list[dict[str, Any]],
-) -> list[AvoidRegion | AvoidProjection | SmoothnessCost]:
+) -> list[
+    AvoidRegion | AvoidProjection | SmoothnessCost | CartesianPoseConstraint | CylinderPassageConstraint
+]:
     """Deserialize a list of constraints."""
     return [constraint_from_json(config) for config in configs]
 
@@ -288,3 +515,67 @@ def _validate_nonnegative(value: float, name: str) -> None:
     _validate_finite(value, name)
     if float(value) < 0.0:
         raise ValueError(f"{name} must be non-negative")
+
+
+def _normalize_quaternion(quaternion: Array) -> Array:
+    quat = np.asarray(quaternion, dtype=np.float32)
+    norm = float(np.linalg.norm(quat))
+    if norm <= 0.0 or not np.isfinite(norm):
+        raise ValueError("quaternion must be a non-zero finite vector")
+    return quat / norm
+
+
+def _normalize_rotation_matrix(matrix: Array) -> Array:
+    rot = np.asarray(matrix, dtype=np.float32).reshape(3, 3)
+    if not np.all(np.isfinite(rot)):
+        raise ValueError("rotation matrix must contain only finite values")
+    u, _, vh = np.linalg.svd(rot)
+    rot = u @ vh
+    if np.linalg.det(rot) < 0.0:
+        u[:, -1] *= -1.0
+        rot = u @ vh
+    return rot.astype(np.float32, copy=False)
+
+
+def _rotation_distance_series(orientations: Array | None, target_orientation: Array) -> Array:
+    if orientations is None:
+        raise ValueError(
+            "imagined rollouts must provide eef_orientations for Cartesian pose constraints"
+        )
+    orientations = np.asarray(orientations, dtype=np.float32)
+    if orientations.ndim != 2 or orientations.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float32)
+    if orientations.shape[1] == 4:
+        target_q = _normalize_quaternion(target_orientation.reshape(4))
+        return np.asarray(
+            [
+                float(2.0 * np.arccos(np.clip(np.abs(np.dot(_normalize_quaternion(actual), target_q)), -1.0, 1.0)))
+                for actual in orientations
+            ],
+            dtype=np.float32,
+        )
+    if orientations.shape[1] == 9:
+        target_r = _normalize_rotation_matrix(target_orientation.reshape(3, 3))
+        errors = []
+        for actual in orientations:
+            actual_r = _normalize_rotation_matrix(actual.reshape(3, 3))
+            delta = actual_r @ target_r.T
+            trace = float(np.trace(delta))
+            errors.append(float(np.arccos(np.clip((trace - 1.0) * 0.5, -1.0, 1.0))))
+        return np.asarray(errors, dtype=np.float32)
+    raise ValueError(f"unsupported eef orientation shape {orientations.shape}")
+
+
+def _orientation_distance(actual: Array, target: Array) -> float:
+    if actual.shape != target.shape:
+        raise ValueError(f"orientation shapes must match, got {actual.shape} and {target.shape}")
+    if actual.shape == (4,):
+        actual_q = _normalize_quaternion(actual)
+        target_q = _normalize_quaternion(target)
+        dot = float(np.clip(np.abs(np.dot(actual_q, target_q)), -1.0, 1.0))
+        return float(2.0 * np.arccos(dot))
+    actual_r = _normalize_rotation_matrix(actual.reshape(3, 3))
+    target_r = _normalize_rotation_matrix(target.reshape(3, 3))
+    delta = actual_r @ target_r.T
+    trace = float(np.trace(delta))
+    return float(np.arccos(np.clip((trace - 1.0) * 0.5, -1.0, 1.0)))
