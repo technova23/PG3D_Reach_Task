@@ -62,7 +62,11 @@ Cartesian pose constraint rollouts now keep the target pose visible in Rerun exp
 static position marker plus orientation triad, so you can inspect the intended EEF pose next to
 the executed rollout. Executed-episode Cartesian pose metrics now evaluate the full recorded
 `EpisodePath` instead of dropping to position-only TCP arrays, so pose-only constraints no longer
-default to satisfied when the EEF never reaches the requested pose.
+default to satisfied when the EEF never reaches the requested pose. Constrained eval now also
+writes per-step `step_traces.jsonl` rows with executed TCP pose, policy/simulator action,
+task-goal distance, and Cartesian pose errors, plus richer `decisions.jsonl` selected-branch
+records with chosen action chunks, imagined EEF/q rollouts, and compact candidate summaries for
+world-model reproducibility checks.
 P11 starts the base-reach reliability pass. DP3 reach policy inputs now reserve an ordered tail
 slice of the XYZ point cloud for deterministic goal tokens by default
 (`goal_marker_points=16`, `goal_marker_radius=0.015`), while keeping public policy keys limited to

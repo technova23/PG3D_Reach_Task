@@ -29,11 +29,10 @@ from pg3d.composition.scoring import (
     trajectory_smoothness,
 )
 from pg3d.constraints import (
-    CartesianPoseConstraint,
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
-    CylinderPassageConstraint,
+    CartesianPoseConstraint,
     RectRegion2D,
     SphereRegion,
 )
@@ -41,16 +40,17 @@ from pg3d.envs.maniskill_adapter import (
     ManiSkillGhostPandaGeometryProvider,
     register_pg3d_reach_envs,
 )
-from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import (
     PointCloudCropConfig,
     load_reach_metadata,
 )
+from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.eval import (
     AvoidOverlayConfig,
     EpisodePath,
     TimingRecorder,
     candidate_feasibility_fraction,
+    cartesian_pose_step_metrics,
     concatenate_rollouts,
     direct_path_avoid_region,
     episode_metric_row,
@@ -309,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[dict[str, Any]] = []
     metrics_path = args.output_dir / "metrics.jsonl"
     decisions_path = args.output_dir / "decisions.jsonl"
+    step_traces_path = args.output_dir / "step_traces.jsonl"
     timings_path = args.output_dir / "timings.jsonl"
     timing_written = 0
     rng = np.random.default_rng(args.seed)
@@ -328,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
         with (
             metrics_path.open("w", encoding="utf-8") as metrics_file,
             decisions_path.open("w", encoding="utf-8") as decisions_file,
+            step_traces_path.open("w", encoding="utf-8") as step_traces_file,
         ):
             for spec in specs:
                 zarr_context = (
@@ -380,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
                         rerun=write_rerun,
                         video_fps=args.video_fps,
                         decisions_file=decisions_file,
+                        step_traces_file=step_traces_file,
                         rng=rng,
                         timer=timer,
                         video_env_factory=_video_env_factory(
@@ -455,6 +458,9 @@ def main(argv: list[str] | None = None) -> int:
         "constraint_overlay_video": bool(args.constraint_overlay_video),
         "constraint_overlay_alpha": float(args.constraint_overlay_alpha),
         "constraint_overlay_color": list(args.constraint_overlay_color),
+        "metrics_jsonl": str(metrics_path),
+        "decisions_jsonl": str(decisions_path),
+        "step_traces_jsonl": str(step_traces_path),
         "timing": timer.summary(),
         "episodes": rows,
         "by_method": summarize_metrics(rows),
@@ -880,6 +886,7 @@ def run_eval_episode(
     rerun: bool,
     video_fps: int,
     decisions_file: Any,
+    step_traces_file: Any,
     rng: np.random.Generator,
     timer: TimingRecorder,
     video_env_factory: Callable[[], Any] | None = None,
@@ -915,6 +922,19 @@ def run_eval_episode(
     path = EpisodePath()
     _append_path(path, sim_entry)
     timeline = [sim_entry.copy()]
+    _write_step_trace(
+        step_traces_file,
+        method=method,
+        spec=spec,
+        step=0,
+        replan_index=None,
+        selected_chunk_step=None,
+        decision=None,
+        entry=sim_entry,
+        constraints=constraints,
+        policy_action=None,
+        sim_action=None,
+    )
     frames = []
     if video:
         video_env = _maybe_create_overlay_video_env(
@@ -1000,7 +1020,9 @@ def run_eval_episode(
                     f"steps_to_execute={steps_to_execute}",
                     flush=True,
                 )
-            for policy_action in decision.selected_chunk.actions[:steps_to_execute]:
+            for selected_chunk_step, policy_action in enumerate(
+                decision.selected_chunk.actions[:steps_to_execute]
+            ):
                 sim_action = policy_action_to_sim_action(
                     policy_action,
                     np.asarray(sim_entry["agent_pos"], dtype=np.float32),
@@ -1027,6 +1049,19 @@ def run_eval_episode(
                 )
                 _append_path(path, sim_entry)
                 timeline.append(sim_entry.copy())
+                _write_step_trace(
+                    step_traces_file,
+                    method=method,
+                    spec=spec,
+                    step=steps,
+                    replan_index=replans - 1,
+                    selected_chunk_step=selected_chunk_step,
+                    decision=decision,
+                    entry=sim_entry,
+                    constraints=constraints,
+                    policy_action=policy_action,
+                    sim_action=sim_action,
+                )
                 if video:
                     if video_env is not None:
                         try:
@@ -1491,6 +1526,124 @@ def _controller_result(
     )
 
 
+def _action_chunk_trace(action_chunk: ActionChunk) -> dict[str, Any]:
+    return {
+        "actions": action_chunk.actions,
+        "action_mode": action_chunk.action_mode,
+        "dt": float(action_chunk.dt),
+        "horizon": int(action_chunk.horizon),
+        "metadata": action_chunk.metadata,
+    }
+
+
+def _rollout_trace(rollout: ImaginedRollout) -> dict[str, Any]:
+    return {
+        "q": rollout.q,
+        "eef_path": rollout.eef_path,
+        "eef_orientations": rollout.eef_orientations,
+        "metadata": rollout.metadata,
+        "action_chunk_metadata": rollout.action_chunk.metadata,
+    }
+
+
+def _candidate_summary(candidate: CandidateDiagnostics) -> dict[str, Any]:
+    return {
+        "index": candidate.index,
+        "attempted_k": candidate.attempted_k,
+        "feasible": candidate.feasible,
+        "total_score": candidate.total_score,
+        "goal_distance": candidate.goal_distance,
+        "constraint_penalty": candidate.constraint_penalty,
+        "smoothness": candidate.smoothness,
+        "consensus_deviation": candidate.consensus_deviation,
+        "policy_surrogate": candidate.policy_surrogate,
+        "directional": candidate.directional,
+        "constraint_costs": candidate.constraint_costs,
+        "constraint_satisfied": candidate.constraint_satisfied,
+        "action_chunk_metadata": candidate.action_chunk.metadata,
+        "rollout_metadata": candidate.rollout.metadata,
+    }
+
+
+def _selected_branch_trace(decision: EvalDecisionSummary | None) -> dict[str, Any]:
+    if decision is None:
+        return {}
+    row: dict[str, Any] = {
+        "selected_action_chunk": _action_chunk_trace(decision.selected_chunk),
+        "selection_reason": decision.selection_reason,
+        "candidate_feasible": decision.candidate_feasible,
+        "candidate_total": decision.candidate_total,
+    }
+    if decision.result is not None:
+        selected = decision.result.selected
+        row.update(
+            {
+                "attempted_k_values": decision.result.attempted_k_values,
+                "selected_index": selected.index,
+                "selected_score": selected.total_score,
+                "selected_feasible": selected.feasible,
+                "selected_goal_distance": selected.goal_distance,
+                "selected_constraint_penalty": selected.constraint_penalty,
+                "selected_constraint_costs": selected.constraint_costs,
+                "selected_action_chunk": _action_chunk_trace(selected.action_chunk),
+                "selected_rollout": _rollout_trace(selected.rollout),
+            }
+        )
+    return row
+
+
+def _write_step_trace(
+    step_traces_file: Any,
+    *,
+    method: EvalMethod,
+    spec: RolloutSpec,
+    step: int,
+    replan_index: int | None,
+    selected_chunk_step: int | None,
+    decision: EvalDecisionSummary | None,
+    entry: Entry,
+    constraints: list[Any],
+    policy_action: np.ndarray | None,
+    sim_action: np.ndarray | None,
+) -> None:
+    branch = _selected_branch_trace(decision)
+    row = {
+        "method": method,
+        "episode": spec.output_index,
+        "seed": spec.seed,
+        "source": spec.source,
+        "dataset_episode_index": spec.dataset_episode_index,
+        "step": int(step),
+        "frame_index": int(step),
+        "replan_index": replan_index,
+        "selected_chunk_step": selected_chunk_step,
+        "policy_action": policy_action,
+        "sim_action": sim_action,
+        "tcp_pose": entry["tcp_pose"],
+        "agent_pos": entry["agent_pos"],
+        "target_position": entry["target_position"],
+        "target_distance": float(np.asarray(entry["final_distance"]).reshape(-1)[0]),
+        "success": bool(entry["success"]),
+        "cartesian_pose_metrics": cartesian_pose_step_metrics(
+            tcp_pose=entry["tcp_pose"],
+            constraints=constraints,
+            step=step,
+        ),
+    }
+    row.update(
+        {
+            "selected_index": branch.get("selected_index"),
+            "selection_reason": branch.get("selection_reason"),
+            "candidate_feasible": branch.get("candidate_feasible"),
+            "candidate_total": branch.get("candidate_total"),
+            "selected_score": branch.get("selected_score"),
+            "selected_constraint_costs": branch.get("selected_constraint_costs"),
+        }
+    )
+    step_traces_file.write(json.dumps(_jsonable(row), sort_keys=True) + "\n")
+    step_traces_file.flush()
+
+
 def _write_decision(
     decisions_file: Any,
     *,
@@ -1505,11 +1658,14 @@ def _write_decision(
         "method": method,
         "episode": spec.output_index,
         "seed": spec.seed,
+        "source": spec.source,
+        "dataset_episode_index": spec.dataset_episode_index,
         "replan_index": replan_index,
         "step": step,
         "selection_reason": decision.selection_reason,
         "candidate_feasible": decision.candidate_feasible,
         "candidate_total": decision.candidate_total,
+        "selected_action_chunk": _action_chunk_trace(decision.selected_chunk),
     }
     if result is not None:
         scores = [candidate.total_score for candidate in result.candidates]
@@ -1523,6 +1679,11 @@ def _write_decision(
                 "selected_constraint_penalty": result.selected.constraint_penalty,
                 "selected_smoothness": result.selected.smoothness,
                 "selected_constraint_costs": result.selected.constraint_costs,
+                "selected_action_chunk": _action_chunk_trace(result.selected.action_chunk),
+                "selected_rollout": _rollout_trace(result.selected.rollout),
+                "candidate_summaries": [
+                    _candidate_summary(candidate) for candidate in result.candidates
+                ],
                 "score_min": min(scores) if scores else None,
                 "score_mean": float(np.mean(scores)) if scores else None,
             }
@@ -2267,8 +2428,8 @@ def _plot_candidate_paths(
     projection_half_extents: np.ndarray | None = None,
 ) -> None:
     try:
-        import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
+        import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
         from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
     except Exception as exc:
@@ -2306,8 +2467,15 @@ def _plot_candidate_paths(
         ys = [cy - hy, cy - hy, cy + hy, cy + hy, cy - hy]
         for z in (z_lo, z_hi):
             ax3d.plot(xs, ys, [z] * 5, color="crimson", alpha=0.5, linewidth=1.2)
-        for xc, yc in zip(xs[:-1], ys[:-1]):
-            ax3d.plot([xc, xc], [yc, yc], [z_lo, z_hi], color="crimson", alpha=0.3, linewidth=0.8)
+        for xc, yc in zip(xs[:-1], ys[:-1], strict=False):
+            ax3d.plot(
+                [xc, xc],
+                [yc, yc],
+                [z_lo, z_hi],
+                color="crimson",
+                alpha=0.3,
+                linewidth=0.8,
+            )
         ax3d.scatter(cx, cy, 0.5 * (z_lo + z_hi), color="crimson", s=60, zorder=10)
         constraint_legend_label = f"projection {2*hx:.3f}×{2*hy:.3f}m"
     else:
@@ -2327,7 +2495,14 @@ def _plot_candidate_paths(
     ax3d.set_title(f"Episode {episode_index} — 3-D candidate paths")
     legend_handles = [
         Line2D([0], [0], color="tab:green", lw=1.5, label=f"selected ({len(selected_paths)})"),
-        Line2D([0], [0], color="tab:gray", lw=0.8, alpha=0.5, label=f"failed ({len(paths) - len(successful_paths)})"),
+        Line2D(
+            [0],
+            [0],
+            color="tab:gray",
+            lw=0.8,
+            alpha=0.5,
+            label=f"failed ({len(paths) - len(successful_paths)})",
+        ),
         Line2D([0], [0], color="tab:blue", marker="o", lw=0, markersize=5, label="start"),
         Line2D([0], [0], color="tab:red", marker="o", lw=0, markersize=5, label="end"),
         Line2D([0], [0], color="crimson", lw=1, label=constraint_legend_label),
@@ -2468,7 +2643,9 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
         "projection_half_extents": [float(h) for h in args.projection_half_extents],
         "constraint_placement_candidates": int(args.constraint_placement_candidates),
         "constraint_placement_steps": (
-            None if args.constraint_placement_steps is None else int(args.constraint_placement_steps)
+            None
+            if args.constraint_placement_steps is None
+            else int(args.constraint_placement_steps)
         ),
         "avoid_path_fractions": [float(f) for f in args.avoid_path_fractions],
         "constraint_placement_success_only": bool(args.constraint_placement_success_only),
@@ -2476,7 +2653,6 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
         "avoid_min_radius": float(args.avoid_min_radius),
         "avoid_margin": float(args.avoid_margin),
         "avoid_weight": float(args.avoid_weight),
-        "avoid_path_fractions": [float(f) for f in args.avoid_path_fractions],
         "avoid_shape": str(args.avoid_shape),
         "avoid_box_half_extents": (
             [float(h) for h in args.avoid_box_half_extents]

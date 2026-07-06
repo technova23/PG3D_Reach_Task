@@ -801,7 +801,7 @@ PY
 ```
 
 Outputs include `constraints/episode_XXX.json`, `metrics.jsonl`, `decisions.jsonl`,
-`summary.json`, optional `timings.jsonl`, optional `plots/*.png`, optional
+`step_traces.jsonl`, `summary.json`, optional `timings.jsonl`, optional `plots/*.png`, optional
 `videos/{method}/episode_XXX.mp4`, and optional `rerun/{method}/episode_XXX.rrd`.
 When `--constraints-dir` is provided, eval copies the loaded precomputed constraints into the
 output constraints directory and records the source in `summary.json`.
@@ -816,6 +816,10 @@ showing a translucent orange keep-out sphere or box in the saved video. Use
 `--no-constraint-overlay-video` to fall back to plain simulator renders, and tune the visual with
 `--constraint-overlay-alpha` and `--constraint-overlay-color R G B`. Rerun exports log the same
 avoid region under `world/constraints/avoid_region_*` as persistent wireframe geometry.
+For Cartesian pose constraints, `metrics.jsonl` stores executed best-frame pose summaries,
+`step_traces.jsonl` stores per-frame TCP pose/action/pose-error rows, and `decisions.jsonl` stores
+the selected world-model branch including the selected action chunk, imagined q/EEF rollout, and
+compact candidate summaries.
 
 One-episode overlay smoke for visual inspection:
 
