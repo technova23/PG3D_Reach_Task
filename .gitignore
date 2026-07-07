@@ -45,3 +45,5 @@ checkpoints/
 # Loose scratch files
 /a.txt
 /curved_traj.png
+*.json
+
