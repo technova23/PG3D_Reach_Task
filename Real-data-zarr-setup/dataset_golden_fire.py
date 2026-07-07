@@ -3,12 +3,15 @@ import os
 import json
 import re
 from pathlib import Path
+import sys
 import numpy as np
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 # Import the helpers from the newly created helper file
 from dataset_creation_helper import (
-    load_robot, check_reachability, extract_state_action, 
-    extract_depth, convert_to_zarr, MAX_DIFF
+    load_robot, check_reachability, extract_state_action, insert_goal_marker_points , 
+    extract_depth, convert_to_zarr, MAX_DIFF, GOAL_MARKER_POINTS
 )
 
 # === GLOBAL CONFIGURATION ===
@@ -83,6 +86,14 @@ def main():
             n_skipped += 1
             continue
             
+        # 4. Insert Goal Saliency Markers
+        pcds = insert_goal_marker_points(
+            pcds, 
+            target, 
+            num_points=GOAL_MARKER_POINTS
+        )
+        print(f"  Inserted {GOAL_MARKER_POINTS} goal markers into point cloud.")
+        
         # Success!
         print(f"  -> SUCCESS! Added {len(state)} frames.")
         n_success += 1

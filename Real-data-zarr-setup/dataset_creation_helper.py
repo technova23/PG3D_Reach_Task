@@ -12,7 +12,11 @@ from rosbags.typesys import Stores, get_typestore
 
 MAX_DIFF = 0.03 # 3cm
 RESAMPLE_HZ = 20.0
-NUM_POINTS = 1024
+TOTAL_POINTS = 1024
+GOAL_MARKER_POINTS = 192
+SCENE_POINTS = TOTAL_POINTS - GOAL_MARKER_POINTS
+TCP_MARKER_POINTS = 0
+ROBOT_POINT_FRACTION = 1.0
 
 _ARM_JOINTS = [f"joint{i}" for i in range(1, 8)]
 
@@ -162,6 +166,40 @@ def farthest_point_sampling(points, num_points=1024, use_cuda=True):
     return sampled.squeeze(0).cpu().numpy(), idx.squeeze(0).cpu().numpy()
 
 
+def goal_marker_offsets(*, num_points: int = 192, radius: float = 0.055) -> np.ndarray:
+    if num_points == 0: return np.zeros((0, 3), dtype=np.float32)
+    r = np.float32(radius)
+    if r == 0: return np.zeros((num_points, 3), dtype=np.float32)
+    pattern = [np.zeros(3, dtype=np.float32)]
+    cross_dirs = np.asarray([[1.0, 0, 0], [-1.0, 0, 0], [0, 1.0, 0], [0, -1.0, 0], [0, 0, 1.0], [0, 0, -1.0]], dtype=np.float32)
+    for direction in cross_dirs: pattern.append(r * direction)
+    ring_count = max(0, num_points - len(pattern))
+    for idx in range(ring_count):
+        angle = 2.0 * np.pi * idx / max(ring_count, 1)
+        ring_radius = r * (0.70 if idx % 2 == 0 else 1.00)
+        z_offset = r * 0.25 * (1.0 if idx % 4 in {0, 1} else -1.0)
+        pattern.append(np.asarray([ring_radius * np.cos(angle), ring_radius * np.sin(angle), z_offset], dtype=np.float32))
+    if num_points <= len(pattern): return np.asarray(pattern[:num_points], dtype=np.float32)
+    repeats = int(np.ceil(num_points / len(pattern)))
+    return np.tile(np.asarray(pattern, dtype=np.float32), (repeats, 1))[:num_points]
+
+def goal_marker_points(target_position, *, num_points: int = 192, radius: float = 0.055) -> np.ndarray:
+    target = np.asarray(target_position, dtype=np.float32)
+    offsets = goal_marker_offsets(num_points=num_points, radius=radius)
+    if num_points == 0: return np.zeros((*target.shape[:-1], 0, 3), dtype=np.float32)
+    return target[..., None, :] + offsets.reshape((1,) * (target.ndim - 1) + offsets.shape)
+
+def insert_goal_marker_points(point_cloud, target_position, *, num_points: int = 192, radius: float = 0.055) -> np.ndarray:
+    points = np.asarray(point_cloud, dtype=np.float32)
+    if num_points == 0: return points.astype(np.float32, copy=True)
+    marker = goal_marker_points(target_position, num_points=num_points, radius=radius)
+    expected_marker_shape = (*points.shape[:-2], num_points, 3)
+    marker = np.broadcast_to(marker, expected_marker_shape)
+    output = points.astype(np.float32, copy=True)
+    output[..., -num_points:, :] = marker
+    return output
+
+
 def process_point_cloud(pc_xyz, pc_rgb):
     mask = (
         (pc_xyz[:, 0] > WORK_SPACE[0][0]) & (pc_xyz[:, 0] < WORK_SPACE[0][1]) &
@@ -172,14 +210,14 @@ def process_point_cloud(pc_xyz, pc_rgb):
     pc_rgb_c = pc_rgb[mask]
     
     if len(pc_xyz_c) == 0:
-        return np.zeros((NUM_POINTS, 3), dtype=np.float32), np.zeros((NUM_POINTS, 3), dtype=np.float32)
+        return np.zeros((TOTAL_POINTS, 3), dtype=np.float32), np.zeros((TOTAL_POINTS, 3), dtype=np.float32)
         
-    num_pts = min(NUM_POINTS, len(pc_xyz_c))
+    num_pts = min(SCENE_POINTS, len(pc_xyz_c))
     pc_xyz_fps, idx = farthest_point_sampling(pc_xyz_c, num_points=num_pts, use_cuda=True)
     pc_rgb_fps = pc_rgb_c[idx]
     
-    if len(pc_xyz_fps) < NUM_POINTS:
-        pad_size = NUM_POINTS - len(pc_xyz_fps)
+    if len(pc_xyz_fps) < TOTAL_POINTS:
+        pad_size = TOTAL_POINTS - len(pc_xyz_fps)
         pad_xyz = np.zeros((pad_size, 3), dtype=np.float32)
         pad_rgb = np.zeros((pad_size, 3), dtype=np.float32)
         pc_xyz_fps = np.vstack([pc_xyz_fps, pad_xyz])
@@ -286,7 +324,7 @@ def convert_to_zarr(out_zarr_path, all_states, all_actions, all_targets, all_pcd
     data.create_dataset("state", data=state, chunks=(1024, state.shape[1]))
     data.create_dataset("action", data=action, chunks=(1024, action.shape[1]))
     data.create_dataset("target_position", data=target_position, chunks=(1024, 3))
-    data.create_dataset("point_cloud", data=point_cloud, chunks=(64, NUM_POINTS, 3))
+    data.create_dataset("point_cloud", data=point_cloud, chunks=(64, TOTAL_POINTS, 3))
     meta.create_dataset("episode_ends", data=episode_ends_arr)
     
     print(f"\nSaved to: {out_zarr_path}")
