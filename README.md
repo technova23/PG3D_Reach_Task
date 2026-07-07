@@ -249,6 +249,18 @@ uv run rerun artifacts/reach-datasets/world-model-vs-sim/episode_000_comparison.
 Rerun overlays the world-model branch and the live-simulator branch with distinct
 robot-point colors, one `episode_XXX_comparison.rrd` per episode.
 
+### Real world lab data creation
+
+```bash
+cd Real-data-zarr-setup
+
+# 1. Create the dataset (syncs rosbags, FK filtering, injects goal markers)
+python3 dataset_golden_fire.py
+
+# 2. Verify the output dataset and visualize the trajectory in Rerun
+python3 verify-dataset.py
+```
+
 ## Docs
 
 - `AGENTS.md`: durable agent instructions.
