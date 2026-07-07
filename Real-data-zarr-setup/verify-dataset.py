@@ -7,7 +7,7 @@ ZARR_PATH = "real_reach_golden.zarr"
 
 def main():
     if not Path(ZARR_PATH).exists():
-        print(f"Dataset {ZARR_PATH} not found. Please run dataset_golden_ffire.py first.")
+        print(f"Dataset {ZARR_PATH} not found. Please run dataset_golden_fire.py first.")
         return
 
     root = zarr.open(ZARR_PATH, mode="r")
