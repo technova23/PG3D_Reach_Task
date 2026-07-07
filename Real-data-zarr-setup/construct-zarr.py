@@ -3,11 +3,16 @@ This file constructs a zarr dataset from a set of real rosbag episodes.
 Synchronization is nearest-neighbour (no interpolation): each 20 Hz grid
 tick is assigned the joint state from the closest actual message.
 
+Each episode is validated by computing FK on the final joint state and
+comparing the EEF position against the known target.  Episodes where the
+EEF never came within --success-thresh of the target are skipped.
+
 python Real-data-zarr-setup/construct-zarr.py \
   --bag-root ../data-check/ \
   --target-json Real-data-zarr-setup/episode_target_mapping.json \
   --out-zarr real_reach_dataset.zarr \
-  --hz 20
+  --hz 20 \
+  --success-thresh 0.05
 """
   
 import argparse
@@ -20,6 +25,22 @@ import zarr
 from rosbags.highlevel import AnyReader
 from rosbags.typesys import Stores, get_typestore
 
+# Default URDF: already generated and committed to this repo.
+# Run dataset_generation/build_xarm7_robotiq_urdf.py to regenerate.
+_DEFAULT_URDF = (
+    Path(__file__).resolve().parents[1]
+    / "pg3d/envs/xarm_adapter/assets/xarm7_robotiq.urdf"
+)
+
+# xArm7 arm joint names in order (must match /xarm/joint_states ordering).
+_ARM_JOINTS = [f"joint{i}" for i in range(1, 8)]
+
+# Robot base position in the ManiSkill world frame.
+# Targets in the JSON are in world frame; FK gives robot-base frame.
+# eef_world = FK_eef_robot_base + ROBOT_BASE_IN_WORLD
+# Matches the ManiSkill simulation setup (xArm7 base placed at x = -0.615).
+_DEFAULT_BASE_OFFSET = np.array([-0.615, 0.0, 0.0], dtype=np.float32)
+
 def _parse_args():
 
     p = argparse.ArgumentParser(description="Construct zarr from real rosbag episodes")
@@ -27,15 +48,39 @@ def _parse_args():
     p.add_argument("--bag-root", type=Path, default=Path("../data-check/"))
     p.add_argument("--target-json", type=Path, default=Path("episode_target_mapping.json"))
     p.add_argument("--out-zarr", type=Path, default=Path("real_reach_dataset.zarr"))
-    p.add_argument("--hz", type=float, default=20.0, help="Resample/sync frequency in Hz")
+    p.add_argument("--hz", type=float, default=20.0, help="Sync frequency in Hz")
+    p.add_argument(
+        "--xarm7-urdf", type=Path, default=_DEFAULT_URDF,
+        help="Path to xarm7_robotiq.urdf for FK success check "
+             f"(default: {_DEFAULT_URDF}).",
+    )
+    p.add_argument(
+        "--base-offset", type=float, nargs=3,
+        default=None, metavar=("X", "Y", "Z"),
+        help="Robot base position in the target coordinate frame (world frame). "
+             "FK is in robot-base frame; this offset converts it to world frame "
+             "for comparison with JSON targets. Default: [-0.615, 0, 0] "
+             "(ManiSkill xArm7 sim placement).",
+    )
+    p.add_argument(
+        "--success-thresh", type=float, default=0.05,
+        help="Max EEF-to-target L2 distance (m) to count as success (default: 0.05).",
+    )
     return p.parse_args()
 
 args = _parse_args()
 
-BAG_ROOT = args.bag_root
-TARGET_JSON = args.target_json
-OUT_ZARR = args.out_zarr
-RESAMPLE_HZ = float(args.hz)
+BAG_ROOT       = args.bag_root
+TARGET_JSON    = args.target_json
+OUT_ZARR       = args.out_zarr
+RESAMPLE_HZ    = float(args.hz)
+XARM7_URDF     = args.xarm7_urdf
+SUCCESS_THRESH = float(args.success_thresh)
+BASE_OFFSET    = (
+    np.array(args.base_offset, dtype=np.float32)
+    if args.base_offset is not None
+    else _DEFAULT_BASE_OFFSET
+)
 
 
 def _parse_target(entry: dict) -> np.ndarray:
@@ -92,6 +137,54 @@ def _sync_to_grid(
     return positions[idx].astype(np.float32)
 
 
+# ---------------------------------------------------------------------------
+# FK helpers — yourdfpy-based, no GPU / mani_skill required
+# ---------------------------------------------------------------------------
+
+def _load_robot(urdf_path: Path):
+    """
+    Load the robot URDF with yourdfpy.
+
+    Meshes are not needed for FK, so we skip loading them for speed.
+    The combined xarm7_robotiq.urdf contains both arm joints (joint1..7)
+    and gripper joints.  We only ever set the 7 arm joints; the gripper
+    joints remain at their URDF default (zero).
+    """
+    if not urdf_path.exists():
+        raise SystemExit(
+            f"URDF not found: {urdf_path}\n"
+            "Run: python dataset_generation/build_xarm7_robotiq_urdf.py"
+        )
+    try:
+        import yourdfpy
+    except ImportError:
+        raise SystemExit("yourdfpy not installed. Run: pip install yourdfpy")
+
+    robot = yourdfpy.URDF.load(
+        str(urdf_path),
+        load_meshes=False,       # skip geometry — FK only
+        build_scene_graph=True,
+    )
+    return robot
+
+
+def _eef_pos(robot, q7: np.ndarray) -> np.ndarray:
+    """
+    Forward kinematics → EEF xyz (m) for the 7 xArm7 arm joints.
+
+    Args:
+        robot: yourdfpy.URDF loaded by _load_robot.
+        q7:    shape (7,) joint angles in radians (joint1 … joint7).
+
+    Returns:
+        xyz: shape (3,) float32 position in the base (link_base) frame.
+    """
+    cfg = {name: float(angle) for name, angle in zip(_ARM_JOINTS, q7)}
+    robot.update_cfg(cfg)
+    T = robot.get_transform("eef")   # 4×4 homogeneous in base frame — Robotiq TCP
+    return T[:3, 3].astype(np.float32)
+
+
 # episode_number -> [x, y, z]
 
 typestore = get_typestore(Stores.ROS2_HUMBLE)
@@ -99,12 +192,18 @@ typestore = get_typestore(Stores.ROS2_HUMBLE)
 with open(TARGET_JSON, "r") as f:
     target_map = json.load(f)
 
+# Load the robot URDF once — avoids reloading per episode.
+print(f"Loading robot from: {XARM7_URDF}")
+fk_robot = _load_robot(XARM7_URDF)
+print(f"Success threshold: {SUCCESS_THRESH * 1000:.0f} mm\n")
+
 all_states = []
 all_actions = []
 all_targets = []
 episode_ends = []
 
 running_end = 0
+n_skipped = 0
 
 episode_dirs = sorted(BAG_ROOT.glob("real_episode_*"))
 
@@ -183,8 +282,26 @@ for bag_dir in episode_dirs:
         raise KeyError(f"Episode {episode_num} missing from target mapping.")
 
     target = _parse_target(target_map[key])  # shape (3,)
-    target_position = np.tile(target, (len(state), 1))  # shape (N, 3)
 
+    # -----------------------------------------------------------------
+    # FK success check: did the EEF reach the target at the end?
+    # -----------------------------------------------------------------
+    # FK is in robot-base frame; add base offset to convert to world frame
+    # so it can be compared directly to the JSON targets (ManiSkill world frame).
+    final_eef_world = _eef_pos(fk_robot, state[-1].astype(np.float64)) + BASE_OFFSET
+    eef_error  = float(np.linalg.norm(final_eef_world - target))
+    print(f"  Final EEF (world): [{final_eef_world[0]:.4f}, {final_eef_world[1]:.4f}, {final_eef_world[2]:.4f}]")
+    print(f"  Target    : [{target[0]:.4f}, {target[1]:.4f}, {target[2]:.4f}]")
+    print(f"  EEF error : {eef_error * 1000:.1f} mm  (thresh {SUCCESS_THRESH * 1000:.0f} mm)")
+
+    if eef_error > SUCCESS_THRESH:
+        print(f"  → SKIP (error {eef_error * 1000:.1f} mm > {SUCCESS_THRESH * 1000:.0f} mm)\n")
+        n_skipped += 1
+        continue
+
+    print(f"  → SUCCESS\n")
+
+    target_position = np.tile(target, (len(state), 1))  # shape (N, 3)
 
     all_states.append(state)
     all_actions.append(action)
@@ -199,18 +316,23 @@ for bag_dir in episode_dirs:
 # Concatenate
 # =============================================================================
 
+print("\n==============================")
+print("Final Dataset")
+print("==============================")
+print(f"Accepted : {len(episode_ends)} episodes")
+print(f"Skipped  : {n_skipped} episodes (EEF error > {SUCCESS_THRESH * 1000:.0f} mm)")
+
+if len(episode_ends) == 0:
+    raise SystemExit("No successful episodes — nothing to write.")
+
 state = np.concatenate(all_states, axis=0)
 action = np.concatenate(all_actions, axis=0)
 target_position = np.concatenate(all_targets, axis=0)
 episode_ends = np.asarray(episode_ends, dtype=np.int64)
 
-print("\n==============================")
-print("Final Dataset")
-print("==============================")
 print("State :", state.shape)
 print("Action:", action.shape)
 print("Target:", target_position.shape)
-print("Episodes:", len(episode_ends))
 
 # =============================================================================
 # Write Zarr
