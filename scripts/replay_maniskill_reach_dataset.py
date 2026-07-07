@@ -84,16 +84,28 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
     try:
         env = gym.make(metadata["env_id"], **env_kwargs)
-        max_episodes = (
-            len(episode_ends)
-            if args.episodes is None
-            else min(args.episodes, len(episode_ends))
-        )
+        if args.episode_indices is not None:
+            # --episode-indices is 1-indexed (natural "1st, 21st, 50th" counting);
+            # convert to the 0-indexed positions used everywhere else below.
+            episode_indices = [i - 1 for i in args.episode_indices]
+            for i in episode_indices:
+                if not 0 <= i < len(episode_ends):
+                    raise ValueError(
+                        f"--episode-indices entry {i + 1} out of range "
+                        f"(dataset has {len(episode_ends)} episodes)"
+                    )
+        else:
+            max_episodes = (
+                len(episode_ends)
+                if args.episodes is None
+                else min(args.episodes, len(episode_ends))
+            )
+            episode_indices = list(range(max_episodes))
         if args.video_dir is not None:
             args.video_dir.mkdir(parents=True, exist_ok=True)
         if args.rerun_dir is not None:
             args.rerun_dir.mkdir(parents=True, exist_ok=True)
-        for episode_idx in range(max_episodes):
+        for episode_idx in episode_indices:
             episode_meta = metadata["episodes"][episode_idx]
             seed = int(episode_meta["seed"])
             env.reset(seed=seed, options={"reconfigure": True})
@@ -167,6 +179,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay a pg3d ManiSkill reach Zarr dataset.")
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--episodes", type=int, default=None)
+    parser.add_argument(
+        "--episode-indices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="1-indexed episode numbers to replay (e.g. --episode-indices 1 21 50), "
+        "instead of the first --episodes episodes.",
+    )
     parser.add_argument("--allow-failure", action="store_true")
     parser.add_argument("--video-dir", type=Path, default=None)
     parser.add_argument("--video-fps", type=int, default=10)
