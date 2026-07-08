@@ -15,9 +15,10 @@ from dataset_creation_helper import (
 )
 
 # === GLOBAL CONFIGURATION ===
-BAG_ROOT = Path("../data-check/")
+#BAG_ROOT = Path("../data-check/")
+BAG_ROOT = Path("/scratch2/skills/reach_task_real_episodes_xarm7/july17-combined")
 TARGET_JSON = Path("episode_target_mapping.json")
-OUT_ZARR = Path("real_reach_golden.zarr")
+OUT_ZARR = Path("real_reach_golden_with_tcp_pose.zarr")
 XARM7_URDF = Path(__file__).resolve().parents[1] / "pg3d/envs/xarm_adapter/assets/xarm7_with_gripper_colored.urdf"
 # ============================
 
@@ -38,6 +39,7 @@ def main():
     
     all_states = []
     all_actions = []
+    all_tcp_poses = []
     all_targets = []
     all_pcds = []
     episode_ends = []
@@ -71,8 +73,8 @@ def main():
             n_skipped += 1
             continue
             
-        # 2. Extract State and Action
-        state, action, grid_times = extract_state_action(bag_dir)
+        # 2. Extract State and Action (and TCP Pose)
+        state, action, tcp_poses, grid_times = extract_state_action(bag_dir, fk_robot)
         if state is None:
             print("  -> SKIP: Failed to extract states/actions.")
             n_skipped += 1
@@ -102,6 +104,7 @@ def main():
         
         all_states.append(state)
         all_actions.append(action)
+        all_tcp_poses.append(tcp_poses)
         all_targets.append(target_array)
         all_pcds.append(pcds)
         
@@ -116,7 +119,7 @@ def main():
 
     if n_success > 0:
         print(f"\nConverting to Zarr at {OUT_ZARR}...")
-        convert_to_zarr(OUT_ZARR, all_states, all_actions, all_targets, all_pcds, episode_ends)
+        convert_to_zarr(OUT_ZARR, all_states, all_actions, all_targets, all_pcds, all_tcp_poses, episode_ends)
 
 if __name__ == "__main__":
     main()

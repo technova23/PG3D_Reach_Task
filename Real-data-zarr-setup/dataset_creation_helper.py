@@ -31,9 +31,9 @@ T_DEPTH_TO_COLOR = np.array([
 # extrinsics from colour cam to base
 BASE_TO_EXT_CAM = np.array([
     [0.0534 , 0.0868 , -0.9948 , 1.7103],
-     [0.9985 , -0.0156 , 0.0522 , 0.0043],
-     [-0.011 , -0.9961 , -0.0875 , 0.7097],
-     [ 0.0,     0.,      0.,      1.    ],
+    [0.9985 , -0.0156 , 0.0522 , 0.0043],
+    [-0.011 , -0.9961 , -0.0875 , 0.7097],
+    [ 0.0,     0.,      0.,      1.    ],
 ], dtype=np.float32)
 
 
@@ -65,6 +65,19 @@ def _eef_pos(robot, q7):
     return T[:3, 3].astype(np.float32)
 
 
+def _tcp_pose(robot, q7):
+    """
+    Returns the 7D tcp pose [x, y, z, qw, qx, qy, qz] in the base frame.
+    """
+    import trimesh.transformations as tf
+    cfg = {name: float(angle) for name, angle in zip(_ARM_JOINTS, q7)}
+    robot.update_cfg(cfg)
+    T = robot.get_transform("link_tcp")
+    pos = T[:3, 3]
+    quat = tf.quaternion_from_matrix(T) # returns [qw, qx, qy, qz]
+    return np.concatenate([pos, quat]).astype(np.float32)
+
+
 def check_reachability(bag_dir, target, fk_robot):
     """
     Checks if the end effector is within MAX_DIFF distance from the target
@@ -88,9 +101,10 @@ def check_reachability(bag_dir, target, fk_robot):
     return (err <= MAX_DIFF), err
 
 
-def extract_state_action(bag_dir):
+def extract_state_action(bag_dir, fk_robot):
     """
     Extracts state and action from the bag file and resamples them to RESAMPLE_HZ .
+    Also computes the tcp_pose using forward kinematics.
     """
     typestore = get_typestore(Stores.ROS2_HUMBLE)
     msg_times, msg_positions = [], []
@@ -104,14 +118,14 @@ def extract_state_action(bag_dir):
                     msg_positions.append(np.asarray(msg.position, dtype=np.float64))
                     
     if not msg_times: 
-        return None, None, None
+        return None, None, None, None
         
     times = np.asarray(msg_times)
     positions = np.stack(msg_positions, axis=0)
     
     t_start, t_end = times[0], times[-1]
     if t_end <= t_start: 
-        return None, None, None
+        return None, None, None, None
     
     step = 1.0 / RESAMPLE_HZ
     grid = np.arange(t_start, t_end + 1e-9, step, dtype=np.float64)
@@ -126,7 +140,11 @@ def extract_state_action(bag_dir):
     action[:-1] = state[1:]
     action[-1] = state[-1]
     
-    return state, action, grid
+    tcp_poses = np.zeros((len(state), 7), dtype=np.float32)
+    for i, q in enumerate(state):
+        tcp_poses[i] = _tcp_pose(fk_robot, q)
+    
+    return state, action, tcp_poses, grid
 
 """
 Most of the helper functions are from : https://github.com/darshil0805/Point-Cloud-Processing/blob/main/data_processing_pipeline/extract_point_clouds_one_cam.py
@@ -318,7 +336,7 @@ def extract_depth(bag_dir, grid_times):
     return np.stack(pcds, axis=0)
 
 
-def convert_to_zarr(out_zarr_path, all_states, all_actions, all_targets, all_pcds, episode_ends):
+def convert_to_zarr(out_zarr_path, all_states, all_actions, all_targets, all_pcds, all_tcp_poses, episode_ends):
     if len(episode_ends) == 0:
         print("No successful episodes to write.")
         return
@@ -327,6 +345,7 @@ def convert_to_zarr(out_zarr_path, all_states, all_actions, all_targets, all_pcd
     action = np.concatenate(all_actions, axis=0)
     target_position = np.concatenate(all_targets, axis=0)
     point_cloud = np.concatenate(all_pcds, axis=0)
+    tcp_pose = np.concatenate(all_tcp_poses, axis=0)
     episode_ends_arr = np.asarray(episode_ends, dtype=np.int64)
 
     root = zarr.open(str(out_zarr_path), mode="w")
@@ -335,9 +354,12 @@ def convert_to_zarr(out_zarr_path, all_states, all_actions, all_targets, all_pcd
 
     data.create_dataset("state", data=state, chunks=(1024, state.shape[1]))
     data.create_dataset("action", data=action, chunks=(1024, action.shape[1]))
+    data.create_dataset("tcp_pose", data=tcp_pose, chunks=(1024, 7))
     data.create_dataset("target_position", data=target_position, chunks=(1024, 3))
     data.create_dataset("point_cloud", data=point_cloud, chunks=(64, TOTAL_POINTS, 3))
     meta.create_dataset("episode_ends", data=episode_ends_arr)
     
     print(f"\nSaved to: {out_zarr_path}")
     print(root.tree())
+
+
