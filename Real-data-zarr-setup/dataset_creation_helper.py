@@ -75,9 +75,10 @@ def check_reachability(bag_dir, target, fk_robot):
     with AnyReader([bag_dir], default_typestore=typestore) as reader:
         connections = [x for x in reader.connections if x.topic == "/xarm/joint_states"]
         for conn, ts, raw in reader.messages(connections=connections):
-            msg = reader.deserialize(raw, conn.msgtype)
-            if len(msg.position) == 7:
-                last_q = np.asarray(msg.position, dtype=np.float64)
+            if conn.topic == "/xarm/joint_states":
+                msg = reader.deserialize(raw, conn.msgtype)
+                if len(msg.position) == 7:
+                    last_q = np.asarray(msg.position, dtype=np.float64)
                     
     if last_q is None:
         return False, 999.0
@@ -96,10 +97,11 @@ def extract_state_action(bag_dir):
     with AnyReader([bag_dir], default_typestore=typestore) as reader:
         connections = [x for x in reader.connections if x.topic == "/xarm/joint_states"]
         for conn, ts, raw in reader.messages(connections=connections):
-            msg = reader.deserialize(raw, conn.msgtype)
-            if len(msg.position) == 7:
-                msg_times.append(float(ts) / 1e9)
-                msg_positions.append(np.asarray(msg.position, dtype=np.float64))
+            if conn.topic == "/xarm/joint_states":
+                msg = reader.deserialize(raw, conn.msgtype)
+                if len(msg.position) == 7:
+                    msg_times.append(float(ts) / 1e9)
+                    msg_positions.append(np.asarray(msg.position, dtype=np.float64))
                     
     if not msg_times: 
         return None, None, None
