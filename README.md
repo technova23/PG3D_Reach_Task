@@ -77,6 +77,19 @@ git submodule update --init --recursive
 `external/dp3` is reference material during migration. Runtime imports should use
 `pg3d.policies.dp3`, not `external/dp3`.
 
+> **Note (PyTorch3D):** Do not install PyTorch3D directly from the official source since our CUDA environment (12.4 in the Enigma server) requires a third-party build. PyTorch3D's official `INSTALL.md` only lists support up to Torch 2.4.1. For our setup with Torch 2.6.0+cu124, use this highly recommended third-party wheel builder: [PyTorch3D Discussion #1752](https://github.com/facebookresearch/pytorch3d/discussions/1752).
+
+```bash
+# activate your existing venv first
+source .venv/bin/activate
+
+# install iopath (pytorch3d dependency)
+python -m pip install iopath fvcore
+
+# install pytorch3d prebuilt for torch2.6.0+cu124
+python -m pip install --extra-index-url https://miropsota.github.io/torch_packages_builder pytorch3d==0.7.8+5043d15pt2.6.0cu124
+```
+
 ## Checks
 
 ```bash
