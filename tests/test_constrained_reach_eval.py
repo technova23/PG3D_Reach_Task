@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import torch
 
+from pg3d.composition import CandidateDiagnostics, ControllerResult
+from pg3d.constraints import CartesianPoseConstraint
 from pg3d.envs.maniskill_adapter.dataset import PointCloudCropConfig
 from pg3d.eval import (
     AvoidOverlayConfig,
@@ -16,6 +18,7 @@ from pg3d.eval import (
     NominalPathAvoidConfig,
     TimingRecorder,
     candidate_feasibility_fraction,
+    cartesian_pose_path_metrics,
     concatenate_rollouts,
     direct_path_avoid_region,
     episode_metric_row,
@@ -39,8 +42,10 @@ from scripts.build_nominal_path_constraints import (
 )
 from scripts.eval_constrained_reach import (
     DP3ChunkPolicyAdapter,
+    EvalDecisionSummary,
     _artifact_selection_summary,
     _build_multichunk_candidates,
+    _cartesian_pose_constraint_from_zarr_path,
     _constraint_source_summary,
     _constraints_for_episode,
     _effective_projection_half_extents,
@@ -49,6 +54,9 @@ from scripts.eval_constrained_reach import (
     _point_at_arc_fraction_xy,
     _read_episode_indices_file,
     _seed_torch,
+    _tcp_pose_index_at_arc_fraction,
+    _write_decision,
+    _write_step_trace,
 )
 from scripts.eval_constrained_reach import (
     parse_args as parse_eval_args,
@@ -118,6 +126,125 @@ def test_projection_half_extents_floor_at_minimum() -> None:
     )
 
     np.testing.assert_allclose(half, np.asarray([0.03, 0.05], dtype=np.float32), atol=1e-6)
+
+
+def test_tcp_pose_index_at_arc_fraction_selects_recorded_pose_by_path_length() -> None:
+    tcp_poses = np.asarray(
+        [
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [1.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    assert _tcp_pose_index_at_arc_fraction(tcp_poses, fraction=0.0) == 0
+    assert _tcp_pose_index_at_arc_fraction(tcp_poses, fraction=0.5) == 1
+    assert _tcp_pose_index_at_arc_fraction(tcp_poses, fraction=0.9) == 2
+    assert _tcp_pose_index_at_arc_fraction(tcp_poses, fraction=1.0) == 2
+
+
+def test_dataset_cartesian_pose_constraint_uses_zarr_tcp_pose_frame(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "eval"),
+            "--source",
+            "dataset",
+            "--constraint-type",
+            "cartesian_pose",
+            "--cartesian-pose-path-fraction",
+            "0.5",
+            "--cartesian-pose-position-tolerance",
+            "0.03",
+            "--cartesian-pose-rotation-tolerance",
+            "0.4",
+        ]
+    )
+    tcp_poses = np.asarray(
+        [
+            [0.0, 0.0, 0.2, 1.0, 0.0, 0.0, 0.0],
+            [0.1, 0.0, 0.2, 0.0, 1.0, 0.0, 0.0],
+            [0.3, 0.0, 0.2, 0.0, 0.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    constraint = _cartesian_pose_constraint_from_zarr_path(
+        spec=RolloutSpec(
+            output_index=4,
+            seed=123,
+            source="dataset",
+            dataset_episode_index=9,
+        ),
+        zarr_context={
+            "episode_start": 100,
+            "episode_end": 103,
+            "tcp_pose_path": tcp_poses,
+        },
+        args=args,
+    )
+
+    assert isinstance(constraint, CartesianPoseConstraint)
+    np.testing.assert_allclose(constraint.target_position, [0.1, 0.0, 0.2])
+    np.testing.assert_allclose(constraint.target_orientation, [0.0, 1.0, 0.0, 0.0])
+    assert constraint.position_tolerance == pytest.approx(0.03)
+    assert constraint.rotation_tolerance == pytest.approx(0.4)
+    assert constraint.metadata["dataset_episode_index"] == 9
+    assert constraint.metadata["local_frame_index"] == 1
+    assert constraint.metadata["global_frame_index"] == 101
+
+    path = tmp_path / "episode_000.json"
+    save_episode_constraints(path, [constraint])
+    [loaded] = load_episode_constraints(path)
+    assert isinstance(loaded, CartesianPoseConstraint)
+    assert loaded.metadata["source"] == "zarr_tcp_pose_path"
+    assert loaded.metadata["global_frame_index"] == 101
+
+
+def test_eval_dataset_cartesian_pose_constraint_source_summary(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "eval"),
+            "--source",
+            "dataset",
+            "--constraint-type",
+            "cartesian_pose",
+            "--cartesian-pose-path-fraction",
+            "0.6",
+        ]
+    )
+
+    summary = _constraint_source_summary(args)
+
+    assert summary["type"] == "dataset_cartesian_pose"
+    assert summary["cartesian_pose_path_fraction"] == pytest.approx(0.6)
+
+
+def test_eval_dataset_cartesian_pose_requires_dataset_source(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="source dataset"):
+        parse_eval_args(
+            [
+                "--checkpoint",
+                str(tmp_path / "policy.pt"),
+                "--dataset",
+                str(tmp_path / "dataset.zarr"),
+                "--output-dir",
+                str(tmp_path / "eval"),
+                "--source",
+                "fresh",
+                "--constraint-type",
+                "cartesian_pose",
+            ]
+        )
 
 
 def test_direct_path_avoid_region_and_json_persistence(tmp_path: Path) -> None:
@@ -224,9 +351,285 @@ def test_episode_metric_row_computes_clearance_and_combined_success() -> None:
     assert row["reach_success"] is True
     assert row["constraint_satisfied"] is True
     assert row["combined_success"] is True
-    assert row["final_target_distance"] == pytest.approx(0.0)
-    assert row["min_clearance"] == pytest.approx(0.1)
-    assert row["candidate_feasibility_fraction"] == pytest.approx(0.5)
+
+
+def test_episode_metric_row_cartesian_pose_uses_any_timestep_within_tolerance() -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    path = EpisodePath()
+    path.append_pose(
+        tcp_pose=[0.0, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.0, 0.0],
+        target_distance=1.0,
+    )
+    path.append_pose(
+        tcp_pose=[0.2, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.1, 0.0],
+        target_distance=0.1,
+    )
+    row = episode_metric_row(
+        method="reranking",
+        episode=0,
+        seed=100,
+        path=path,
+        constraints=[constraint],
+        reach_success=True,
+        first_success_step=1,
+        steps=2,
+        replans=1,
+        candidate_feasibility_fraction=None,
+    )
+
+    assert row["constraint_satisfied"] is True
+    assert row["constraint_satisfied_tcp"] is True
+
+
+def test_episode_metric_row_cartesian_pose_fails_when_pose_is_never_reached() -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    path = EpisodePath()
+    path.append_pose(
+        tcp_pose=[0.0, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.0, 0.0],
+        target_distance=1.0,
+    )
+
+    assert not path_satisfies_constraints(path.tcp_array, [constraint])
+    assert not path_satisfies_constraints(path, [constraint])
+
+    row = episode_metric_row(
+        method="reranking",
+        episode=0,
+        seed=100,
+        path=path,
+        constraints=[constraint],
+        reach_success=True,
+        first_success_step=1,
+        steps=1,
+        replans=1,
+        candidate_feasibility_fraction=None,
+    )
+
+    assert row["constraint_satisfied"] is False
+    assert row["constraint_satisfied_tcp"] is False
+    assert row["combined_success"] is False
+
+
+def test_episode_metric_row_robot_clearance_still_requires_cartesian_pose() -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    path = EpisodePath()
+    path.append_pose(
+        tcp_pose=[0.0, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.0, 0.0],
+        target_distance=1.0,
+    )
+
+    row = episode_metric_row(
+        method="reranking",
+        episode=0,
+        seed=100,
+        path=path,
+        constraints=[constraint],
+        reach_success=True,
+        first_success_step=1,
+        steps=1,
+        replans=1,
+        candidate_feasibility_fraction=None,
+        robot_clearance_points=np.zeros((1, 3), dtype=np.float32),
+    )
+
+    assert row["constraint_satisfied"] is False
+    assert row["constraint_target"] == "robot"
+
+
+def test_episode_metric_row_cartesian_pose_checks_rotation_matrix_targets() -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.eye(3, dtype=np.float32).reshape(-1),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    path = EpisodePath()
+    path.append_pose(
+        tcp_pose=[0.2, 0.0, 0.3, 0.0, 1.0, 0.0, 0.0],
+        q=[0.0, 0.0],
+        target_distance=0.0,
+    )
+
+    row = episode_metric_row(
+        method="reranking",
+        episode=0,
+        seed=100,
+        path=path,
+        constraints=[constraint],
+        reach_success=True,
+        first_success_step=1,
+        steps=1,
+        replans=1,
+        candidate_feasibility_fraction=None,
+    )
+
+    assert row["constraint_satisfied"] is False
+    assert row["constraint_satisfied_tcp"] is False
+
+
+def test_cartesian_pose_path_metrics_record_best_executed_frame() -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    path = EpisodePath()
+    path.append_pose(
+        tcp_pose=[0.0, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.0, 0.0],
+        target_distance=1.0,
+    )
+    path.append_pose(
+        tcp_pose=[0.21, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.1, 0.0],
+        target_distance=0.5,
+    )
+    path.append_pose(
+        tcp_pose=[0.3, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0],
+        q=[0.2, 0.0],
+        target_distance=0.1,
+    )
+
+    [metrics] = cartesian_pose_path_metrics(path, [constraint])
+
+    assert metrics["min_position_step"] == 1
+    assert metrics["first_satisfied_step"] == 1
+    assert metrics["min_position_error"] == pytest.approx(0.01)
+    assert metrics["rotation_error_at_min_position"] == pytest.approx(0.0)
+
+
+def test_step_trace_logs_pose_metrics_and_action_that_reached_frame(tmp_path: Path) -> None:
+    constraint = CartesianPoseConstraint(
+        target_position=np.asarray([0.2, 0.0, 0.3], dtype=np.float32),
+        target_orientation=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        position_tolerance=0.02,
+        rotation_tolerance=0.05,
+    )
+    trace_path = tmp_path / "step_traces.jsonl"
+    entry = {
+        "tcp_pose": np.asarray([0.21, 0.0, 0.3, 1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        "agent_pos": np.asarray([0.1, 0.0], dtype=np.float32),
+        "target_position": np.asarray([1.0, 0.0, 0.2], dtype=np.float32),
+        "final_distance": np.asarray([0.5], dtype=np.float32),
+        "success": False,
+    }
+
+    with trace_path.open("w", encoding="utf-8") as trace_file:
+        _write_step_trace(
+            trace_file,
+            method="reranking",
+            spec=RolloutSpec(output_index=0, seed=100, source="dataset", dataset_episode_index=7),
+            step=3,
+            replan_index=1,
+            selected_chunk_step=0,
+            decision=None,
+            entry=entry,
+            constraints=[constraint],
+            policy_action=np.asarray([0.1, 0.2], dtype=np.float32),
+            sim_action=np.asarray([0.1, 0.2, 0.04], dtype=np.float32),
+        )
+
+    [row] = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert row["step"] == 3
+    assert row["dataset_episode_index"] == 7
+    assert row["policy_action"] == pytest.approx([0.1, 0.2])
+    assert row["sim_action"] == pytest.approx([0.1, 0.2, 0.04])
+    assert row["cartesian_pose_metrics"][0]["position_error"] == pytest.approx(0.01)
+    assert row["cartesian_pose_metrics"][0]["satisfied"] is True
+
+
+def test_decision_log_records_selected_branch_rollout_and_candidate_summaries(
+    tmp_path: Path,
+) -> None:
+    action_chunk = ActionChunk(
+        actions=np.asarray([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32),
+        action_mode="abs_joint",
+        dt=1.0,
+        metadata={"candidate_index": 5},
+    )
+    rollout = ImaginedRollout(
+        q=np.asarray([[0.0, 0.0], [0.1, 0.2]], dtype=np.float32),
+        eef_path=np.asarray([[0.0, 0.0, 0.2], [0.2, 0.0, 0.3]], dtype=np.float32),
+        eef_orientations=np.asarray(
+            [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+            dtype=np.float32,
+        ),
+        robot_point_clouds=[np.zeros((0, 3), dtype=np.float32) for _ in range(2)],
+        scene_point_clouds=[np.zeros((0, 3), dtype=np.float32) for _ in range(2)],
+        robot_masks=[np.zeros((0,), dtype=bool) for _ in range(2)],
+        action_chunk=action_chunk,
+        metadata={"candidate_index": 5},
+    )
+    candidate = CandidateDiagnostics(
+        index=5,
+        attempted_k=32,
+        action_chunk=action_chunk,
+        rollout=rollout,
+        constraint_costs={"cartesian_pose": 0.0},
+        constraint_satisfied={"0:cartesian_pose": True},
+        feasible=True,
+        goal_distance=0.1,
+        constraint_penalty=0.0,
+        smoothness=0.01,
+        consensus_deviation=0.02,
+        policy_surrogate=None,
+        total_score=0.11,
+    )
+    decision = EvalDecisionSummary(
+        selected_chunk=action_chunk,
+        result=ControllerResult(
+            selected=candidate,
+            candidates=[candidate],
+            attempted_k_values=[32],
+            selection_reason="best_feasible",
+        ),
+        candidate_feasible=1,
+        candidate_total=1,
+        selection_reason="best_feasible",
+    )
+    decisions_path = tmp_path / "decisions.jsonl"
+
+    with decisions_path.open("w", encoding="utf-8") as decisions_file:
+        _write_decision(
+            decisions_file,
+            method="reranking",
+            spec=RolloutSpec(output_index=0, seed=100, source="dataset", dataset_episode_index=7),
+            replan_index=0,
+            step=0,
+            decision=decision,
+        )
+
+    [row] = [json.loads(line) for line in decisions_path.read_text(encoding="utf-8").splitlines()]
+    assert row["selected_index"] == 5
+    np.testing.assert_allclose(
+        np.asarray(row["selected_action_chunk"]["actions"], dtype=np.float32),
+        np.asarray([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(row["selected_rollout"]["eef_path"], dtype=np.float32),
+        np.asarray([[0.0, 0.0, 0.2], [0.2, 0.0, 0.3]], dtype=np.float32),
+    )
+    assert row["candidate_summaries"][0]["constraint_costs"]["cartesian_pose"] == 0.0
 
 
 def test_constraint_satisfaction_fails_for_path_inside_sphere() -> None:
@@ -470,7 +873,7 @@ def test_eval_episode_indices_file_and_precomputed_constraints(tmp_path: Path) -
     )
 
     assert _read_episode_indices_file(indices_path) == [3, 7]
-    loaded = _constraints_for_episode(
+    loaded, pending_spawn = _constraints_for_episode(
         None,
         spec=RolloutSpec(
             output_index=0,
@@ -487,6 +890,7 @@ def test_eval_episode_indices_file_and_precomputed_constraints(tmp_path: Path) -
 
     assert args.constraints_dir == constraints_dir
     assert _constraint_source_summary(args)["type"] == "precomputed"
+    assert pending_spawn is None
     np.testing.assert_allclose(loaded[0].region.center, [0.1, 0.0, 0.2])
 
 

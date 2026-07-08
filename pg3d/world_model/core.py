@@ -81,6 +81,11 @@ class GeometricWorldModel:
         if metadata:
             rollout_metadata.update(metadata)
 
+        eef_orientations = None
+        if observation.robot_state.tcp_pose is not None and observation.robot_state.tcp_pose.shape[0] >= 7:
+            orientation = np.asarray(observation.robot_state.tcp_pose[3:7], dtype=np.float32)
+            eef_orientations = np.repeat(orientation.reshape(1, 4), repeats=q.shape[0], axis=0)
+
         return ImaginedRollout(
             q=q,
             eef_path=np.stack(eef_positions, axis=0).astype(np.float32, copy=False),
@@ -89,6 +94,7 @@ class GeometricWorldModel:
             robot_masks=robot_masks,
             action_chunk=action_chunk,
             metadata=rollout_metadata,
+            eef_orientations=eef_orientations,
         )
 
 

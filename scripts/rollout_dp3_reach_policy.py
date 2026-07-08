@@ -12,12 +12,14 @@ import numpy as np
 import torch
 
 from pg3d.envs.maniskill_adapter import adapt_observation, register_pg3d_reach_envs
+from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import (
     DEFAULT_WORKSPACE_BOUNDS,
     PointCloudCropConfig,
     crop_point_cloud,
     load_reach_metadata,
 )
+from pg3d.constraints import CartesianPoseConstraint
 from pg3d.policies.dp3 import SimpleDP3
 from pg3d.policies.dp3.checkpoint import load_reach_policy_from_checkpoint
 from pg3d.policies.dp3.goal_markers import (
@@ -74,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     register_pg3d_reach_envs()
+    register_pg3d_xarm7_gripper_reach_envs()
     device = select_device(args.device)
     policy = load_reach_policy_from_checkpoint(
         args.checkpoint,
@@ -690,7 +693,7 @@ def save_rerun_timeline(
     rr.init("pg3d_dp3_reach_policy_rollout", spawn=False)
     rr.save(str(path))
     if constraints:
-        from pg3d.viz.constraints import avoid_region_line_visuals
+        from pg3d.viz.constraints import avoid_region_line_visuals, cartesian_pose_line_visuals
 
         rr.set_time_sequence("step", 0)
         for visual in avoid_region_line_visuals(constraints):
@@ -699,6 +702,14 @@ def save_rerun_timeline(
                 rr.LineStrips3D(visual.line_strips, colors=visual.color),
                 static=True,
             )
+        for constraint in constraints:
+            if isinstance(constraint, CartesianPoseConstraint):
+                for visual in cartesian_pose_line_visuals(constraint):
+                    rr.log(
+                        f"world/constraints/{visual.name}",
+                        rr.LineStrips3D(visual.line_strips, colors=visual.color),
+                        static=True,
+                    )
     for step_idx, entry in enumerate(timeline):
         rr.set_time_sequence("step", step_idx)
         valid = np.asarray(entry["point_valid_mask"], dtype=bool)

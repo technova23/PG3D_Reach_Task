@@ -41,13 +41,21 @@ def adapt_observation(
     extra = _mapping(obs.get("extra", {}), name="obs['extra']")
     pointcloud = obs.get("pointcloud")
 
+    agent_pos_indices = _agent_pos_joint_indices(env)
+    joint_positions = _batch_item(agent["qpos"], batch_index=batch_index, name="agent.qpos")
+    joint_velocities = (
+        _batch_item(agent["qvel"], batch_index=batch_index, name="agent.qvel")
+        if "qvel" in agent
+        else None
+    )
+    if agent_pos_indices is not None:
+        joint_positions = joint_positions[agent_pos_indices]
+        if joint_velocities is not None:
+            joint_velocities = joint_velocities[agent_pos_indices]
+
     robot_state = RobotState(
-        joint_positions=_batch_item(agent["qpos"], batch_index=batch_index, name="agent.qpos"),
-        joint_velocities=(
-            _batch_item(agent["qvel"], batch_index=batch_index, name="agent.qvel")
-            if "qvel" in agent
-            else None
-        ),
+        joint_positions=joint_positions,
+        joint_velocities=joint_velocities,
         tcp_pose=(
             _batch_item(extra["tcp_pose"], batch_index=batch_index, name="extra.tcp_pose")
             if "tcp_pose" in extra
@@ -176,6 +184,19 @@ def _mapping(value: Any, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a mapping, got {type(value).__name__}")
     return value
+
+
+def _agent_pos_joint_indices(env: Any | None) -> list[int] | None:
+    """Return the agent-declared qpos subset for agent_pos, or None for all of it.
+
+    Some agents (e.g. XArm7Gripper) have qpos entries that are pure URDF <mimic>
+    followers of another joint already in qpos -- redundant information that
+    would otherwise bloat agent_pos with copies of the same value. Such agents
+    declare ``agent_pos_joint_indices`` (a list of qpos indices to keep); agents
+    that don't declare it (the default) keep the full qpos vector unchanged.
+    """
+    agent = getattr(getattr(env, "unwrapped", env), "agent", None)
+    return getattr(agent, "agent_pos_joint_indices", None)
 
 
 def _gripper_open(qpos: Any, *, batch_index: int) -> float | None:

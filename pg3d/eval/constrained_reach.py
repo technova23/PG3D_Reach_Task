@@ -14,6 +14,8 @@ from pg3d.constraints import (
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
+    CartesianPoseConstraint,
+    CylinderPassageConstraint,
     SceneContext,
     SphereRegion,
     constraints_from_json,
@@ -65,6 +67,7 @@ class EpisodePath:
     """Executed simulator path used for constrained-reach metrics."""
 
     tcp_positions: list[np.ndarray] = field(default_factory=list)
+    tcp_orientations: list[np.ndarray] = field(default_factory=list)
     q: list[np.ndarray] = field(default_factory=list)
     target_distances: list[float] = field(default_factory=list)
 
@@ -78,6 +81,13 @@ class EpisodePath:
         self.tcp_positions.append(tcp)
         self.q.append(qpos)
         self.target_distances.append(float(target_distance))
+
+    def append_pose(self, *, tcp_pose: Any, q: Any, target_distance: float) -> None:
+        pose = np.asarray(tcp_pose, dtype=np.float32).reshape(-1)
+        if pose.shape[0] < 7:
+            raise ValueError("tcp_pose must contain position and orientation")
+        self.tcp_orientations.append(pose[3:7].astype(np.float32, copy=True))
+        self.append(tcp_position=pose[:3], q=q, target_distance=target_distance)
 
     @property
     def tcp_array(self) -> np.ndarray:
@@ -242,7 +252,7 @@ def nominal_path_avoid_region(
     )
 
 
-def save_episode_constraints(path: Path, constraints: list[AvoidRegion]) -> None:
+def save_episode_constraints(path: Path, constraints: list[Any]) -> None:
     """Persist one episode's constraint instances for repeatable evaluation."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -251,18 +261,21 @@ def save_episode_constraints(path: Path, constraints: list[AvoidRegion]) -> None
     )
 
 
-def load_episode_constraints(path: Path) -> list[AvoidRegion]:
-    """Load one episode's avoid-region constraints from JSON."""
+def load_episode_constraints(path: Path) -> list[Any]:
+    """Load one episode's constraints from JSON."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, list):
         raise ValueError(f"constraints file must contain a list: {path}")
     constraints = constraints_from_json(payload)
-    avoid_regions: list[AvoidRegion] = []
+    avoid_regions: list[Any] = []
     for idx, constraint in enumerate(constraints):
-        if not isinstance(constraint, (AvoidRegion, AvoidProjection)):
+        if not isinstance(
+            constraint,
+            (AvoidRegion, AvoidProjection, CartesianPoseConstraint, CylinderPassageConstraint),
+        ):
             raise ValueError(
-                f"only AvoidRegion/AvoidProjection constraints are supported for "
-                f"constrained reach; {path} item {idx} is {type(constraint).__name__}"
+                f"unsupported constraint type for constrained reach; "
+                f"{path} item {idx} is {type(constraint).__name__}"
             )
         avoid_regions.append(constraint)
     return avoid_regions
@@ -271,14 +284,14 @@ def load_episode_constraints(path: Path) -> list[AvoidRegion]:
 def scene_context_for_constraints(
     *,
     target_position: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     metadata: dict[str, Any] | None = None,
 ) -> SceneContext:
     """Build the scene context passed to composition controllers."""
     regions = {
         constraint.name: constraint.region
         for constraint in constraints
-        if isinstance(constraint, (AvoidRegion, AvoidProjection))
+        if hasattr(constraint, "region")
     }
     return SceneContext(
         target_position=np.asarray(target_position, dtype=np.float32),
@@ -289,7 +302,7 @@ def scene_context_for_constraints(
 
 def min_constraint_clearance(
     tcp_positions: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
 ) -> float | None:
     """Return minimum signed clearance to all avoid regions, after margins."""
     path = np.asarray(tcp_positions, dtype=np.float32)
@@ -299,21 +312,299 @@ def min_constraint_clearance(
         raise ValueError(f"tcp_positions must have shape [T, 3], got {path.shape}")
     clearances: list[float] = []
     for constraint in constraints:
+        if not isinstance(constraint, (AvoidRegion, AvoidProjection)):
+            continue
         signed = constraint.region.signed_distance(path)
-        clearances.append(float(np.min(signed - float(constraint.margin))))
+        clearances.append(float(np.min(signed - float(getattr(constraint, "margin", 0.0)))))
     return min(clearances) if clearances else None
+
+
+def _episode_path_satisfies_constraints(path: EpisodePath, constraints: list[Any]) -> bool:
+    orientations = (
+        np.stack(path.tcp_orientations, axis=0).astype(np.float32, copy=False)
+        if path.tcp_orientations
+        else None
+    )
+    for constraint in constraints:
+        if isinstance(constraint, (AvoidRegion, AvoidProjection)):
+            signed = constraint.region.signed_distance(path.tcp_array)
+            if float(
+                np.max(np.maximum(float(getattr(constraint, "margin", 0.0)) - signed, 0.0))
+            ) > float(getattr(constraint, "tolerance", 1e-6)):
+                return False
+            continue
+        if isinstance(constraint, CartesianPoseConstraint):
+            if orientations is None or path.tcp_array.shape[0] == 0:
+                return False
+            pos_errors = np.linalg.norm(
+                path.tcp_array - constraint.target_position.reshape(1, 3), axis=1
+            )
+            rot_errors = np.asarray(
+                [
+                    _quaternion_distance(orientation, constraint.target_orientation)
+                    for orientation in orientations
+                ],
+                dtype=np.float32,
+            )
+            satisfied = bool(
+                np.any(
+                    (pos_errors <= float(constraint.position_tolerance) + 1e-6)
+                    & (rot_errors <= float(constraint.rotation_tolerance) + 1e-6)
+                )
+            )
+            if not satisfied:
+                return False
+            continue
+        if isinstance(constraint, CylinderPassageConstraint):
+            if orientations is None:
+                return False
+            start = constraint.waypoint_start
+            end = constraint.waypoint_end
+            if end >= path.tcp_array.shape[0]:
+                return False
+            segment = path.tcp_array[start : end + 1]
+            signed_distance = constraint.region.signed_distance(segment)
+            axial = constraint.region.project_axial(segment).reshape(-1)
+            axial_span = float(np.max(axial) - np.min(axial)) if axial.size else 0.0
+            passage_violation = max(float(constraint.region.length) - axial_span, 0.0)
+            pose_rotation_error = max(
+                _quaternion_distance(orientations[idx], constraint.target_orientation)
+                for idx in range(start, end + 1)
+            )
+            if passage_violation > 1e-6:
+                return False
+            if pose_rotation_error > float(constraint.rotation_tolerance) + 1e-6:
+                return False
+            if (
+                float(np.max(np.maximum(signed_distance, 0.0)))
+                > float(constraint.position_tolerance) + 1e-6
+            ):
+                return False
+            continue
+        if hasattr(constraint, "region"):
+            signed = constraint.region.signed_distance(path.tcp_array)
+            clearance = float(np.min(signed - float(getattr(constraint, "margin", 0.0))))
+            if clearance < -float(getattr(constraint, "tolerance", 1e-6)):
+                return False
+    return True
+
+
+def cartesian_pose_step_metrics(
+    *,
+    tcp_pose: Any,
+    constraints: list[Any],
+    step: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return executed-frame Cartesian pose errors for each pose constraint."""
+    pose = np.asarray(tcp_pose, dtype=np.float32).reshape(-1)
+    if pose.shape[0] < 7:
+        raise ValueError("tcp_pose must contain position and orientation")
+    position = pose[:3]
+    orientation = pose[3:7]
+    metrics: list[dict[str, Any]] = []
+    for constraint_idx, constraint in enumerate(constraints):
+        if not isinstance(constraint, CartesianPoseConstraint):
+            continue
+        position_error = float(np.linalg.norm(position - constraint.target_position))
+        rotation_error = _quaternion_distance(orientation, constraint.target_orientation)
+        position_violation = max(position_error - float(constraint.position_tolerance), 0.0)
+        rotation_violation = max(rotation_error - float(constraint.rotation_tolerance), 0.0)
+        row: dict[str, Any] = {
+            "constraint_index": constraint_idx,
+            "name": constraint.name,
+            "position_error": position_error,
+            "rotation_error": rotation_error,
+            "position_violation": position_violation,
+            "rotation_violation": rotation_violation,
+            "combined_violation": position_violation + rotation_violation,
+            "satisfied": bool(position_violation <= 1e-6 and rotation_violation <= 1e-6),
+        }
+        if step is not None:
+            row["step"] = int(step)
+        metrics.append(row)
+    return metrics
+
+
+def cartesian_pose_path_metrics(
+    path: EpisodePath,
+    constraints: list[Any],
+) -> list[dict[str, Any]]:
+    """Summarize best executed-frame Cartesian pose errors for each pose constraint."""
+    pose_constraints = [
+        (idx, constraint)
+        for idx, constraint in enumerate(constraints)
+        if isinstance(constraint, CartesianPoseConstraint)
+    ]
+    if not pose_constraints:
+        return []
+    positions = path.tcp_array
+    orientations = (
+        np.stack(path.tcp_orientations, axis=0).astype(np.float32, copy=False)
+        if path.tcp_orientations
+        else None
+    )
+    summaries: list[dict[str, Any]] = []
+    for constraint_idx, constraint in pose_constraints:
+        base: dict[str, Any] = {
+            "constraint_index": constraint_idx,
+            "name": constraint.name,
+            "target_position": constraint.target_position.tolist(),
+            "target_orientation": constraint.target_orientation.tolist(),
+            "position_tolerance": float(constraint.position_tolerance),
+            "rotation_tolerance": float(constraint.rotation_tolerance),
+        }
+        if positions.size == 0 or orientations is None:
+            base.update(
+                {
+                    "satisfied": False,
+                    "first_satisfied_step": None,
+                    "min_position_error": None,
+                    "min_position_step": None,
+                    "rotation_error_at_min_position": None,
+                    "combined_violation_at_min_position": None,
+                    "best_combined_violation": None,
+                    "best_combined_step": None,
+                    "position_error_at_best_combined": None,
+                    "rotation_error_at_best_combined": None,
+                }
+            )
+            summaries.append(base)
+            continue
+        position_errors = np.linalg.norm(
+            positions - constraint.target_position.reshape(1, 3),
+            axis=1,
+        )
+        rotation_errors = np.asarray(
+            [
+                _quaternion_distance(orientation, constraint.target_orientation)
+                for orientation in orientations
+            ],
+            dtype=np.float32,
+        )
+        position_violations = np.maximum(
+            position_errors - float(constraint.position_tolerance),
+            0.0,
+        )
+        rotation_violations = np.maximum(
+            rotation_errors - float(constraint.rotation_tolerance),
+            0.0,
+        )
+        combined_violations = position_violations + rotation_violations
+        min_position_step = int(np.argmin(position_errors))
+        best_combined_step = int(np.argmin(combined_violations))
+        satisfied_mask = (
+            (position_errors <= float(constraint.position_tolerance) + 1e-6)
+            & (rotation_errors <= float(constraint.rotation_tolerance) + 1e-6)
+        )
+        first_satisfied_step = (
+            int(np.flatnonzero(satisfied_mask)[0]) if bool(np.any(satisfied_mask)) else None
+        )
+        base.update(
+            {
+                "satisfied": first_satisfied_step is not None,
+                "first_satisfied_step": first_satisfied_step,
+                "min_position_error": float(position_errors[min_position_step]),
+                "min_position_step": min_position_step,
+                "rotation_error_at_min_position": float(rotation_errors[min_position_step]),
+                "combined_violation_at_min_position": float(
+                    combined_violations[min_position_step]
+                ),
+                "best_combined_violation": float(combined_violations[best_combined_step]),
+                "best_combined_step": best_combined_step,
+                "position_error_at_best_combined": float(position_errors[best_combined_step]),
+                "rotation_error_at_best_combined": float(rotation_errors[best_combined_step]),
+            }
+        )
+        summaries.append(base)
+    return summaries
 
 
 def path_satisfies_constraints(
     tcp_positions: Any,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
 ) -> bool:
     """Return whether an executed TCP path stays outside all avoid regions."""
-    clearance = min_constraint_clearance(tcp_positions, constraints)
+    if isinstance(tcp_positions, EpisodePath):
+        return _episode_path_satisfies_constraints(tcp_positions, constraints)
+    if any(
+        isinstance(c, (CartesianPoseConstraint, CylinderPassageConstraint))
+        for c in constraints
+    ):
+        return False
+    path = np.asarray(tcp_positions, dtype=np.float32)
+    if path.size == 0:
+        return True
+    if path.ndim != 2 or path.shape[1] != 3:
+        raise ValueError(f"tcp_positions must have shape [T, 3], got {path.shape}")
+    clearance = min_constraint_clearance(path, constraints)
     if clearance is None:
         return True
-    tolerance = max((float(constraint.tolerance) for constraint in constraints), default=1e-6)
+    tolerance = max(
+        (
+            float(getattr(constraint, "tolerance", 1e-6))
+            for constraint in constraints
+            if isinstance(constraint, (AvoidRegion, AvoidProjection))
+        ),
+        default=1e-6,
+    )
     return clearance >= -tolerance
+
+
+def _quaternion_distance(actual: Any, target: Any) -> float:
+    actual_orientation = np.asarray(actual, dtype=np.float32).reshape(-1)
+    target_orientation = np.asarray(target, dtype=np.float32).reshape(-1)
+    if actual_orientation.shape == (4,) and target_orientation.shape == (4,):
+        actual_q = _normalize_quaternion(actual_orientation)
+        target_q = _normalize_quaternion(target_orientation)
+        dot = float(np.clip(np.abs(np.dot(actual_q, target_q)), -1.0, 1.0))
+        return float(2.0 * np.arccos(dot))
+    if actual_orientation.shape == (4,):
+        actual_rotation = _quaternion_to_matrix(actual_orientation)
+    elif actual_orientation.shape == (9,):
+        actual_rotation = _normalize_rotation_matrix(actual_orientation.reshape(3, 3))
+    else:
+        raise ValueError(f"unsupported actual orientation shape {actual_orientation.shape}")
+    if target_orientation.shape == (4,):
+        target_rotation = _quaternion_to_matrix(target_orientation)
+    elif target_orientation.shape == (9,):
+        target_rotation = _normalize_rotation_matrix(target_orientation.reshape(3, 3))
+    else:
+        raise ValueError(f"unsupported target orientation shape {target_orientation.shape}")
+    delta = actual_rotation @ target_rotation.T
+    trace = float(np.trace(delta))
+    return float(np.arccos(np.clip((trace - 1.0) * 0.5, -1.0, 1.0)))
+
+
+def _normalize_quaternion(quaternion: Any) -> np.ndarray:
+    quat = np.asarray(quaternion, dtype=np.float32).reshape(4)
+    norm = float(np.linalg.norm(quat))
+    if norm <= 0.0 or not np.isfinite(norm):
+        raise ValueError("quaternion must be a non-zero finite vector")
+    return quat / norm
+
+
+def _normalize_rotation_matrix(matrix: Any) -> np.ndarray:
+    rotation = np.asarray(matrix, dtype=np.float32).reshape(3, 3)
+    if not np.all(np.isfinite(rotation)):
+        raise ValueError("rotation matrix must contain only finite values")
+    u, _, vh = np.linalg.svd(rotation)
+    rotation = u @ vh
+    if np.linalg.det(rotation) < 0.0:
+        u[:, -1] *= -1.0
+        rotation = u @ vh
+    return rotation.astype(np.float32, copy=False)
+
+
+def _quaternion_to_matrix(quaternion: Any) -> np.ndarray:
+    w, x, y, z = _normalize_quaternion(quaternion)
+    return np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float32,
+    )
 
 
 def q_trajectory_smoothness(q: Any, *, order: int = 2) -> float:
@@ -336,7 +627,7 @@ def episode_metric_row(
     episode: int,
     seed: int,
     path: EpisodePath,
-    constraints: list[AvoidRegion],
+    constraints: list[Any],
     reach_success: bool,
     first_success_step: int | None,
     steps: int,
@@ -356,17 +647,29 @@ def episode_metric_row(
     """
     distances = np.asarray(path.target_distances, dtype=np.float32)
     finite_distances = distances[np.isfinite(distances)]
+    cartesian_pose_metrics = cartesian_pose_path_metrics(path, constraints)
     tcp_min_clearance = min_constraint_clearance(path.tcp_array, constraints)
-    tcp_satisfied = path_satisfies_constraints(path.tcp_array, constraints)
+    tcp_satisfied = path_satisfies_constraints(path, constraints)
     if robot_clearance_points is not None:
         min_clearance = min_constraint_clearance(robot_clearance_points, constraints)
-        constraint_satisfied = path_satisfies_constraints(robot_clearance_points, constraints)
+        robot_clearance_constraints = [
+            c for c in constraints if isinstance(c, (AvoidRegion, AvoidProjection))
+        ]
+        executed_pose_constraints = [
+            c
+            for c in constraints
+            if isinstance(c, (CartesianPoseConstraint, CylinderPassageConstraint))
+        ]
+        constraint_satisfied = path_satisfies_constraints(
+            robot_clearance_points,
+            robot_clearance_constraints,
+        ) and path_satisfies_constraints(path, executed_pose_constraints)
         constraint_target = "robot"
     else:
         min_clearance = tcp_min_clearance
         constraint_satisfied = tcp_satisfied
         constraint_target = "eef"
-    return {
+    row = {
         "method": method,
         "episode": int(episode),
         "seed": int(seed),
@@ -386,12 +689,27 @@ def episode_metric_row(
         ),
         "min_clearance": min_clearance,
         "min_clearance_tcp": tcp_min_clearance,
+        "cartesian_pose_metrics": cartesian_pose_metrics,
         "smoothness": q_trajectory_smoothness(path.q_array, order=2),
         "candidate_feasibility_fraction": candidate_feasibility_fraction,
         "fallback_count": int(fallback_count),
         "video": video,
         "rerun": rerun,
     }
+    if len(cartesian_pose_metrics) == 1:
+        pose_metric = cartesian_pose_metrics[0]
+        row.update(
+            {
+                "cartesian_pose_min_position_error": pose_metric["min_position_error"],
+                "cartesian_pose_min_position_step": pose_metric["min_position_step"],
+                "cartesian_pose_best_combined_violation": pose_metric[
+                    "best_combined_violation"
+                ],
+                "cartesian_pose_best_combined_step": pose_metric["best_combined_step"],
+                "cartesian_pose_first_satisfied_step": pose_metric["first_satisfied_step"],
+            }
+        )
+    return row
 
 
 def wilson_interval(successes: int, total: int, *, z: float = 1.96) -> tuple[float, float]:
@@ -537,6 +855,18 @@ def concatenate_rollouts(
         robot_masks=[mask for rollout in rollouts for mask in rollout.robot_masks],
         action_chunk=action_chunk,
         metadata=chunk_metadata,
+        eef_orientations=(
+            np.concatenate(
+                [
+                    rollout.eef_orientations
+                    for rollout in rollouts
+                    if rollout.eef_orientations is not None
+                ],
+                axis=0,
+            )
+            if all(rollout.eef_orientations is not None for rollout in rollouts)
+            else None
+        ),
     )
 
 

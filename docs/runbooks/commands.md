@@ -682,6 +682,41 @@ uv run python scripts/eval_constrained_reach.py \
   --allow-failure
 ```
 
+Dataset-derived Cartesian pose waypoint comparison:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset "$VAL_DATASET" \
+  --checkpoint "$CKPT" \
+  --methods reranking \
+  --source dataset \
+  --episodes 10 \
+  --unique-dataset-seeds \
+  --device cuda \
+  --seed 0 \
+  --constraint-type cartesian_pose \
+  --cartesian-pose-path-fraction 0.5 \
+  --cartesian-pose-position-tolerance 0.02 \
+  --cartesian-pose-rotation-tolerance 0.35 \
+  --planning-horizon-chunks 2 \
+  --execution-horizon-chunks 1 \
+  --geometry-mode fast \
+  --k-schedule 32 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --constraint-overlay-video \
+  --output-dir "$EVAL_OUT" \
+  --allow-failure
+```
+
+With `--constraint-type cartesian_pose`, constrained eval samples the target EEF pose from the
+selected dataset episode's saved `/data/tcp_pose` path at the requested arc-length fraction. The
+generated `constraints/episode_XXX.json` stores the pose plus zarr provenance metadata including
+dataset episode index, local frame index, global frame index, and path fraction. This mode requires
+`--source dataset`; use the same generated constraints with `--constraints-dir` when comparing
+multiple horizon or method settings exactly.
+
 Balanced 20k nominal-path starter:
 
 ```bash
@@ -801,7 +836,7 @@ PY
 ```
 
 Outputs include `constraints/episode_XXX.json`, `metrics.jsonl`, `decisions.jsonl`,
-`summary.json`, optional `timings.jsonl`, optional `plots/*.png`, optional
+`step_traces.jsonl`, `summary.json`, optional `timings.jsonl`, optional `plots/*.png`, optional
 `videos/{method}/episode_XXX.mp4`, and optional `rerun/{method}/episode_XXX.rrd`.
 When `--constraints-dir` is provided, eval copies the loaded precomputed constraints into the
 output constraints directory and records the source in `summary.json`.
@@ -816,6 +851,10 @@ showing a translucent orange keep-out sphere or box in the saved video. Use
 `--no-constraint-overlay-video` to fall back to plain simulator renders, and tune the visual with
 `--constraint-overlay-alpha` and `--constraint-overlay-color R G B`. Rerun exports log the same
 avoid region under `world/constraints/avoid_region_*` as persistent wireframe geometry.
+For Cartesian pose constraints, `metrics.jsonl` stores executed best-frame pose summaries,
+`step_traces.jsonl` stores per-frame TCP pose/action/pose-error rows, and `decisions.jsonl` stores
+the selected world-model branch including the selected action chunk, imagined q/EEF rollout, and
+compact candidate summaries.
 
 One-episode overlay smoke for visual inspection:
 

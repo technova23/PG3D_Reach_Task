@@ -104,8 +104,10 @@ class ReachEpisodeData:
         # the zarr, so any consistent width works downstream.
         if self.state.ndim != 2 or self.state.shape[1] < 7:
             raise ValueError(f"state must be [T, D] with D >= 7, got {self.state.shape}")
-        if self.action.shape[1] != 7:
-            raise ValueError(f"action must have shape [T, 7], got {self.action.shape}")
+        # Action width is 7 (arm-only) unless the agent declares action_includes_gripper
+        # (e.g. XArm7Gripper's mimic-controlled drive_joint), in which case it's 8.
+        if self.action.ndim != 2 or self.action.shape[1] not in (7, 8):
+            raise ValueError(f"action must have shape [T, 7] or [T, 8], got {self.action.shape}")
         if self.point_cloud.shape[2] != 3:
             raise ValueError(f"point_cloud must have shape [T, N, 3], got {self.point_cloud.shape}")
         point_shape = self.point_cloud.shape[:2]
@@ -151,6 +153,10 @@ def crop_point_cloud(
         axis=1,
     )
     cropped_indices = np.flatnonzero(in_bounds)
+    if config.robot_point_fraction >= 1.0:
+        # Robot-only: drop scene/background points entirely rather than letting
+        # them backfill leftover slots when robot points fall short of num_points.
+        cropped_indices = cropped_indices[source_robot_mask[cropped_indices]]
     if cropped_indices.size > config.num_points:
         cropped_indices = _downsample_with_robot_quota(
             cropped_indices,
@@ -219,11 +225,14 @@ def observation_to_dataset_row(
     sim_action: Array,
     action_mode: ActionMode,
     crop_config: PointCloudCropConfig | None = None,
+    include_gripper_action: bool = False,
 ) -> dict[str, Array]:
     """Convert one adapted observation and simulator action into dataset arrays."""
     state = observation.robot_state.as_agent_pos()
     sim_action = _as_array(sim_action, name="sim_action", dtype=np.float32, ndim=1)
-    label = action_label_from_sim_action(sim_action, state, action_mode=action_mode)
+    label = action_label_from_sim_action(
+        sim_action, state, action_mode=action_mode, include_gripper=include_gripper_action
+    )
     cropped = crop_point_cloud(
         observation.point_cloud,
         robot_mask=observation.robot_mask,
@@ -254,19 +263,32 @@ def action_label_from_sim_action(
     state: Array,
     *,
     action_mode: ActionMode,
+    include_gripper: bool = False,
 ) -> Array:
-    """Extract the 7-DoF Panda arm label expected by pg3d-native DP3."""
+    """Extract the arm (+ optional gripper) label expected by pg3d-native DP3.
+
+    ``include_gripper=True`` extends the label to 8-dim (arm + a single gripper
+    DOF at index 7), for agents whose gripper is a real, independently-actionable
+    joint (e.g. XArm7Gripper's mimic-controlled ``drive_joint``) rather than a
+    constant filler value. Default False preserves the original 7-DoF-only label.
+    """
     sim_action = _as_array(sim_action, name="sim_action", dtype=np.float32, ndim=1)
     state = _as_array(state, name="state", dtype=np.float32, ndim=1)
     if sim_action.shape[0] < 7:
         raise ValueError(f"sim_action must have at least 7 values, got {sim_action.shape}")
     if state.shape[0] < 7:
         raise ValueError(f"state must have at least 7 values, got {state.shape}")
-    arm_action = sim_action[:7].astype(np.float32, copy=True)
+    label_dim = 8 if include_gripper else 7
+    if sim_action.shape[0] < label_dim or state.shape[0] < label_dim:
+        raise ValueError(
+            f"include_gripper=True requires sim_action/state to have >= 8 values, "
+            f"got sim_action={sim_action.shape}, state={state.shape}"
+        )
+    action = sim_action[:label_dim].astype(np.float32, copy=True)
     if action_mode == "abs_joint":
-        return arm_action
+        return action
     if action_mode == "delta_joint":
-        return (arm_action - state[:7]).astype(np.float32, copy=False)
+        return (action - state[:label_dim]).astype(np.float32, copy=False)
     raise ValueError(f"unsupported action_mode {action_mode!r}")
 
 

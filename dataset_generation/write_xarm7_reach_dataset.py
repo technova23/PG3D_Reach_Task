@@ -18,7 +18,7 @@ xArm7-specific values are injected as *defaults* (prepended to argv) so any flag
 user passes still wins. Example:
 
     python dataset_generation/write_xarm7_reach_dataset.py \
-        --num-demos 24 --output /scratch2/skills/pg3d_xarm7_reach.zarr
+        --num-demos 24 --output /scratch2/skills/pg3d_xarm7_reach_final.zarr
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ _XARM7_DEFAULTS: list[str] = [
     "--waypoint-xy-noise", "0.03",    # was 0.04
     "--waypoint-z-noise", "0.02",     # was 0.025
     "--min-start-goal-distance", "0.14",  # was 0.16 (shallower workspace)
-    "--output", "artifacts/pg3d_xarm7_reach.zarr",
+    "--output", "/scratch2/skills/pg3d_xarm7_reach_final.zarr",
 ]
 
 

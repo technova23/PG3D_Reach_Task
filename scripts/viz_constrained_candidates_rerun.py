@@ -943,6 +943,8 @@ def _sample_candidate_path(
     min_rollout_steps: int,
     zarr_context: dict[str, Any],
 ) -> dict[str, Any]:
+    from scripts.rollout_dp3_reach_policy import _policy_trajectory_family_count
+
     candidate_generator = torch.Generator(device=device)
     candidate_generator.manual_seed(noise_seed)
     obs, info = _reset_to_zarr_episode(
@@ -961,6 +963,10 @@ def _sample_candidate_path(
     best_distance = float(np.nanmin(np.asarray(distances, dtype=np.float32)))
     steps_since_best = 0
     early_stop_reason: str | None = None
+    trajectory_family_count = _policy_trajectory_family_count(policy)
+    trajectory_family_id = None
+    if trajectory_family_count is not None:
+        trajectory_family_id = min(10, trajectory_family_count - 1)
     while steps < max_steps:
         sampler_generator = candidate_generator
         if fixed_replan_seed is not None:

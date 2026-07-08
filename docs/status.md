@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-05-27
+Last updated: 2026-07-06
 
 ## Current objective
 
@@ -38,8 +38,10 @@ robot geometry from a simulator-free provider interface, and writes synthetic ro
 visual inspection. The first comparison path now adds a lazy ManiSkill ghost-env Panda geometry
 provider plus a checkpoint rollout comparison script that feeds imagined point clouds back into
 the policy and writes per-episode Rerun overlays for world-model versus simulator rollouts. P08 now
-adds the first handwritten constraint objects: sphere/box regions, `AvoidRegion(target="eef")`,
-trajectory smoothness, an obstructing direct-path region helper, and JSON round-trip helpers. P09
+adds the first handwritten constraint objects: sphere/box/cylinder regions,
+`AvoidRegion(target="eef")`, Cartesian waypoint pose constraints, cylindrical passage
+constraints, trajectory smoothness, an obstructing direct-path region helper, and JSON round-trip
+helpers. P09
 adds pure rejection and reranking controllers with K fallback, hard-then-score feasibility,
 candidate diagnostics, and a policy-input seam for future DP3 rolling-window adapters. P10 now
 adds the first constrained-reach evaluation scaffold connecting DP3, ManiSkill, the ghost-env world
@@ -56,6 +58,18 @@ best-effort separate render-only ManiSkill env so visual overlays do not alter p
 or simulator control. The eval runner can also consume precomputed per-episode constraints and a
 fixed dataset episode-index file, so nominal-path avoid regions can be built once from base
 rollouts and reused across base/rejection/reranking comparisons.
+Cartesian pose constraint rollouts now keep the target pose visible in Rerun exports as a
+static position marker plus orientation triad, so you can inspect the intended EEF pose next to
+the executed rollout. Executed-episode Cartesian pose metrics now evaluate the full recorded
+`EpisodePath` instead of dropping to position-only TCP arrays, so pose-only constraints no longer
+default to satisfied when the EEF never reaches the requested pose. Constrained eval now also
+writes per-step `step_traces.jsonl` rows with executed TCP pose, policy/simulator action,
+task-goal distance, and Cartesian pose errors, plus richer `decisions.jsonl` selected-branch
+records with chosen action chunks, imagined EEF/q rollouts, and compact candidate summaries for
+world-model reproducibility checks. Cartesian pose constraints can now also be generated directly
+from the selected dataset episode's saved `/data/tcp_pose` demonstration path at a configured
+arc-length fraction, so waypoint-pose experiments can use known demonstrated EEF poses instead of
+opaque precomputed targets.
 P11 starts the base-reach reliability pass. DP3 reach policy inputs now reserve an ordered tail
 slice of the XYZ point cloud for deterministic goal tokens by default
 (`goal_marker_points=16`, `goal_marker_radius=0.015`), while keeping public policy keys limited to
@@ -224,3 +238,5 @@ See `docs/worklog/`.
   builder, precomputed constraint loading for constrained eval, and pure tests for the new fixed
   subset protocol. The first 25-episode held-out gate for the 20k checkpoint selected only 7
   base-success episodes, so the main constrained eval was intentionally not run.
+  A small extraction helper now supports `--episode-index` for exporting a single reach trajectory
+  from a saved Zarr to `.npz` or a one-episode Zarr.

@@ -1,12 +1,15 @@
 from pg3d.constraints.core import Constraint, SceneContext
 from pg3d.constraints.geometry import (
     BoxRegion,
+    CylinderRegion,
     RectRegion2D,
     Region,
     SphereRegion,
     region_from_json,
 )
 from pg3d.constraints.programs import (
+    CartesianPoseConstraint,
+    CylinderPassageConstraint,
     AvoidProjection,
     AvoidRegion,
     SmoothnessCost,
@@ -20,7 +23,10 @@ __all__ = [
     "AvoidProjection",
     "AvoidRegion",
     "BoxRegion",
+    "CartesianPoseConstraint",
     "Constraint",
+    "CylinderPassageConstraint",
+    "CylinderRegion",
     "RectRegion2D",
     "Region",
     "SceneContext",

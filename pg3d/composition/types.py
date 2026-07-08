@@ -58,6 +58,7 @@ class ScoreWeights:
     smoothness: float = 0.1
     consensus: float = 0.01
     policy_surrogate: float = 1.0
+    directional: float = 1.0
 
 
 @dataclass
@@ -77,6 +78,7 @@ class CandidateDiagnostics:
     consensus_deviation: float
     policy_surrogate: float | None
     total_score: float
+    directional: float = 0.0
     selection_reason: str | None = None
 
 

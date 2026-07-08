@@ -234,8 +234,11 @@ class XArm7GripperMotionPlanningSolver(XArm7MotionPlanningSolverBase):
     chain, and gripper_fix / joint_tcp are fixed joints transparent to mplib).
     mplib therefore plans over 7 DOFs and returns 7-dim position waypoints.
 
-    The passive gripper controller adds no action dimensions, so ``env.step``
-    also expects 7-dim actions. ``follow_path`` inherits from the base unchanged.
+    The gripper's ``drive_joint`` is a real (mimic-controlled) action dimension on
+    ``env.step`` -- this planner does not plan it, so callers append an 8th
+    (gripper) column to the 7-dim waypoints this returns before stepping the env,
+    the same way Panda callers append a gripper column to its 7-dim arm plan.
+    ``follow_path`` inherits from the base unchanged.
     """
 
     MOVE_GROUP = "link_tcp"

@@ -20,6 +20,7 @@ from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils import sapien_utils
 from mani_skill.utils.registration import register_env
+from scipy.spatial.transform import Rotation as _Rotation
 
 from pg3d.envs.maniskill_adapter.reach_config import REACH_TASK_SPECS
 from pg3d.envs.maniskill_adapter.reach_env import PG3DReachEnv
@@ -29,7 +30,11 @@ from pg3d.envs.xarm_adapter.agents import (  # noqa: F401 - registers agents
     XArm7Robotiq,
 )
 from pg3d.envs.xarm_adapter.reach_config import (
+    XARM7_CAM_CALIB_ERROR_ROTATION_STD_DEG,
+    XARM7_CAM_CALIB_ERROR_TRANSLATION_STD_M,
+    XARM7_CAM_POSITION_JITTER_M,
     XARM7_CAM_Q_WXYZ,
+    XARM7_CAM_ROTATION_JITTER_DEG,
     XARM7_CAM_T_BASE,
     XARM7_CAM_VFOV_RAD,
     XARM7_SIM_CAM_HEIGHT,
@@ -37,6 +42,8 @@ from pg3d.envs.xarm_adapter.reach_config import (
 )
 
 ROBOT_BASE_POSE = sapien.Pose(p=[-0.615, 0.0, 0.0])
+
+
 
 
 class PG3DReachXArm7Env(PG3DReachEnv):
@@ -61,13 +68,95 @@ class PG3DReachXArm7Env(PG3DReachEnv):
         qpos = torch.tensor(rest_qpos, dtype=torch.float32, device=self.device).unsqueeze(0).expand(b, -1)
         self.agent.reset(qpos)
         super()._initialize_episode(env_idx, options)
+        self._randomize_camera_pose()
+
+    def _randomize_camera_pose(self) -> None:
+        """Jitter base_camera's pose each episode -- position by up to +/-10cm and
+        orientation by up to +/-2deg, uniform and independent per axis -- so
+        training data covers a range of camera viewpoints instead of one fixed,
+        perfectly-known pose. Called once per episode (from _initialize_episode);
+        the resulting pose is held fixed (no per-step re-jitter) for the rest of
+        the episode. Also (re-)samples this episode's calibration-error
+        correction -- see _sample_camera_calibration_error. No-op if the current
+        obs mode didn't build any cameras.
+
+        set_local_pose only accepts one unbatched pose (applies to every parallel
+        sub-scene camera equally) — fine since data-gen always runs num_envs=1.
+        """
+        camera = self._sensors.get("base_camera")
+        if camera is None:
+            self._camera_calib_correction = None
+            return
+        with torch.device(self.device):
+            delta_p = (torch.rand(3) * 2.0 - 1.0) * XARM7_CAM_POSITION_JITTER_M
+            delta_euler_deg = (torch.rand(3) * 2.0 - 1.0) * XARM7_CAM_ROTATION_JITTER_DEG
+        nominal_p = np.array(ROBOT_BASE_POSE.p) + XARM7_CAM_T_BASE
+        nominal_rot = _Rotation.from_quat(XARM7_CAM_Q_WXYZ, scalar_first=True)
+        delta_rot = _Rotation.from_euler("xyz", delta_euler_deg.cpu().numpy(), degrees=True)
+        self._camera_episode_p = nominal_p + delta_p.cpu().numpy()
+        self._camera_episode_rot = nominal_rot * delta_rot
+        camera.camera.set_local_pose(
+            sapien.Pose(
+                p=self._camera_episode_p.tolist(),
+                q=self._camera_episode_rot.as_quat(scalar_first=True).tolist(),
+            )
+        )
+        self._camera_calib_correction = self._sample_camera_calibration_error()
+
+    def _sample_camera_calibration_error(self) -> tuple[np.ndarray, np.ndarray]:
+        """Sample this episode's fixed calibration-error correction.
+
+        Real eye-to-hand calibration is never perfectly accurate: even after
+        calibrating, the camera pose used to convert depth into world/robot-frame
+        points has residual error (measured RMS: see XARM7_CAM_CALIB_ERROR_* in
+        reach_config.py). This does NOT move the physical/rendering camera --
+        base_camera still renders from self._camera_episode_{p,rot} exactly, set
+        above. Instead it models a second, independent camera pose (the
+        mis-calibrated "belief") only used when interpreting depth into world
+        coordinates -- see the get_obs override below, which re-projects
+        already-world-frame points from the true pose's frame into the noisy
+        pose's frame. Sampled once per episode (this method is only called from
+        _randomize_camera_pose) and held fixed for the whole episode, since real
+        calibration error doesn't change moment to moment within one recording.
+
+        Returns (R, t) such that world_point_noisy = R @ world_point_true + t.
+        """
+        with torch.device(self.device):
+            delta_p = torch.randn(3) * XARM7_CAM_CALIB_ERROR_TRANSLATION_STD_M
+            delta_euler_deg = torch.randn(3) * XARM7_CAM_CALIB_ERROR_ROTATION_STD_DEG
+        true_p = self._camera_episode_p
+        true_rot = self._camera_episode_rot
+        noisy_p = true_p + delta_p.cpu().numpy()
+        noisy_rot = true_rot * _Rotation.from_euler("xyz", delta_euler_deg.cpu().numpy(), degrees=True)
+        r_correction = (noisy_rot * true_rot.inv()).as_matrix().astype(np.float32)
+        t_correction = (noisy_p - r_correction @ true_p).astype(np.float32)
+        return r_correction, t_correction
+
+    def get_obs(self, info: dict[str, Any] | None = None, unflattened: bool = False) -> Any:
+        obs = super().get_obs(info, unflattened=True)
+        correction = getattr(self, "_camera_calib_correction", None)
+        if correction is not None and "pointcloud" in obs:
+            r_correction, t_correction = correction
+            xyzw = obs["pointcloud"]["xyzw"]
+            xyz = xyzw[..., :3]
+            r_t = torch.as_tensor(r_correction, dtype=xyz.dtype, device=xyz.device)
+            t_t = torch.as_tensor(t_correction, dtype=xyz.dtype, device=xyz.device)
+            xyzw[..., :3] = xyz @ r_t.transpose(0, 1) + t_t
+        return obs if unflattened else self._flatten_raw_obs(obs)
 
     @property
     def _default_sensor_configs(self) -> list[CameraConfig]:
         # Camera pose from eye-to-hand calibration on real xArm7.
         # Position: robot base frame → world frame by adding ROBOT_BASE_POSE.p.
-        # Orientation: SAPIEN [w,x,y,z] quaternion from the calibration rotation matrix
-        # (OpenCV convention: +z optical, +y down — matches SAPIEN's camera model).
+        # Orientation: SAPIEN [w,x,y,z] quaternion converted from the calibration
+        # rotation matrix. The calibration script outputs an OpenCV/pinhole-optical
+        # rotation (+z forward, +y down, +x right); SAPIEN's own convention is
+        # (forward, right, up) = (+x, -y, +z) (see mani_skill.utils.sapien_utils.
+        # look_at docstring) — a different axis assignment, not a relabeling. The
+        # conversion lives in reach_config._opencv_camera_rotation_to_sapien;
+        # passing the raw OpenCV matrix straight into SAPIEN silently pointed the
+        # camera ~90° away from the workspace (confirmed empirically: 0/16384 raw
+        # points ever landed inside the crop bounds before this was fixed).
         cam_p = (np.array(ROBOT_BASE_POSE.p) + XARM7_CAM_T_BASE).tolist()
         pose = sapien.Pose(p=cam_p, q=XARM7_CAM_Q_WXYZ.tolist())
         # near/far match RealSense D455 practical range (0.4 m – 6 m).

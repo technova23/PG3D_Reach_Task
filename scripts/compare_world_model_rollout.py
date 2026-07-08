@@ -13,6 +13,7 @@ from pg3d.envs.maniskill_adapter import (
     ManiSkillGhostPandaGeometryProvider,
     register_pg3d_reach_envs,
 )
+from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import (
     PointCloudCropConfig,
     crop_point_cloud,
@@ -72,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     register_pg3d_reach_envs()
+    register_pg3d_xarm7_gripper_reach_envs()
     device = select_device(args.device)
     policy = load_reach_policy_from_checkpoint(
         checkpoint_path,
