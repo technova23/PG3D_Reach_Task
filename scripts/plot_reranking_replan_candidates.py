@@ -580,29 +580,37 @@ def _render_episode_frames(
     if not records:
         raise RuntimeError(f"episode {episode_index}: no replan steps recorded")
 
-    # Union of every constraint ever active across the episode (obstacle_spawning grows
-    # this mid-episode; the last record has the superset since spawning is additive-only)
-    # so axis limits fit every obstacle that will ever be drawn, even before it appears.
-    final_constraints = records[-1]["constraints"]
-
-    all_points = [records[-1]["target_xyz"].reshape(1, 3)]
-    for record in records:
-        all_points.extend(record["candidate_xyz"])
-        all_points.append(record["executed_xyz_before"])
-    for constraint in final_constraints:
-        region_bounds = _region_3d_bounds(constraint)
-        if region_bounds is not None:
-            all_points.append(region_bounds)
-    bounds = np.concatenate(all_points, axis=0)
-    mins = np.min(bounds, axis=0)
-    maxs = np.max(bounds, axis=0)
-    mid = (mins + maxs) * 0.5
-    # Single uniform span across x/y/z (not per-axis) so spheres render as true
-    # spheres rather than squashed ellipsoids under an unequal 3-D aspect ratio.
-    span = max(float(np.max(maxs - mins)) * 1.2, 0.12)
-
     frames: list[np.ndarray] = []
     for record in records:
+        # Per-replan auto-zoom: framing uses only *this* record's own candidates,
+        # executed-so-far tail, and currently-active constraints -- not the whole
+        # episode's history and not the (often distant) goal. A single global frame
+        # was getting dominated by whichever replan had the widest-ranging
+        # candidates, and including a far-off goal in the bounds forced every frame
+        # to stay zoomed out just to fit a marker nowhere near the actual candidate
+        # bundle. The goal is still drawn -- it's just allowed to fall outside the
+        # frame when it's far away, same as any other off-screen point would.
+        # Candidate points are trimmed to the 2nd-98th percentile per axis first so
+        # one outlier/divergent candidate can't blow up the zoom by itself.
+        candidate_points = np.concatenate(record["candidate_xyz"], axis=0)
+        lo = np.percentile(candidate_points, 2.0, axis=0)
+        hi = np.percentile(candidate_points, 98.0, axis=0)
+        all_points = [
+            np.clip(candidate_points, lo, hi),
+            record["executed_xyz_before"][-8:],
+        ]
+        for constraint in record["constraints"]:
+            region_bounds = _region_3d_bounds(constraint)
+            if region_bounds is not None:
+                all_points.append(region_bounds)
+        bounds = np.concatenate(all_points, axis=0)
+        mins = np.min(bounds, axis=0)
+        maxs = np.max(bounds, axis=0)
+        mid = (mins + maxs) * 0.5
+        # Single uniform span across x/y/z (not per-axis) so spheres render as true
+        # spheres rather than squashed ellipsoids under an unequal 3-D aspect ratio.
+        span = max(float(np.max(maxs - mins)) * 1.2, 0.12)
+
         fig = plt.figure(figsize=(7.5, 7.5), dpi=130)
         ax = fig.add_subplot(111, projection="3d")
         ax.set_xlim(mid[0] - span * 0.5, mid[0] + span * 0.5)
