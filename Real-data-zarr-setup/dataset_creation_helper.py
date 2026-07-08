@@ -73,11 +73,11 @@ def check_reachability(bag_dir, target, fk_robot):
     typestore = get_typestore(Stores.ROS2_HUMBLE)
     last_q = None
     with AnyReader([bag_dir], default_typestore=typestore) as reader:
-        for conn, ts, raw in reader.messages():
-            if conn.topic == "/xarm/joint_states":
-                msg = reader.deserialize(raw, conn.msgtype)
-                if len(msg.position) == 7:
-                    last_q = np.asarray(msg.position, dtype=np.float64)
+        connections = [x for x in reader.connections if x.topic == "/xarm/joint_states"]
+        for conn, ts, raw in reader.messages(connections=connections):
+            msg = reader.deserialize(raw, conn.msgtype)
+            if len(msg.position) == 7:
+                last_q = np.asarray(msg.position, dtype=np.float64)
                     
     if last_q is None:
         return False, 999.0
@@ -94,12 +94,12 @@ def extract_state_action(bag_dir):
     typestore = get_typestore(Stores.ROS2_HUMBLE)
     msg_times, msg_positions = [], []
     with AnyReader([bag_dir], default_typestore=typestore) as reader:
-        for conn, ts, raw in reader.messages():
-            if conn.topic == "/xarm/joint_states":
-                msg = reader.deserialize(raw, conn.msgtype)
-                if len(msg.position) == 7:
-                    msg_times.append(float(ts) / 1e9)
-                    msg_positions.append(np.asarray(msg.position, dtype=np.float64))
+        connections = [x for x in reader.connections if x.topic == "/xarm/joint_states"]
+        for conn, ts, raw in reader.messages(connections=connections):
+            msg = reader.deserialize(raw, conn.msgtype)
+            if len(msg.position) == 7:
+                msg_times.append(float(ts) / 1e9)
+                msg_positions.append(np.asarray(msg.position, dtype=np.float64))
                     
     if not msg_times: 
         return None, None, None
@@ -233,14 +233,23 @@ def extract_depth(bag_dir, grid_times):
     typestore = get_typestore(Stores.ROS2_HUMBLE)
     depth_info, color_info = None, None
     with AnyReader([bag_dir], default_typestore=typestore) as reader:
-        for conn, ts, raw in reader.messages():
+        connections = [x for x in reader.connections if x.topic in ["/camera/camera/depth/camera_info", "/camera/camera/color/camera_info"]]
+        for conn, ts, raw in reader.messages(connections=connections):
             if conn.topic == "/camera/camera/depth/camera_info" and depth_info is None:
                 msg = reader.deserialize(raw, conn.msgtype)
-                K = np.array(msg.k).reshape(3, 3)
+                try:
+                    K = np.array(msg.k).reshape(3, 3)
+                except AttributeError:
+                    print(f"Warning: depth msg missing 'k'. Using default.")
+                    K = np.array([[600., 0., 320.], [0., 600., 240.], [0., 0., 1.]])
                 depth_info = {'fx': K[0, 0], 'fy': K[1, 1], 'cx': K[0, 2], 'cy': K[1, 2]}
             elif conn.topic == "/camera/camera/color/camera_info" and color_info is None:
                 msg = reader.deserialize(raw, conn.msgtype)
-                K = np.array(msg.k).reshape(3, 3)
+                try:
+                    K = np.array(msg.k).reshape(3, 3)
+                except AttributeError:
+                    print(f"Warning: color msg missing 'k'. Using default.")
+                    K = np.array([[600., 0., 320.], [0., 600., 240.], [0., 0., 1.]])
                 color_info = {'fx': K[0, 0], 'fy': K[1, 1], 'cx': K[0, 2], 'cy': K[1, 2]}
             if depth_info and color_info:
                 break
@@ -251,7 +260,8 @@ def extract_depth(bag_dir, grid_times):
         
     depth_msgs, color_msgs = [], []
     with AnyReader([bag_dir], default_typestore=typestore) as reader:
-        for conn, ts, raw in reader.messages():
+        connections = [x for x in reader.connections if x.topic in ["/camera/camera/depth/image_rect_raw", "/camera/camera/color/image_raw"]]
+        for conn, ts, raw in reader.messages(connections=connections):
             if conn.topic == "/camera/camera/depth/image_rect_raw":
                 msg = reader.deserialize(raw, conn.msgtype)
                 depth_msgs.append((float(ts)/1e9, msg))
@@ -261,7 +271,7 @@ def extract_depth(bag_dir, grid_times):
                 
     if not depth_msgs or not color_msgs:
         return None
-        
+    
     dt = np.array([x[0] for x in depth_msgs])
     ct = np.array([x[0] for x in color_msgs])
     
