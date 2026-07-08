@@ -1096,7 +1096,7 @@ def _replay_planned_positions_as_episode(
     settle_steps_recorded = 0
     planned_step_limit = max(1, max_steps - settle_steps)
     for planned_qpos in positions[:planned_step_limit]:
-        sim_action = _format_sim_action(env, planned_qpos)
+        sim_action = _format_sim_action(env, planned_qpos, gripper_action=gripper_open)
         row = _dataset_row_from_obs(
             obs=obs,
             info=info,
@@ -1132,7 +1132,7 @@ def _replay_planned_positions_as_episode(
         and settle_steps_recorded < settle_steps
         and len(rows) < max_steps
     ):
-        sim_action = _format_sim_action(env, final_planned_qpos)
+        sim_action = _format_sim_action(env, final_planned_qpos, gripper_action=gripper_open)
         row = _dataset_row_from_obs(
             obs=obs,
             info=info,
@@ -2074,11 +2074,15 @@ def _dataset_row_from_obs(
     saliency_config: PointCloudSaliencyConfig | None,
 ) -> dict[str, np.ndarray]:
     adapted = adapt_observation(obs, info=info, env=env, task_name=env_id)
+    include_gripper_action = bool(
+        getattr(env.unwrapped.agent, "action_includes_gripper", False)
+    )
     row = observation_to_dataset_row(
         adapted,
         sim_action=sim_action,
         action_mode=action_mode,
         crop_config=crop_config,
+        include_gripper_action=include_gripper_action,
     )
     if saliency_config is not None:
         _inject_point_cloud_saliency(
@@ -2374,7 +2378,20 @@ def _set_robot_qpos(env: Any, qpos: np.ndarray) -> None:
         robot.set_qvel(np.zeros_like(next_qpos, dtype=np.float32))
 
 
-def _format_sim_action(env: Any, planned_qpos: np.ndarray) -> np.ndarray:
+def _format_sim_action(
+    env: Any, planned_qpos: np.ndarray, *, gripper_action: float = 0.04
+) -> np.ndarray:
+    """Pad a planner's arm-only waypoint out to the env's full action_dim.
+
+    ``gripper_action`` is spliced in raw, pre-normalization -- same convention as
+    ``_hold_sim_action``'s ``gripper_open``: for a mimic/PD gripper controller with
+    ``normalize_action=True`` this is a value in the controller's own [-1, 1] action
+    space, not a raw joint angle (e.g. +1.0 always means "the controller's configured
+    ``upper`` bound", regardless of what that bound is in radians). The 0.04 default
+    matches Panda's long-standing behavior unchanged; callers for other robots (e.g.
+    xArm7's gripper, whose "closed" upper bound is ~0.83 rad, not Panda's 0.04 rad)
+    must pass the value appropriate to their own controller's convention.
+    """
     action_dim = int(np.prod(env.action_space.shape))
     planned_qpos = np.asarray(planned_qpos, dtype=np.float32).reshape(-1)
     if planned_qpos.shape[0] == action_dim:
@@ -2382,7 +2399,7 @@ def _format_sim_action(env: Any, planned_qpos: np.ndarray) -> np.ndarray:
     if planned_qpos.shape[0] >= 9 and action_dim == 8:
         return np.concatenate([planned_qpos[:7], [np.mean(planned_qpos[7:9])]]).astype(np.float32)
     if planned_qpos.shape[0] == 7 and action_dim == 8:
-        return np.concatenate([planned_qpos, [0.04]]).astype(np.float32)
+        return np.concatenate([planned_qpos, [gripper_action]]).astype(np.float32)
     raise ValueError(
         f"cannot convert planned qpos shape {planned_qpos.shape} to action_dim={action_dim}"
     )

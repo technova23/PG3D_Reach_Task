@@ -87,8 +87,8 @@ XARM7_REACH_WORKSPACE_BOUNDS = world_bounds(XARM7_REACH_BOX_BASE)
 XARM7_WORKSPACE_BOUNDS = world_bounds(XARM7_CROP_BOX_BASE)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Camera extrinsics — eye-to-hand calibration (AX = XB), 5 samples.
-# RMS reprojection: 12.5032 mm translation, 1.1187° rotation (see
+# Camera extrinsics — eye-to-hand calibration (AX = XB), 6 samples.
+# RMS reprojection: 9.5284 mm translation, 1.4328° rotation (see
 # eye_to_hand_custom.py "FINAL RESULT: Base to Camera Transformation" output).
 #
 # "Base to Camera" output from the calibration script = camera pose expressed
@@ -97,7 +97,7 @@ XARM7_WORKSPACE_BOUNDS = world_bounds(XARM7_CROP_BOX_BASE)
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Camera origin in robot base frame [m].
-XARM7_CAM_T_BASE = np.array([1.7443, 0.0636, 0.6918], dtype=np.float64)
+XARM7_CAM_T_BASE = np.array([1.7103, 0.0043, 0.7097], dtype=np.float64)
 
 # Rotation matrix: each COLUMN is an OpenCV-optical-frame camera axis expressed
 # in the robot base frame (this is the raw calibration script output).
@@ -106,16 +106,33 @@ XARM7_CAM_T_BASE = np.array([1.7443, 0.0636, 0.6918], dtype=np.float64)
 #   col 2 = camera +z (optical/forward) ≈ base -x
 XARM7_CAM_R_BASE_OPENCV = np.array(
     [
-        [ 0.0162,  0.0573, -0.9982],
-        [ 0.9981, -0.0604,  0.0128],
-        [-0.0596, -0.9965, -0.0582],
+        [ 0.0534,  0.0868, -0.9948],
+        [ 0.9985, -0.0156,  0.0522],
+        [-0.0110, -0.9961, -0.0875],
     ],
     dtype=np.float64,
 )
 
-# Calibration reprojection RMS error (see eye_to_hand_custom.py output).
-XARM7_CAM_CALIB_RMS_TRANSLATION_M = 0.0125032
-XARM7_CAM_CALIB_RMS_ROTATION_DEG = 1.1187
+# Per-episode camera domain randomization: uniform +/-10cm position and +/-2deg
+# orientation on each axis independently, for viewpoint diversity in training data
+# (not a calibration-error model -- that's XARM7_CAM_CALIB_ERROR_* below). Fixed
+# for the whole episode -- set once in _randomize_camera_pose, never re-sampled
+# mid-episode.
+XARM7_CAM_POSITION_JITTER_M = 0.10
+XARM7_CAM_ROTATION_JITTER_DEG = 2.0
+
+# Calibration-error model: even after calibrating, the estimated camera pose used
+# to convert depth into world/robot-frame points is never exactly right. Modeled
+# as a per-episode (not per-step) Gaussian offset applied only when interpreting
+# points into world frame -- see _sample_camera_calibration_error and the
+# get_obs override in reach_env.py -- so the physical/rendering camera pose
+# (XARM7_CAM_POSITION_JITTER_M/ROTATION_JITTER_DEG above) is untouched; only the
+# point cloud's belief about where the camera was is perturbed. Values are the
+# real measured eye-to-hand calibration RMS error (see reach_config.py's
+# "Camera extrinsics" section: RMS Translation Error 9.5284 mm, RMS Rotation
+# Error 1.4328 deg, eye_to_hand_custom.py output, 6 samples).
+XARM7_CAM_CALIB_ERROR_TRANSLATION_STD_M = 0.0095284
+XARM7_CAM_CALIB_ERROR_ROTATION_STD_DEG = 1.4328
 
 
 def _opencv_camera_rotation_to_sapien(r_opencv: np.ndarray) -> np.ndarray:

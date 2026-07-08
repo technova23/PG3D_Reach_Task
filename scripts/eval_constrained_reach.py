@@ -122,6 +122,20 @@ class EvalDecisionSummary:
     selection_reason: str | None
 
 
+@dataclass
+class PendingObstacleSpawn:
+    """A second avoid region, already fully placed, that stays invisible to
+    guidance/video/metrics until the live rollout's TCP crosses ``trigger_fraction``
+    of arc-length progress along ``reference_path`` (the widest candidate path used
+    to place the first --constraint-placement obstacle_spawning obstacle). See
+    _obstacle_spawning_constraints and its use in run_eval_episode.
+    """
+
+    reference_path: np.ndarray
+    trigger_fraction: float
+    constraint: AvoidRegion
+
+
 class DP3ChunkPolicyAdapter:
     """Adapt `SimpleDP3.predict_action` to the P09 candidate-sampling protocol."""
 
@@ -316,9 +330,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         sim_env = gym.make(
             str(metadata["env_id"]),
-            **_env_kwargs(metadata, render_mode="rgb_array" if args.video else None),
+            **_env_kwargs(
+                metadata,
+                render_mode="rgb_array" if args.video else None,
+                max_episode_steps=args.max_episode_steps,
+            ),
         )
-        ghost_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
+        ghost_env = gym.make(
+            str(metadata["env_id"]),
+            **_env_kwargs(metadata, render_mode=None, max_episode_steps=args.max_episode_steps),
+        )
         adapter = DP3ChunkPolicyAdapter(
             policy,
             action_mode=action_mode,
@@ -337,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
                     if zarr_root is not None and spec.dataset_episode_index is not None
                     else None
                 )
-                constraints = _constraints_for_episode(
+                constraints, pending_spawn = _constraints_for_episode(
                     sim_env,
                     spec=spec,
                     policy=policy,
@@ -353,8 +374,14 @@ def main(argv: list[str] | None = None) -> int:
                     / "constraints"
                     / f"episode_{spec.output_index:03d}.json"
                 )
+                # Save the full potential set (including the not-yet-spawned obstacle)
+                # for documentation/reproducibility; run_eval_episode still only reveals
+                # it to guidance/video/metrics once the rollout crosses the first one.
+                constraints_to_save = (
+                    constraints + [pending_spawn.constraint] if pending_spawn is not None else constraints
+                )
                 with timer.time("json_write", artifact="constraint"):
-                    save_episode_constraints(constraint_path, constraints)
+                    save_episode_constraints(constraint_path, constraints_to_save)
                 write_video = args.video and spec.output_index in video_episode_indices
                 write_rerun = args.rerun and spec.output_index in rerun_episode_indices
                 for method in args.methods:
@@ -366,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
                         method=method,
                         spec=spec,
                         constraints=constraints,
+                        pending_spawn=pending_spawn,
                         action_mode=action_mode,
                         crop_config=crop_config,
                         goal_thresh=goal_thresh,
@@ -389,6 +417,7 @@ def main(argv: list[str] | None = None) -> int:
                             gym,
                             metadata=metadata,
                             enabled=write_video and args.constraint_overlay_video,
+                            max_episode_steps=args.max_episode_steps,
                         ),
                         constraint_overlay_alpha=args.constraint_overlay_alpha,
                         constraint_overlay_color=tuple(args.constraint_overlay_color),
@@ -443,7 +472,11 @@ def main(argv: list[str] | None = None) -> int:
         "source": args.source,
         "methods": list(args.methods),
         "env_id": metadata["env_id"],
-        "env_kwargs": _env_kwargs(metadata, render_mode="rgb_array" if args.video else None),
+        "env_kwargs": _env_kwargs(
+            metadata,
+            render_mode="rgb_array" if args.video else None,
+            max_episode_steps=args.max_episode_steps,
+        ),
         "planning_horizon_chunks": args.planning_horizon_chunks,
         "execution_horizon_chunks": args.execution_horizon_chunks,
         "geometry_mode": args.geometry_mode,
@@ -545,6 +578,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=["base", "rejection", "reranking"],
     )
     parser.add_argument("--max-steps", type=int, default=80)
+    parser.add_argument(
+        "--max-episode-steps",
+        type=int,
+        default=None,
+        help=(
+            "Override the env's own max_episode_steps (otherwise taken as-is from "
+            "the dataset's metadata.json env_kwargs, e.g. 150 for "
+            "pg3d_reach_regen_abcd.zarr). The env truncates every episode there "
+            "regardless of --max-steps, so raising --max-steps past this value has "
+            "no effect until it's raised too. Must be >= --max-steps to actually "
+            "matter."
+        ),
+    )
     parser.add_argument("--post-success-steps", type=int, default=16)
     parser.add_argument("--planning-horizon-chunks", type=int, default=1)
     parser.add_argument("--execution-horizon-chunks", type=int, default=1)
@@ -554,7 +600,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--goal-thresh", type=float, default=None)
     parser.add_argument(
         "--constraint-placement",
-        choices=["direct_path", "candidate_midpath", "widest_trajectory"],
+        choices=["direct_path", "candidate_midpath", "widest_trajectory", "obstacle_spawning"],
         default="direct_path",
         help=(
             "Where to place generated avoid regions. direct_path uses the midpoint of "
@@ -562,10 +608,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "and places the region in the middle of their natural path bundle; "
             "widest_trajectory rolls out candidates, selects the single path that bows out "
             "the most from the straight start-goal line, and plants one region per "
-            "--avoid-path-fractions value along that widest path."
+            "--avoid-path-fractions value along that widest path. obstacle_spawning also "
+            "selects the widest candidate path and places a first obstacle at "
+            "--avoid-path-fractions' first value, but it is not the only obstacle: a second "
+            "one is placed at a random arc-length fraction further along the same path "
+            "(see --obstacle-spawn-fraction-margin) and stays hidden from guidance/video "
+            "until the live rollout's TCP crosses the first obstacle's fraction, at which "
+            "point it spawns for the remainder of that episode."
         ),
     )
     parser.add_argument("--constraint-placement-candidates", type=int, default=10)
+    parser.add_argument(
+        "--obstacle-spawn-fraction-margin",
+        type=float,
+        default=0.1,
+        help=(
+            "For --constraint-placement obstacle_spawning: minimum arc-length-fraction "
+            "gap between the first obstacle (placed at --avoid-path-fractions' first "
+            "value) and the second, randomly placed, obstacle that spawns once the "
+            "first is crossed. The second obstacle's fraction is sampled uniformly from "
+            "[first_fraction + margin, 0.98], clamped to always land strictly ahead of "
+            "the first and short of the goal."
+        ),
+    )
     parser.add_argument(
         "--constraint-placement-steps",
         type=int,
@@ -796,6 +861,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.max_steps <= 0:
         raise ValueError("--max-steps must be positive")
+    if args.max_episode_steps is not None and args.max_episode_steps <= 0:
+        raise ValueError("--max-episode-steps must be positive")
     if args.post_success_steps < 0:
         raise ValueError("--post-success-steps must be non-negative")
     validate_planning_horizons(
@@ -894,6 +961,7 @@ def run_eval_episode(
     method: EvalMethod,
     spec: RolloutSpec,
     constraints: list[Any],
+    pending_spawn: PendingObstacleSpawn | None = None,
     action_mode: ActionMode,
     crop_config: PointCloudCropConfig,
     goal_thresh: float,
@@ -920,6 +988,13 @@ def run_eval_episode(
     robot_clearance_stride: int = 4,
     zarr_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # Defensive copy: obstacle_spawning appends to `constraints` as the episode
+    # progresses, and the caller reuses the same initial list/pending_spawn across
+    # multiple methods (base/rejection/reranking) for one episode -- mutating the
+    # caller's list in place would leak a spawned obstacle into the next method's
+    # "before spawn" state.
+    constraints = list(constraints)
+    spawn_pending = pending_spawn
     if zarr_context is not None:
         sim_obs, sim_info = _reset_to_zarr_episode(
             sim_env, rollout_seed=spec.seed, zarr_context=zarr_context
@@ -1073,6 +1148,38 @@ def run_eval_episode(
                 )
                 _append_path(path, sim_entry)
                 timeline.append(sim_entry.copy())
+                if spawn_pending is not None:
+                    tcp_position = np.asarray(sim_entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3]
+                    progress = _progress_fraction_along_path(spawn_pending.reference_path, tcp_position)
+                    if progress >= spawn_pending.trigger_fraction:
+                        constraints.append(spawn_pending.constraint)
+                        scene = scene_context_for_constraints(
+                            target_position=target,
+                            constraints=constraints,
+                            metadata={"method": method, "episode": spec.output_index, "seed": spec.seed},
+                        )
+                        if video_env is not None:
+                            try:
+                                _add_constraint_overlay_actors(
+                                    video_env,
+                                    constraints=[spawn_pending.constraint],
+                                    color=constraint_overlay_color,
+                                    alpha=constraint_overlay_alpha,
+                                    index_offset=len(constraints) - 1,
+                                )
+                            except Exception as exc:
+                                print(
+                                    "warning: failed to add spawned-obstacle overlay actor: "
+                                    f"{type(exc).__name__}: {exc}",
+                                    file=sys.stderr,
+                                )
+                        print(
+                            f"obstacle_spawning: spawned second obstacle method={method} "
+                            f"episode={spec.output_index} step={steps} progress={progress:.3f} "
+                            f"trigger={spawn_pending.trigger_fraction:.3f}",
+                            flush=True,
+                        )
+                        spawn_pending = None
                 _write_step_trace(
                     step_traces_file,
                     method=method,
@@ -1932,9 +2039,17 @@ def _constraints_for_episode(
     action_mode: ActionMode | None = None,
     goal_thresh: float | None = None,
     zarr_context: dict[str, Any] | None = None,
-) -> list[Any]:
+) -> tuple[list[Any], PendingObstacleSpawn | None]:
+    """Return (constraints active from episode start, pending spawn or None).
+
+    Every mode except obstacle_spawning returns a plain constraint list with no
+    pending spawn -- run_eval_episode treats that as "everything is visible from
+    step 0", matching prior behavior exactly. obstacle_spawning additionally
+    returns a PendingObstacleSpawn describing a second, already-placed obstacle
+    that run_eval_episode must not reveal until the rollout crosses the first.
+    """
     if args.constraints_dir is not None:
-        return load_episode_constraints(_precomputed_constraint_path(args.constraints_dir, spec))
+        return load_episode_constraints(_precomputed_constraint_path(args.constraints_dir, spec)), None
     if args.constraint_type == "cartesian_pose":
         return [
             _cartesian_pose_constraint_from_zarr_path(
@@ -1942,9 +2057,12 @@ def _constraints_for_episode(
                 zarr_context=zarr_context,
                 args=args,
             )
-        ]
+        ], None
     if policy is None or adapter is None or action_mode is None or goal_thresh is None:
         raise ValueError("generated avoid/projection constraints require policy rollout context")
+    pending_raw: AvoidRegion | None = None
+    reference_path: np.ndarray | None = None
+    trigger_fraction: float | None = None
     if args.constraint_placement == "candidate_midpath":
         constraints = _candidate_midpath_constraints(
             env,
@@ -1971,6 +2089,19 @@ def _constraints_for_episode(
             zarr_context=zarr_context,
             output_dir=getattr(args, "output_dir", None),
         )
+    elif args.constraint_placement == "obstacle_spawning":
+        constraints, pending_raw, reference_path, trigger_fraction = _obstacle_spawning_constraints(
+            env,
+            spec=spec,
+            policy=policy,
+            adapter=adapter,
+            action_mode=action_mode,
+            crop_config=crop_config,
+            goal_thresh=goal_thresh,
+            args=args,
+            zarr_context=zarr_context,
+            output_dir=getattr(args, "output_dir", None),
+        )
     else:
         constraints = _episode_constraints(
             env, spec=spec, crop_config=crop_config, args=args, zarr_context=zarr_context
@@ -1980,7 +2111,16 @@ def _constraints_for_episode(
         robot_points = _episode_start_robot_points(
             env, spec=spec, crop_config=crop_config, zarr_context=zarr_context
         )
-    return _finalize_constraints(constraints, robot_points=robot_points, args=args)
+    to_finalize = constraints + ([pending_raw] if pending_raw is not None else [])
+    finalized = _finalize_constraints(to_finalize, robot_points=robot_points, args=args)
+    if pending_raw is not None:
+        pending_spawn = PendingObstacleSpawn(
+            reference_path=reference_path,
+            trigger_fraction=float(trigger_fraction),
+            constraint=finalized[-1],
+        )
+        return finalized[:-1], pending_spawn
+    return finalized, None
 
 
 def _precomputed_constraint_path(constraints_dir: Path, spec: RolloutSpec) -> Path:
@@ -2253,6 +2393,171 @@ def _widest_trajectory_constraints(
             )
         )
     return constraints
+
+
+def _median_candidate_path(paths: list[np.ndarray], *, num_samples: int = 101) -> np.ndarray:
+    """Aggregate a candidate-path bundle into one synthetic path, candidate_midpath-style.
+
+    candidate_midpath places a constraint at the median of all candidate paths'
+    points at one fixed arc-length fraction. This generalizes that to a dense grid
+    of fractions (0, 1/100, ..., 1) so the result is a full polyline usable as a
+    progress-tracking reference path, not just a single point.
+    """
+    fractions = np.linspace(0.0, 1.0, num_samples)
+    centers = np.stack(
+        [
+            np.median(
+                np.stack(
+                    [_point_at_arc_fraction(path, fraction=f) for path in paths],
+                    axis=0,
+                ),
+                axis=0,
+            )
+            for f in fractions
+        ],
+        axis=0,
+    )
+    return centers.astype(np.float32)
+
+
+def _obstacle_spawning_constraints(
+    env: Any,
+    *,
+    spec: RolloutSpec,
+    policy: SimpleDP3,
+    adapter: DP3ChunkPolicyAdapter,
+    action_mode: ActionMode,
+    crop_config: PointCloudCropConfig,
+    goal_thresh: float,
+    args: argparse.Namespace,
+    zarr_context: dict[str, Any] | None = None,
+    output_dir: Path | None = None,
+) -> tuple[list[AvoidRegion], AvoidRegion, np.ndarray, float]:
+    """Place a first avoid region on the candidate-path bundle's median path, plus
+    a second, not-yet-finalized region further along it at a random fraction.
+
+    Center placement uses candidate_midpath's approach (median of all candidate
+    paths' points at a given arc-length fraction), generalized across a dense
+    fraction grid via _median_candidate_path so the result is a full polyline --
+    needed as a progress-tracking reference path during the live rollout, not just
+    a single point. The first obstacle is placed at --avoid-path-fractions' first
+    value. The second is placed at a random fraction sampled from
+    [first_fraction + --obstacle-spawn-fraction-margin, 0.98] (clamped to stay
+    strictly ahead of the first and short of the goal) -- it is returned raw so
+    the caller can finalize (robot-clearance placement) it alongside the first,
+    but it must NOT be added to the live constraints list until the rollout
+    crosses the first obstacle (see PendingObstacleSpawn / run_eval_episode).
+
+    Returns (initial_constraints=[first], second_raw, reference_path=median_path,
+    trigger_fraction=first_fraction).
+    """
+    first_fraction = float(args.avoid_path_fractions[0])
+    paths, successful_paths = _collect_candidate_paths(
+        env,
+        spec=spec,
+        policy=policy,
+        adapter=adapter,
+        action_mode=action_mode,
+        crop_config=crop_config,
+        goal_thresh=goal_thresh,
+        args=args,
+        zarr_context=zarr_context,
+    )
+    selected_paths = (
+        successful_paths if args.constraint_placement_success_only and successful_paths else paths
+    )
+    if not selected_paths:
+        raise RuntimeError("obstacle_spawning constraint placement produced no candidate paths")
+
+    median_path = _median_candidate_path(selected_paths)
+
+    # Seeded off the episode seed (not the shared rollout rng) so the spawn
+    # fraction is reproducible per episode independent of call order.
+    spawn_rng = np.random.default_rng(spec.seed + 104729)
+    margin = float(args.obstacle_spawn_fraction_margin)
+    lo = min(first_fraction + margin, 0.95)
+    hi = 0.98
+    second_fraction = float(spawn_rng.uniform(lo, hi)) if hi > lo else hi
+    second_fraction = float(np.clip(second_fraction, first_fraction + 1e-3, 0.995))
+
+    first_center = _point_at_arc_fraction(median_path, fraction=first_fraction).astype(np.float32)
+    second_center = _point_at_arc_fraction(median_path, fraction=second_fraction).astype(np.float32)
+    # Radius is proportional to the candidate-path bundle's spread around each
+    # obstacle's own center (37.5th percentile of point distances, floored at
+    # --avoid-min-radius) -- same helper candidate_midpath uses -- rather than a
+    # single flat --avoid-radius shared by both. The two obstacles sit at
+    # different points along the path, so their spreads (and thus radii) differ.
+    first_radius = _effective_avoid_radius(
+        center=first_center,
+        paths=selected_paths,
+        requested_radius=float(args.avoid_radius),
+        min_radius=float(args.avoid_min_radius),
+    )
+    second_radius = _effective_avoid_radius(
+        center=second_center,
+        paths=selected_paths,
+        requested_radius=float(args.avoid_radius),
+        min_radius=float(args.avoid_min_radius),
+    )
+    print(
+        "obstacle-spawning constraint placement: "
+        f"episode={spec.output_index} first_frac={first_fraction:.3f} "
+        f"second_frac={second_fraction:.3f} sampled={len(paths)} "
+        f"successful={len(successful_paths)} used={len(selected_paths)} "
+        f"first_center={first_center.tolist()} "
+        f"second_center={second_center.tolist()} shape={args.avoid_shape} "
+        f"first_radius={first_radius:.4f} second_radius={second_radius:.4f}",
+        flush=True,
+    )
+    if getattr(args, "plot_candidate_paths", False) and output_dir is not None:
+        _plot_candidate_paths(
+            output_dir=output_dir,
+            episode_index=spec.output_index,
+            paths=paths,
+            successful_paths=successful_paths,
+            selected_paths=[median_path],
+            center=first_center,
+            radius=first_radius,
+            path_fraction=first_fraction,
+            constraint_index=0,
+            projection_half_extents=None,
+        )
+    first_constraint = AvoidRegion(
+        region=_avoid_region_of_shape(first_center, first_radius, args),
+        margin=float(args.avoid_margin),
+        weight=float(args.avoid_weight),
+        name="obstacle_spawning_avoid_region_0",
+    )
+    second_constraint = AvoidRegion(
+        region=_avoid_region_of_shape(second_center, second_radius, args),
+        margin=float(args.avoid_margin),
+        weight=float(args.avoid_weight),
+        name="obstacle_spawning_avoid_region_1",
+    )
+    return [first_constraint], second_constraint, median_path, first_fraction
+
+
+def _progress_fraction_along_path(path: np.ndarray, point: np.ndarray) -> float:
+    """Return how far along ``path`` (by arc length, as a fraction in [0, 1]) the
+    closest point to ``point`` sits.
+
+    Used to detect when a live rollout's TCP has "crossed" a reference-path
+    position expressed as an arc-length fraction (e.g. an obstacle placed at
+    fraction f): once the returned progress >= f, the TCP has reached or passed
+    that point along the reference path (nearest-point projection, so lateral
+    deviation to avoid an obstacle doesn't stall progress).
+    """
+    points = np.asarray(path, dtype=np.float32).reshape(-1, 3)
+    if points.shape[0] < 2:
+        return 1.0
+    segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    total = float(np.sum(segment_lengths))
+    if total <= 1e-8:
+        return 1.0
+    cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+    dists = np.linalg.norm(points - np.asarray(point, dtype=np.float32).reshape(1, 3), axis=1)
+    nearest_idx = int(np.argmin(dists))
+    return float(np.clip(cumulative[nearest_idx] / total, 0.0, 1.0))
 
 
 def _candidate_midpath_constraints(
@@ -2897,7 +3202,12 @@ def _whole_robot_clearance_points(
     return np.concatenate(clouds, axis=0).astype(np.float32, copy=False)
 
 
-def _env_kwargs(metadata: dict[str, Any], *, render_mode: str | None) -> dict[str, Any]:
+def _env_kwargs(
+    metadata: dict[str, Any],
+    *,
+    render_mode: str | None,
+    max_episode_steps: int | None = None,
+) -> dict[str, Any]:
     env_kwargs = dict(metadata["env_kwargs"])
     env_kwargs["obs_mode"] = "pointcloud"
     env_kwargs["num_envs"] = 1
@@ -2905,6 +3215,8 @@ def _env_kwargs(metadata: dict[str, Any], *, render_mode: str | None) -> dict[st
         env_kwargs.pop("render_mode", None)
     else:
         env_kwargs["render_mode"] = render_mode
+    if max_episode_steps is not None:
+        env_kwargs["max_episode_steps"] = max_episode_steps
     return env_kwargs
 
 
@@ -2913,10 +3225,11 @@ def _video_env_factory(
     *,
     metadata: dict[str, Any],
     enabled: bool,
+    max_episode_steps: int | None = None,
 ) -> Callable[[], Any] | None:
     if not enabled:
         return None
-    env_kwargs = _env_kwargs(metadata, render_mode="rgb_array")
+    env_kwargs = _env_kwargs(metadata, render_mode="rgb_array", max_episode_steps=max_episode_steps)
 
     def factory() -> Any:
         return gym.make(str(metadata["env_id"]), **env_kwargs)
@@ -2962,8 +3275,15 @@ def _add_constraint_overlay_actors(
     constraints: list[AvoidRegion | CartesianPoseConstraint],
     color: tuple[float, float, float],
     alpha: float,
+    index_offset: int = 0,
 ) -> None:
-    """Add visual-only keep-out actors to a render-only ManiSkill env."""
+    """Add visual-only keep-out actors to a render-only ManiSkill env.
+
+    ``index_offset`` shifts the actor-naming index; pass it when calling this
+    incrementally (e.g. obstacle_spawning adding a single newly-spawned
+    constraint mid-episode) so its actor name doesn't collide with actors
+    already added for earlier constraints in the same env.
+    """
     import sapien
     from mani_skill.utils.building import actors
 
@@ -2981,7 +3301,7 @@ def _add_constraint_overlay_actors(
             )
             continue
         region = constraint.region
-        name = f"pg3d_avoid_region_overlay_{constraint_idx}"
+        name = f"pg3d_avoid_region_overlay_{constraint_idx + index_offset}"
         if isinstance(region, SphereRegion):
             actors.build_sphere(
                 scene,

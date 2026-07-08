@@ -66,6 +66,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--k", type=int, default=32, help="candidates sampled per replan")
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument(
+        "--max-episode-steps",
+        type=int,
+        default=None,
+        help=(
+            "Override the dataset's baked-in env_kwargs.max_episode_steps (env "
+            "truncation point), same as eval_constrained_reach.py's flag of the "
+            "same name. Without this, the env still truncates at whatever value "
+            "is stored in the dataset's metadata.json, regardless of --max-steps."
+        ),
+    )
+    parser.add_argument(
         "--constraint-type",
         choices=["region", "projection"],
         default="projection",
@@ -73,9 +84,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--constraint-placement",
-        choices=["direct_path", "candidate_midpath", "widest_trajectory"],
+        choices=["direct_path", "candidate_midpath", "widest_trajectory", "obstacle_spawning"],
         default="candidate_midpath",
-        help="Forwarded to eval_constrained_reach.py's --constraint-placement.",
+        help=(
+            "Forwarded to eval_constrained_reach.py's --constraint-placement. "
+            "obstacle_spawning only shows/uses its first (always-visible) obstacle here "
+            "-- the second, dynamically-spawned one isn't wired into this script's replan "
+            "loop or rendering yet."
+        ),
     )
     parser.add_argument(
         "--projection-half-extents",
@@ -104,6 +120,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--k must be positive")
     if args.max_steps <= 0:
         raise ValueError("--max-steps must be positive")
+    if args.max_episode_steps is not None and args.max_episode_steps <= 0:
+        raise ValueError("--max-episode-steps must be positive")
     if args.video_fps <= 0:
         raise ValueError("--video-fps must be positive")
     if args.hold_frames <= 0:
@@ -139,6 +157,8 @@ def _build_eval_args(args: argparse.Namespace, *, scratch_dir: Path) -> argparse
         "--gripper-open", str(args.gripper_open),
         "--seed", str(args.seed),
     ]
+    if args.max_episode_steps is not None:
+        argv += ["--max-episode-steps", str(args.max_episode_steps)]
     return parse_eval_args(argv)
 
 
@@ -163,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         f"planning_horizon_chunks={eval_args.planning_horizon_chunks} "
         f"geometry_mode={eval_args.geometry_mode} "
         f"max_steps={eval_args.max_steps} "
+        f"max_episode_steps={eval_args.max_episode_steps} "
         f"method={eval_args.methods}",
         flush=True,
     )
@@ -194,15 +215,21 @@ def main(argv: list[str] | None = None) -> int:
     sim_env = None
     ghost_env = None
     try:
-        sim_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
-        ghost_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
+        sim_env = gym.make(
+            str(metadata["env_id"]),
+            **_env_kwargs(metadata, render_mode=None, max_episode_steps=eval_args.max_episode_steps),
+        )
+        ghost_env = gym.make(
+            str(metadata["env_id"]),
+            **_env_kwargs(metadata, render_mode=None, max_episode_steps=eval_args.max_episode_steps),
+        )
         adapter = DP3ChunkPolicyAdapter(
             policy, action_mode=action_mode, device=device, policy_batch_size=64, timer=timer
         )
 
         for spec in specs:
             zarr_context = _zarr_episode_context(zarr_root, spec.dataset_episode_index)
-            constraints = _constraints_for_episode(
+            constraints, pending_spawn = _constraints_for_episode(
                 sim_env,
                 spec=spec,
                 policy=policy,
@@ -213,6 +240,13 @@ def main(argv: list[str] | None = None) -> int:
                 args=eval_args,
                 zarr_context=zarr_context,
             )
+            if pending_spawn is not None:
+                print(
+                    "warning: constraint-placement obstacle_spawning's second obstacle "
+                    "is not yet visualized by this script (only the first, always-visible "
+                    "obstacle is shown/used below)",
+                    file=sys.stderr,
+                )
             print(
                 f"episode {spec.output_index} (dataset idx {spec.dataset_episode_index}, "
                 f"seed {spec.seed}): constraints={[c.to_json() for c in constraints]}",

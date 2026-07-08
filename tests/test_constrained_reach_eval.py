@@ -873,7 +873,7 @@ def test_eval_episode_indices_file_and_precomputed_constraints(tmp_path: Path) -
     )
 
     assert _read_episode_indices_file(indices_path) == [3, 7]
-    loaded = _constraints_for_episode(
+    loaded, pending_spawn = _constraints_for_episode(
         None,
         spec=RolloutSpec(
             output_index=0,
@@ -890,6 +890,7 @@ def test_eval_episode_indices_file_and_precomputed_constraints(tmp_path: Path) -
 
     assert args.constraints_dir == constraints_dir
     assert _constraint_source_summary(args)["type"] == "precomputed"
+    assert pending_spawn is None
     np.testing.assert_allclose(loaded[0].region.center, [0.1, 0.0, 0.2])
 
 

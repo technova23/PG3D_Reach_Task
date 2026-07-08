@@ -216,18 +216,31 @@ class XArm7Gripper(BaseAgent):
     """xArm7 (7-DoF) arm with the xArm parallel-jaw gripper attached.
 
     TCP is ``link_tcp`` — 172 mm above the gripper base, centered between the
-    finger tips. Action space is 8-dim (7 arm joints + 1 gripper), mirroring
-    Panda's ``arm`` + ``gripper`` mimic-controller split: ``drive_joint`` is the
-    single actionable gripper DOF, and the other 5 gripper joints follow it every
-    control step via a :class:`PDJointPosMimicControllerConfig`, exactly the ratio
+    finger tips. The env's action space is 8-dim (7 arm joints + 1 gripper,
+    ``drive_joint``, tracked via a :class:`PDJointPosMimicControllerConfig`, the
+    other 5 gripper joints following it every control step at the ratio
     (``multiplier=1, offset=0``) the URDF's own ``<mimic joint="drive_joint">``
-    tags declare for each of them.
+    tags declare). The DP3 training/state contract is arm-only (7-dim state,
+    7-dim action, no gripper qpos at all -- see ``agent_pos_joint_indices``
+    below) for this reach-only agent, since the gripper is held at a constant
+    closed target the whole episode (see ``--gripper-open`` in
+    write_xarm7_gripper_reach_dataset.py and ``gripper_open`` in
+    policy_action_to_sim_action) and never needs the policy's attention here.
+    A future pick-and-place variant that needs the policy to reason about or
+    predict gripper state should override/remove ``agent_pos_joint_indices``
+    (and set ``action_includes_gripper = True``) rather than reuse this one
+    as-is -- this agent's dataset contract intentionally discards gripper qpos.
 
     Use this agent for reach tasks that need the gripper body present for
-    sim-to-real point-cloud fidelity, including tasks that actively open/close it.
+    sim-to-real point-cloud fidelity.
     """
 
     uid = "xarm7_gripper"
+    # Arm-only agent_pos: this reach task never needs the policy to see gripper
+    # qpos (it's held at a constant closed target throughout). Read by
+    # maniskill_adapter.observation.adapt_observation via getattr(agent, ...),
+    # so this applies uniformly to dataset generation and live rollout/eval.
+    agent_pos_joint_indices = list(range(7))
     urdf_path = _XARM7_GRIPPER_COLORED_URDF
 
     # drive_joint is the sole actuated gripper DOF; the other 5 are followers that
@@ -246,12 +259,16 @@ class XArm7Gripper(BaseAgent):
         joint_name: {"joint": "drive_joint"}
         for joint_name in gripper_joint_names[1:]
     }
-    # Gains mirror ManiSkill's own xarm6_robotiq mimic gripper (stiffness=1e5,
-    # damping=2000), which is this codebase's closest precedent for a mimic-driven
-    # xArm-family gripper.
+    # Gains match ManiSkill's own xarm6_robotiq mimic gripper exactly (stiffness=1e5,
+    # damping=2000, force_limit=0.1) -- this codebase's closest precedent for a
+    # mimic-driven xArm-family gripper. force_limit is the critical one: a 1e5-rad/s^2
+    # spring with no meaningful force cap can deliver unbounded torque on any real
+    # target change, which is what produced a qvel blowup (~100 rad/s) when this was
+    # first tried at force_limit=50 (copied from the old *static*-hold config, which
+    # never actually moved its target so a high cap was never exercised).
     gripper_stiffness = 1e5
     gripper_damping = 2000
-    gripper_force_limit = 50
+    gripper_force_limit = 0.1
     gripper_friction = 1
     # rad; joint hard limit is [0, 0.85]. The action-space upper bound is backed off
     # the hard limit by _GRIPPER_LIMIT_MARGIN rather than 0.85 exactly: commanding
@@ -401,7 +418,6 @@ class XArm7Gripper(BaseAgent):
             force_limit=self.gripper_force_limit,
             friction=self.gripper_friction,
             mimic=self._gripper_mimic,
-            interpolate=True,
         )
 
         controller_configs = dict(
