@@ -9,7 +9,7 @@ from dataset_creation_helper import (
     load_robot, check_reachability, MAX_DIFF
 )
 
-BAG_ROOT = Path("../data-check/")
+BAG_ROOT = Path("/scratch2/skills/reach_task_real_episodes_xarm7/july17-combined")
 TARGET_JSON = Path("episode_target_mapping.json")
 XARM7_URDF = Path(__file__).resolve().parents[1] / "pg3d/envs/xarm_adapter/assets/xarm7_with_gripper_colored.urdf"
 
