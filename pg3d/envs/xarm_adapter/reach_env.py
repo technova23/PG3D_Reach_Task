@@ -22,7 +22,6 @@ from mani_skill.utils import sapien_utils
 from mani_skill.utils.registration import register_env
 from scipy.spatial.transform import Rotation as _Rotation
 
-from pg3d.envs.maniskill_adapter.reach_config import REACH_TASK_SPECS
 from pg3d.envs.maniskill_adapter.reach_env import PG3DReachEnv
 from pg3d.envs.xarm_adapter.agents import (  # noqa: F401 - registers agents
     XArm7Gripper,
@@ -30,6 +29,8 @@ from pg3d.envs.xarm_adapter.agents import (  # noqa: F401 - registers agents
     XArm7Robotiq,
 )
 from pg3d.envs.xarm_adapter.reach_config import (
+    ROBOT_BASE_POSITION,
+    XARM7_BALANCED_GOAL_REGIONS,
     XARM7_CAM_CALIB_ERROR_ROTATION_STD_DEG,
     XARM7_CAM_CALIB_ERROR_TRANSLATION_STD_M,
     XARM7_CAM_POSITION_JITTER_M,
@@ -37,11 +38,13 @@ from pg3d.envs.xarm_adapter.reach_config import (
     XARM7_CAM_ROTATION_JITTER_DEG,
     XARM7_CAM_T_BASE,
     XARM7_CAM_VFOV_RAD,
+    XARM7_REACH_GOAL_CENTER,
+    XARM7_REACH_GOAL_HALF_EXTENTS,
     XARM7_SIM_CAM_HEIGHT,
     XARM7_SIM_CAM_WIDTH,
 )
 
-ROBOT_BASE_POSE = sapien.Pose(p=[-0.615, 0.0, 0.0])
+ROBOT_BASE_POSE = sapien.Pose(p=ROBOT_BASE_POSITION.tolist())
 
 
 
@@ -164,9 +167,10 @@ class PG3DReachXArm7Env(PG3DReachEnv):
 
     @property
     def _default_human_render_camera_configs(self) -> CameraConfig:
-        # Front-facing third-person view: camera at world [0.7, 0, 0.45] looking toward
-        # workspace center [-0.315, 0, 0.22].  Y=0 so no diagonal offset.
-        pose = sapien_utils.look_at(eye=[0.7, 0.0, 0.45], target=[-0.315, 0.0, 0.22])
+        # Front-facing third-person view in the M2 base frame.
+        target = np.asarray(XARM7_REACH_GOAL_CENTER, dtype=np.float32)
+        eye = (target + np.asarray([1.0, 0.0, 0.25], dtype=np.float32)).tolist()
+        pose = sapien_utils.look_at(eye=eye, target=target.tolist())
         return CameraConfig("render_camera", pose, 640, 480, float(np.deg2rad(60)), 0.1, 10.0)
 
 
@@ -194,9 +198,8 @@ class PG3DReachXArm7WorkspaceEnv(PG3DReachXArm7Env):
     """Broad Cartesian goal distribution (xArm7), mirrors PG3DReach-Workspace-v0."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        spec = REACH_TASK_SPECS["PG3DReach-Workspace-v0"]
-        kwargs.setdefault("goal_center", spec.goal_center)
-        kwargs.setdefault("goal_half_extents", spec.goal_half_extents)
+        kwargs.setdefault("goal_center", XARM7_REACH_GOAL_CENTER)
+        kwargs.setdefault("goal_half_extents", XARM7_REACH_GOAL_HALF_EXTENTS)
         super().__init__(*args, **kwargs)
 
 
@@ -205,10 +208,9 @@ class PG3DReachXArm7BalancedWorkspaceEnv(PG3DReachXArm7Env):
     """Mixed practical/workspace distribution (xArm7), mirrors the balanced Panda env."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        spec = REACH_TASK_SPECS["PG3DReach-BalancedWorkspace-v0"]
-        kwargs.setdefault("goal_center", spec.goal_center)
-        kwargs.setdefault("goal_half_extents", spec.goal_half_extents)
-        kwargs.setdefault("goal_regions", spec.goal_regions)
+        kwargs.setdefault("goal_center", XARM7_REACH_GOAL_CENTER)
+        kwargs.setdefault("goal_half_extents", XARM7_REACH_GOAL_HALF_EXTENTS)
+        kwargs.setdefault("goal_regions", XARM7_BALANCED_GOAL_REGIONS)
         super().__init__(*args, **kwargs)
 
 
@@ -234,9 +236,8 @@ class PG3DReachXArm7GripperWorkspaceEnv(PG3DReachXArm7GripperEnv):
     """Broad workspace goal distribution for xArm7 + gripper (TCP = link_tcp)."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        spec = REACH_TASK_SPECS["PG3DReach-Workspace-v0"]
-        kwargs.setdefault("goal_center", spec.goal_center)
-        kwargs.setdefault("goal_half_extents", spec.goal_half_extents)
+        kwargs.setdefault("goal_center", XARM7_REACH_GOAL_CENTER)
+        kwargs.setdefault("goal_half_extents", XARM7_REACH_GOAL_HALF_EXTENTS)
         super().__init__(*args, **kwargs)
 
 
@@ -245,10 +246,9 @@ class PG3DReachXArm7GripperBalancedWorkspaceEnv(PG3DReachXArm7GripperEnv):
     """Balanced goal distribution for xArm7 + gripper (TCP = link_tcp)."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        spec = REACH_TASK_SPECS["PG3DReach-BalancedWorkspace-v0"]
-        kwargs.setdefault("goal_center", spec.goal_center)
-        kwargs.setdefault("goal_half_extents", spec.goal_half_extents)
-        kwargs.setdefault("goal_regions", spec.goal_regions)
+        kwargs.setdefault("goal_center", XARM7_REACH_GOAL_CENTER)
+        kwargs.setdefault("goal_half_extents", XARM7_REACH_GOAL_HALF_EXTENTS)
+        kwargs.setdefault("goal_regions", XARM7_BALANCED_GOAL_REGIONS)
         super().__init__(*args, **kwargs)
 
 
@@ -257,9 +257,8 @@ class PG3DReachXArm7RobotiqWorkspaceEnv(PG3DReachXArm7RobotiqEnv):
     """Broad workspace goal distribution for xArm7 + Robotiq 2F-85 (TCP = eef)."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        spec = REACH_TASK_SPECS["PG3DReach-Workspace-v0"]
-        kwargs.setdefault("goal_center", spec.goal_center)
-        kwargs.setdefault("goal_half_extents", spec.goal_half_extents)
+        kwargs.setdefault("goal_center", XARM7_REACH_GOAL_CENTER)
+        kwargs.setdefault("goal_half_extents", XARM7_REACH_GOAL_HALF_EXTENTS)
         super().__init__(*args, **kwargs)
 
 
@@ -268,9 +267,7 @@ class PG3DReachXArm7RobotiqBalancedWorkspaceEnv(PG3DReachXArm7RobotiqEnv):
     """Balanced goal distribution for xArm7 + Robotiq 2F-85 (TCP = eef)."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        spec = REACH_TASK_SPECS["PG3DReach-BalancedWorkspace-v0"]
-        kwargs.setdefault("goal_center", spec.goal_center)
-        kwargs.setdefault("goal_half_extents", spec.goal_half_extents)
-        kwargs.setdefault("goal_regions", spec.goal_regions)
+        kwargs.setdefault("goal_center", XARM7_REACH_GOAL_CENTER)
+        kwargs.setdefault("goal_half_extents", XARM7_REACH_GOAL_HALF_EXTENTS)
+        kwargs.setdefault("goal_regions", XARM7_BALANCED_GOAL_REGIONS)
         super().__init__(*args, **kwargs)
-

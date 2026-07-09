@@ -55,13 +55,14 @@ def main(argv: list[str] | None = None) -> int:
         env_id = "PG3DReach-XArm7-Workspace-v0"
         robot_uid = "xarm7_nogripper"
 
-    # Build a nice 3rd-person visualization camera.
-    # Robot base = [-0.615, 0, 0]; workspace center ≈ [-0.315, 0, 0.22].
-    # Camera placed at world [0.5, -0.9, 0.9] looking toward workspace.
+    # Build a nice 3rd-person visualization camera in the M2 robot-base frame.
     # ManiSkill's human_render_camera_configs expects a nested dict where
     # "pose" is a flat [x, y, z, qw, qx, qy, qz] list (7 elements).
     from mani_skill.utils import sapien_utils
-    vis_pose = sapien_utils.look_at(eye=[0.7, 0.0, 0.45], target=[-0.315, 0.0, 0.22])
+    from pg3d.envs.xarm_adapter.reach_config import XARM7_REACH_GOAL_CENTER
+    target = np.asarray(XARM7_REACH_GOAL_CENTER, dtype=np.float32)
+    eye = (target + np.asarray([1.0, 0.0, 0.25], dtype=np.float32)).tolist()
+    vis_pose = sapien_utils.look_at(eye=eye, target=target.tolist())
     p = np.asarray(vis_pose.p).reshape(-1)
     q = np.asarray(vis_pose.q).reshape(-1)  # [w, x, y, z]
     vis_cam_dict = {

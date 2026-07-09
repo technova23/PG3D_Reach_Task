@@ -37,8 +37,15 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial.transform import Rotation as _Rotation
 
-# World position where the env bolts the xArm7 base (see xarm_adapter/reach_env.py).
-ROBOT_BASE_POSITION = np.array([-0.615, 0.0, 0.0], dtype=np.float32)
+from pg3d.envs.maniskill_adapter.reach_config import ReachGoalRegion
+
+# M1 placed the xArm7 base in the simulator world at [-0.615, 0, 0]. M2 uses the
+# physical robot base frame as the simulator world frame, matching real xArm data.
+XARM7_M1_SIM_BASE_POSITION = np.array([-0.615, 0.0, 0.0], dtype=np.float32)
+ROBOT_BASE_POSITION = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+M1_TO_M2_XYZ_SHIFT = (ROBOT_BASE_POSITION - XARM7_M1_SIM_BASE_POSITION).astype(
+    np.float32
+)
 
 # Base-relative sampling box [ [dx_lo,dx_hi], [dy_lo,dy_hi], [dz_lo,dz_hi] ].
 # Symmetric in dy (left/right of the robot). Verified by verify_xarm7_reachability.py
@@ -82,9 +89,44 @@ def world_bounds(base_box: np.ndarray, base_position: np.ndarray = ROBOT_BASE_PO
     return (box + np.asarray(base_position, dtype=np.float32).reshape(3, 1)).astype(np.float32)
 
 
+def bounds_center_half_extents(
+    bounds: np.ndarray,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Return center/half-extents tuples for a [3,2] bounds box."""
+    box = np.asarray(bounds, dtype=np.float32).reshape(3, 2)
+    center = ((box[:, 0] + box[:, 1]) * 0.5).astype(np.float32)
+    half_extents = ((box[:, 1] - box[:, 0]) * 0.5).astype(np.float32)
+    return (
+        tuple(float(value) for value in center),
+        tuple(float(value) for value in half_extents),
+    )
+
+
 # Convenience world-frame bounds for the default base placement.
 XARM7_REACH_WORKSPACE_BOUNDS = world_bounds(XARM7_REACH_BOX_BASE)
 XARM7_WORKSPACE_BOUNDS = world_bounds(XARM7_CROP_BOX_BASE)
+XARM7_REACH_GOAL_CENTER, XARM7_REACH_GOAL_HALF_EXTENTS = bounds_center_half_extents(
+    XARM7_REACH_WORKSPACE_BOUNDS
+)
+
+_XARM7_BALANCED_CORE_SCALE = np.asarray([0.6, 0.6, 0.6], dtype=np.float32)
+_XARM7_BALANCED_CORE_HALF_EXTENTS = (
+    np.asarray(XARM7_REACH_GOAL_HALF_EXTENTS, dtype=np.float32) * _XARM7_BALANCED_CORE_SCALE
+)
+XARM7_BALANCED_GOAL_REGIONS: tuple[ReachGoalRegion, ...] = (
+    ReachGoalRegion(
+        name="core_practical",
+        weight=0.70,
+        center=XARM7_REACH_GOAL_CENTER,
+        half_extents=tuple(float(value) for value in _XARM7_BALANCED_CORE_HALF_EXTENTS),
+    ),
+    ReachGoalRegion(
+        name="outer_practical",
+        weight=0.30,
+        center=XARM7_REACH_GOAL_CENTER,
+        half_extents=XARM7_REACH_GOAL_HALF_EXTENTS,
+    ),
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Camera extrinsics — eye-to-hand calibration (AX = XB), 6 samples.
