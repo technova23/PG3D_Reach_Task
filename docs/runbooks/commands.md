@@ -88,6 +88,37 @@ make maniskill-check
 
 The default smoke uses `PickCube-v1` with `obs_mode="state"` and no rendering.
 
+## xArm M2 base-frame setup
+
+On the `m2-base-frame-sim` branch, xArm ManiSkill envs are M2/base-frame by default: the robot base
+is at world `[0, 0, 0]`, and xArm reach/crop/default goal bounds are expressed directly in the
+robot base frame. Existing M1 xArm sim artifacts used base `[-0.615, 0, 0]`; do not mix those
+artifacts with M2 runs unless they are regenerated or converted.
+
+Convert an old M1 xArm sim Zarr and matching precomputed constraint JSON directory:
+
+```bash
+python scripts/convert_xarm_m1_to_m2.py \
+  --input-zarr artifacts/xarm_m1.zarr \
+  --output-zarr artifacts/xarm_m2.zarr \
+  --constraints-dir artifacts/xarm_m1_constraints \
+  --output-constraints-dir artifacts/xarm_m2_constraints
+```
+
+Run the simulator-free M2 frame/converter checks:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
+  tests/test_xarm_m2_frame.py \
+  tests/test_xarm_m1_to_m2_converter.py
+```
+
+When the uv environment is healthy, the equivalent project-env command is:
+
+```bash
+uv run pytest tests/test_xarm_m2_frame.py tests/test_xarm_m1_to_m2_converter.py
+```
+
 ## ManiSkill observation artifact
 
 ```bash

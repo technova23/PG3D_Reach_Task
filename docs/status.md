@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-07-06
+Last updated: 2026-07-09
 
 ## Current objective
 
@@ -95,6 +95,11 @@ DP3 reach dataset loading now matches the generated Zarr schema with 1024-point 
 7D arm actions, and `target_position`/`goal_pos` goal aliases; normalizer fitting uses a bounded
 deterministic timestep subset by default so large Zarr datasets can begin training without reading
 the full point-cloud tensor into memory.
+The `m2-base-frame-sim` branch switches xArm sim setup to M2 coordinates: the xArm robot base is at
+the simulator world origin, xArm reach/crop/default goal bounds are base-frame bounds, and live
+eval obstacles generated from rollouts are therefore placed in the same robot-base frame as real
+xArm data. Existing M1 xArm sim Zarrs or precomputed constraint JSONs must be regenerated or
+converted with `scripts/convert_xarm_m1_to_m2.py` before use on this branch.
 
 ## Immediate next steps
 
@@ -189,6 +194,8 @@ the full point-cloud tensor into memory.
   first constrained-reach results should document that limitation.
 - Franka gripper / custom URDF / Robotiq work is deferred to a later non-critical manipulation
   milestone; it should not block the current base reach reliability pass.
+- On the `m2-base-frame-sim` branch, xArm sim artifacts are M2/base-frame by default. Real xArm data
+  is already base-frame and should not be passed through the M1-to-M2 converter.
 
 ## Latest work log
 
@@ -228,6 +235,7 @@ See `docs/worklog/`.
   diagnostics, future DP3 policy-input plumbing, and lazy imports. P10 constrained reach eval adds
   pure tests for overlay generation, Wilson intervals, metric aggregation, clearance, horizon
   validation, multi-chunk rollout concatenation, timing aggregation, periodic artifact selection,
+  fixed xArm M2 frame tests, and the one-way M1-to-M2 artifact converter tests.
   batched DP3 sampling, fast-mode render counts, and lazy eval imports.
   Avoid-region artifact visualization adds pure wireframe tests plus a constrained-eval MP4 overlay
   path that falls back to plain video if the separate render-only ManiSkill env cannot create
