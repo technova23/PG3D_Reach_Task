@@ -72,6 +72,11 @@ from pg3d.policies.dp3.goal_markers import (
     DEFAULT_GOAL_MARKER_RADIUS,
     insert_goal_marker_points,
 )
+from pg3d.policies.dp3.obstacle_markers import (
+    DEFAULT_OBSTACLE_POINTS_PER_REGION,
+    avoid_region_sphere_points,
+    insert_real_obstacle_points,
+)
 from pg3d.utils.arrays import bool_any as _bool_any
 from pg3d.utils.arrays import bool_info as _bool_info
 from pg3d.utils.arrays import frame_to_numpy as _frame_to_numpy
@@ -105,6 +110,7 @@ from scripts.rollout_dp3_reach_policy import (
 
 EvalMethod = Literal["base", "rejection", "reranking"]
 GeometryMode = Literal["fast", "exact"]
+ObstacleRealism = Literal["virtual", "real"]
 Entry = dict[str, np.ndarray | bool | float]
 # Z range used to extrude the height-agnostic avoid_projection footprint for the
 # overlay video. Display-only; the constraint itself penalizes XY at any height.
@@ -424,6 +430,8 @@ def main(argv: list[str] | None = None) -> int:
                         robot_clearance_metric=args.robot_clearance_metric,
                         robot_clearance_stride=args.robot_clearance_stride,
                         zarr_context=zarr_context,
+                        obstacle_realism=args.obstacle_realism,
+                        obstacle_points_per_region=args.obstacle_points_per_region,
                     )
                     rows.append(row)
                     with timer.time("json_write", artifact="metrics"):
@@ -491,6 +499,8 @@ def main(argv: list[str] | None = None) -> int:
         "constraint_overlay_video": bool(args.constraint_overlay_video),
         "constraint_overlay_alpha": float(args.constraint_overlay_alpha),
         "constraint_overlay_color": list(args.constraint_overlay_color),
+        "obstacle_realism": args.obstacle_realism,
+        "obstacle_points_per_region": int(args.obstacle_points_per_region),
         "metrics_jsonl": str(metrics_path),
         "decisions_jsonl": str(decisions_path),
         "step_traces_jsonl": str(step_traces_path),
@@ -730,6 +740,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--obstacle-realism",
+        choices=["virtual", "real"],
+        default="virtual",
+        help=(
+            "How avoid-region obstacles are exposed to the policy. 'virtual' (default; "
+            "existing behavior, unchanged) keeps avoid regions as a guidance/video-only "
+            "construct -- the physics engine can't host an unattached floating collision "
+            "body, so no sim object ever exists and the policy's point cloud never sees "
+            "one; only rejection/reranking guidance and the --constraint-overlay-video "
+            "sphere know about it. 'real' additionally samples synthetic points on each "
+            "avoid-region sphere's surface every step and mixes them into the scene "
+            "point cloud *before* the normal crop/downsample pass, so they compete for "
+            "the fixed point budget under the same quota logic as every other point (see "
+            "--obstacle-points-per-region) -- the policy sees them as ordinary "
+            "non-robot scene points, not a specially flagged token, and how many survive "
+            "depends on scene density just like a real scanned object. Exception: for a "
+            "checkpoint baked with robot_point_fraction=1.0 (robot-only point clouds, no "
+            "scene points ever seen in training -- e.g. the xArm7-gripper reach dataset), "
+            "the normal crop would drop every obstacle point unconditionally before it "
+            "could ever compete, so that regime instead reserves exactly "
+            "--obstacle-points-per-region slots to force the obstacle to survive; this is "
+            "knowingly out-of-distribution input for such a checkpoint, since it has never "
+            "seen a non-robot point during training. This also propagates into the "
+            "rejection/reranking world-model imagination used for replanning, since that "
+            "imagination extends forward from this same observed scene. The rendered video "
+            "is unchanged in both modes (same overlay sphere). Only supported for "
+            "--constraint-type region with --avoid-shape sphere."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-points-per-region",
+        type=int,
+        default=DEFAULT_OBSTACLE_POINTS_PER_REGION,
+        help=(
+            "Number of synthetic points sampled on each avoid-region sphere's surface "
+            "and offered as candidates to the crop/downsample pass when --obstacle-"
+            "realism real. This is the candidate count, not a guarantee -- like any "
+            "other scene points, some may be dropped by the point-budget quota if the "
+            "scene is dense."
+        ),
+    )
+    parser.add_argument(
         "--constraint-target",
         choices=["eef", "robot"],
         default="eef",
@@ -892,6 +944,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             raise ValueError("--cartesian-pose-rotation-tolerance must be non-negative")
         if not math.isfinite(float(args.cartesian_pose_weight)):
             raise ValueError("--cartesian-pose-weight must be finite")
+    if args.obstacle_realism == "real":
+        if args.constraint_type != "region":
+            raise ValueError(
+                "--obstacle-realism real requires --constraint-type region "
+                "(avoid-region constraints only, for now)"
+            )
+        if args.avoid_shape != "sphere":
+            raise ValueError(
+                "--obstacle-realism real currently only supports --avoid-shape sphere"
+            )
+        if args.obstacle_points_per_region <= 0:
+            raise ValueError("--obstacle-points-per-region must be positive")
     if args.avoid_box_half_extents is not None and any(
         h <= 0.0 for h in args.avoid_box_half_extents
     ):
@@ -952,6 +1016,48 @@ def resolve_checkpoint_path(checkpoint: Path | None, checkpoint_dir: Path | None
     return latest_reach_checkpoint(checkpoint_dir)
 
 
+def _apply_real_obstacle_points(
+    entry: Entry,
+    *,
+    constraints: list[Any],
+    obstacle_realism: ObstacleRealism,
+    obstacle_points_per_region: int,
+    crop_config: PointCloudCropConfig,
+) -> Entry:
+    """Inject real-obstacle point-cloud points for --obstacle-realism real.
+
+    No-op (returns ``entry`` unchanged) under the default 'virtual' mode, and
+    when there are no spherical AvoidRegion constraints active yet (e.g. the
+    obstacle_spawning second obstacle hasn't triggered). See --obstacle-realism
+    help for why this exists: the avoid-region sphere has no physics body, so
+    the policy's real point cloud never contains it unless we synthesize it
+    here. The synthesized points are mixed into the scene and re-cropped with
+    the same ``crop_point_cloud`` quota/downsample logic every real camera
+    point goes through -- see ``insert_real_obstacle_points`` -- so the
+    obstacle is exposed to the policy the same way any other object would be,
+    not force-written into reserved slots.
+    """
+    if obstacle_realism != "real":
+        return entry
+    obstacle_points = avoid_region_sphere_points(
+        constraints, num_points_per_region=obstacle_points_per_region
+    )
+    if obstacle_points.shape[0] == 0:
+        return entry
+    point_cloud, robot_mask, point_valid_mask = insert_real_obstacle_points(
+        entry["point_cloud"],
+        entry["robot_mask"],
+        entry["point_valid_mask"],
+        obstacle_points,
+        crop_config=crop_config,
+    )
+    updated = dict(entry)
+    updated["point_cloud"] = point_cloud
+    updated["robot_mask"] = robot_mask
+    updated["point_valid_mask"] = point_valid_mask
+    return updated
+
+
 def run_eval_episode(
     *,
     sim_env: Any,
@@ -987,6 +1093,8 @@ def run_eval_episode(
     robot_clearance_metric: bool = False,
     robot_clearance_stride: int = 4,
     zarr_context: dict[str, Any] | None = None,
+    obstacle_realism: ObstacleRealism = "virtual",
+    obstacle_points_per_region: int = DEFAULT_OBSTACLE_POINTS_PER_REGION,
 ) -> dict[str, Any]:
     # Defensive copy: obstacle_spawning appends to `constraints` as the episode
     # progresses, and the caller reuses the same initial list/pending_spawn across
@@ -1011,6 +1119,13 @@ def run_eval_episode(
         )
     if zarr_context is not None:
         sim_entry = _apply_zarr_initial_entry(sim_entry, zarr_context)
+    sim_entry = _apply_real_obstacle_points(
+        sim_entry,
+        constraints=constraints,
+        obstacle_realism=obstacle_realism,
+        obstacle_points_per_region=obstacle_points_per_region,
+        crop_config=crop_config,
+    )
     obs_window = make_initial_obs_window(sim_entry, n_obs_steps=int(policy.n_obs_steps))
     target = np.asarray(sim_entry["target_position"], dtype=np.float32).reshape(3)
     scene = scene_context_for_constraints(
@@ -1141,6 +1256,13 @@ def run_eval_episode(
                         env=sim_env,
                         crop_config=crop_config,
                     )
+                sim_entry = _apply_real_obstacle_points(
+                    sim_entry,
+                    constraints=constraints,
+                    obstacle_realism=obstacle_realism,
+                    obstacle_points_per_region=obstacle_points_per_region,
+                    crop_config=crop_config,
+                )
                 obs_window = append_obs_window(
                     obs_window,
                     sim_entry,
@@ -3537,6 +3659,8 @@ def _init_wandb(
                 "constraint_overlay_video": bool(args.constraint_overlay_video),
                 "constraint_overlay_alpha": float(args.constraint_overlay_alpha),
                 "constraint_overlay_color": list(args.constraint_overlay_color),
+                "obstacle_realism": args.obstacle_realism,
+                "obstacle_points_per_region": int(args.obstacle_points_per_region),
                 "command": "scripts/eval_constrained_reach.py",
             },
         )
