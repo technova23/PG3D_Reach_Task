@@ -100,6 +100,9 @@ the simulator world origin, xArm reach/crop/default goal bounds are base-frame b
 eval obstacles generated from rollouts are therefore placed in the same robot-base frame as real
 xArm data. Existing M1 xArm sim Zarrs or precomputed constraint JSONs must be regenerated or
 converted with `scripts/convert_xarm_m1_to_m2.py` before use on this branch.
+The current mixed-Zarr audit also has a dedicated interactive exporter,
+`scripts/export_real_sim_episode_overlay_rerun.py`, which overlays full real and sim episodes in
+distinct colors on a normalized-progress Rerun timeline without transforming or recropping points.
 
 ## Immediate next steps
 
