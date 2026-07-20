@@ -616,6 +616,42 @@ uv run python scripts/eval_constrained_reach.py \
   --allow-failure
 ```
 
+### ITPS stochastic-sampling baseline
+
+First validate that differentiable FK matches the live ManiSkill Panda TCP. This check is required
+before running ITPS and fails if any of the rest pose plus ten sampled configurations exceeds 1 mm:
+
+```bash
+uv run python scripts/check_panda_fk.py --samples 10 --tolerance 0.001
+```
+
+Run the faithful ITPS baseline through the same constrained evaluator and episode protocol as the
+other methods:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset artifacts/reach-datasets/pg3d-reach-workspace-1000.zarr \
+  --checkpoint-dir artifacts/reach-datasets/dp3-reach-workspace-1000-checkpoints \
+  --methods base itps \
+  --source fresh \
+  --episodes 3 \
+  --seed-start 10000 \
+  --device cuda \
+  --constraint-target eef \
+  --itps-guide-ratio 60 \
+  --itps-mcmc-steps 4 \
+  --itps-energy smooth \
+  --itps-barrier-temperature 0.01 \
+  --output-dir artifacts/constrained-reach-itps-smoke \
+  --allow-failure
+```
+
+`smooth` applies a softplus signed-distance barrier before penetration. Use `--itps-energy hinge`
+for the exact max-violation constraint energy. ITPS uses the checkpoint's inference-step count;
+the paper's ten-step Maze2D experiment is not forced on pg3d. Guidance is EEF-only and rejects
+`--constraint-target robot`. Unlike rejection/reranking, ITPS generates one trajectory by modifying
+the reverse diffusion process rather than sampling and scoring K completed candidates.
+
 Longer multi-chunk planning smoke:
 
 ```bash

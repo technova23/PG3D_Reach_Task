@@ -73,7 +73,14 @@ def test_goal_marker_insertion_uses_ordered_tail_points(tmp_path) -> None:
     point_cloud = sample["obs"]["point_cloud"].numpy()
 
     assert set(sample["obs"]) == {"point_cloud", "agent_pos"}
-    np.testing.assert_allclose(point_cloud[..., -2:, :], 0.0)
+    expected_markers = goal_marker_offsets(
+        num_points=2,
+        radius=DEFAULT_GOAL_MARKER_RADIUS,
+    )
+    np.testing.assert_allclose(
+        point_cloud[..., -2:, :],
+        np.broadcast_to(expected_markers, point_cloud[..., -2:, :].shape),
+    )
     np.testing.assert_allclose(
         point_cloud[..., :-2, :],
         raw_sample["obs"]["point_cloud"][..., :-2, :],

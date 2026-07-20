@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-07-03
+Last updated: 2026-07-20
 
 ## Current objective
 
@@ -18,21 +18,25 @@ Bootstrap a sim-only research codebase for programmatic geometric guidance of 3D
 Work for the inference-time policy steering baseline is now isolated on the
 `itps-stochastic-sampling-baseline` branch. The current branch adds:
 
-- a new `SimpleDP3.stochastic_sample(...)` denoising hook with optional
-  gradient-based steering during reverse diffusion,
-- a dedicated `scripts/eval_itps_stochastic_reach.py` entrypoint for the
-  stochastic-sampling baseline,
-- a differentiable Panda FK clearance loss that scores the full predicted EEF
-  path against an obstacle sphere, keeping the baseline separate from the main
-  rejection/reranking path,
+- a faithful `SimpleDP3.stochastic_sample(...)` implementation of the released ITPS
+  annealed-MCMC loop: four inner steps by default, guide ratio 60, clean-sample
+  re-noising at the same diffusion level, and advancement only on the final inner step,
+- an isolated DDPM scheduler and seeded forward/reverse noise, so ITPS cannot change the
+  scheduler used by base DP3 or later evaluation methods,
+- differentiable Panda FK matched to ManiSkill's `panda_v2.urdf`, including the TCP and
+  live robot-base transforms; the live 11-configuration check passed with 0.61 micrometers
+  maximum position error,
+- EEF guidance over every configured sphere, box, or projected rectangle, with selectable
+  smooth-barrier or exact-hinge energy and support for constraint margins and weights,
+- ITPS as a method in `scripts/eval_constrained_reach.py`; the incomplete standalone sampler
+  diagnostic was removed so there is one closed-loop evaluation entrypoint,
 - per-replan JSONL logging of the raw diffusion action chunk and the executed
   simulator action in constrained-eval runs, so first-chunk versus later-chunk
   behavior can be inspected directly.
 
-The current pass is the first geometrically meaningful steering baseline:
-it keeps the reverse-diffusion ITPS shape, but now the guidance signal comes
-from a differentiable Panda FK objective over the full action horizon rather
-than the earlier joint-space proxy.
+ITPS guides the full normalized diffusion horizon, differentiably unnormalizes actions to
+physical joint radians for FK, and returns the same execution slice as normal DP3. It remains an
+EEF-only baseline; differentiable whole-robot collision guidance and sketch input are out of scope.
 
 ## Current phase
 

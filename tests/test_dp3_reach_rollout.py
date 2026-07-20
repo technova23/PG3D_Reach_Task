@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import torch
 
+from pg3d.policies.dp3.goal_markers import goal_marker_offsets
 from scripts.rollout_dp3_reach_policy import (
     _distance_drift,
     append_obs_window,
@@ -211,8 +212,9 @@ def test_obs_window_to_torch_inserts_goal_marker_tail_points() -> None:
     )
 
     points = batch["point_cloud"].cpu().numpy()
-    np.testing.assert_allclose(points[0, 0, -2:, :], np.zeros((2, 3), dtype=np.float32))
-    np.testing.assert_allclose(points[0, 1, -2:, :], np.ones((2, 3), dtype=np.float32))
+    offsets = goal_marker_offsets(num_points=2, radius=0.015)
+    np.testing.assert_allclose(points[0, 0, -2:, :], offsets)
+    np.testing.assert_allclose(points[0, 1, -2:, :], 1.0 + offsets)
 
 
 def test_rollout_script_import_keeps_simulator_lazy() -> None:

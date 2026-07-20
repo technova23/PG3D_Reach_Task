@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import subprocess
 import sys
 
@@ -31,7 +30,12 @@ assert "pg3d.policies.dp3" not in sys.modules
 
 
 def test_dp3_import_does_not_load_sim_dependencies() -> None:
-    importlib.import_module("pg3d.policies.dp3")
+    code = f"""
+import importlib
+import sys
 
-    for module in FORBIDDEN_MODULES:
-        assert module not in sys.modules
+importlib.import_module("pg3d.policies.dp3")
+for module in {FORBIDDEN_MODULES!r}:
+    assert module not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)

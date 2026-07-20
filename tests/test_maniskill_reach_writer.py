@@ -25,6 +25,8 @@ def test_collect_episode_appends_hold_chunk_after_success(monkeypatch) -> None:
         ),
         max_steps=10,
         hold_steps=3,
+        settle_steps=0,
+        acceptance_success_distance=0.03,
         gripper_open=0.04,
         sapien=SimpleNamespace(Pose=_FakePose),
         planner_cls=_FakePlanner,
@@ -86,12 +88,17 @@ def test_screw_planner_output_is_suppressed_by_default(capsys) -> None:
 
 
 def test_start_workspace_bounds_default_to_selected_task() -> None:
-    bounds = writer._start_workspace_bounds("PG3DReach-BalancedWorkspace-v0", None)
-
-    np.testing.assert_allclose(
-        bounds,
-        np.asarray([[-0.26, 0.34], [-0.30, 0.30], [0.20, 0.68]], dtype=np.float32),
+    expected = np.asarray(
+        [[-0.26, 0.34], [-0.30, 0.30], [0.20, 0.68]],
+        dtype=np.float32,
     )
+    bounds = writer._start_workspace_bounds(
+        "PG3DReach-BalancedWorkspace-v0",
+        None,
+        reach_workspace_bounds=expected,
+    )
+
+    np.testing.assert_allclose(bounds, expected)
 
 
 def test_dataset_stats_reports_hold_coverage() -> None:
