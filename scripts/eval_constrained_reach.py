@@ -1357,16 +1357,16 @@ def _select_itps_chunk(
         q = traj[..., :7]
         eef_path = panda_end_effector_position(q)
         violations = _itps_clearance_violation(eef_path, obstacle)
-        return torch.amax(violations)
+        return torch.amax(violations, dim=1)
 
-    sample = policy.stochastic_sample_from_obs(
+    output = policy.predict_action_itps(
         obs_batch,
         generator=torch.Generator(device=device).manual_seed(int(rng.integers(0, 2**31 - 1))),
         guidance_fn=guidance_fn,
-        guidance_scale=0.25,
-        guidance_steps=3,
+        guide_ratio=0.25,
+        mcmc_steps=3,
     )
-    action = policy.normalizer["action"].unnormalize(sample[..., : policy.action_dim])[0]
+    action = output["action"][0]
     return ActionChunk(
         actions=action.detach().cpu().numpy().astype(np.float32, copy=True),
         action_mode=_action_mode("abs_joint"),

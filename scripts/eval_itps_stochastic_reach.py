@@ -77,15 +77,15 @@ def main(argv: list[str] | None = None) -> int:
             eef_path = panda_end_effector_position(q)
             distances = torch.linalg.norm(eef_path - obstacle_center.view(1, 1, 3), dim=-1)
             violations = torch.clamp(obstacle_radius - distances, min=0.0)
-            return torch.amax(violations)
+            return torch.amax(violations, dim=1)
 
         sample = policy.stochastic_sample(
             cond,
             mask,
             generator=torch.Generator(device=device).manual_seed(args.seed),
             guidance_fn=guidance_fn,
-            guidance_scale=float(args.guidance_scale),
-            guidance_steps=int(args.guidance_steps),
+            guide_ratio=float(args.guidance_scale),
+            mcmc_steps=int(args.guidance_steps),
         )
 
     action = policy.normalizer["action"].unnormalize(sample[..., : policy.action_dim])

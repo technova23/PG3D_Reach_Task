@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping, Sequence
-from typing import Callable, TypedDict
+from collections.abc import Callable, Mapping, Sequence
+from typing import TypedDict
 
 import torch
 import torch.nn.functional as F
@@ -33,7 +33,11 @@ class DP3Batch(TypedDict):
 class BasePolicy(ModuleAttrMixin):
     """Common policy interface used by pg3d policy adapters."""
 
-    def predict_action(self, obs_dict: ObsDict, generator: torch.Generator | None = None) -> PolicyOutput:
+    def predict_action(
+        self,
+        obs_dict: ObsDict,
+        generator: torch.Generator | None = None,
+    ) -> PolicyOutput:
         """Return a receding-horizon action chunk for normalized observations."""
         raise NotImplementedError
 
@@ -236,91 +240,141 @@ class SimpleDP3(BasePolicy):
         condition_mask: torch.Tensor,
         global_cond: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
-        guidance_fn: Callable[
-            [torch.Tensor], torch.Tensor | float | tuple[torch.Tensor | float, torch.Tensor]
-        ]
-        | None = None,
-        guidance_scale: float = 0.0,
-        guidance_steps: int = 1,
+        guidance_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        guide_ratio: float = 60.0,
+        mcmc_steps: int = 4,
     ) -> torch.Tensor:
-        """Run denoising with optional gradient-based steering.
+        """Sample with the annealed-MCMC transition released with ITPS.
 
-        This mirrors the ITPS idea of biasing the reverse diffusion process during
-        inference rather than post-hoc reranking. The guidance function receives the
-        current trajectory tensor and should return a scalar loss that encourages the
-        desired behavior, such as obstacle clearance.
+        ``guidance_fn`` receives the current normalized noisy trajectory and returns
+        one energy per batch item. At each diffusion level the denoiser output is
+        composed with the energy gradient. Intermediate inner steps re-noise the
+        predicted clean trajectory back to the same level; only the final inner step
+        advances to the next diffusion timestep.
         """
-        if guidance_steps <= 0:
-            raise ValueError("guidance_steps must be positive")
-        if guidance_scale < 0.0:
-            raise ValueError("guidance_scale must be non-negative")
+        if mcmc_steps <= 0:
+            raise ValueError("mcmc_steps must be positive")
+        if guide_ratio < 0.0:
+            raise ValueError("guide_ratio must be non-negative")
+        if str(self.noise_scheduler.config.prediction_type) != "epsilon":
+            raise ValueError("ITPS stochastic sampling requires prediction_type='epsilon'")
+
+        scheduler = self._make_itps_scheduler()
         trajectory = torch.randn(
             size=condition_data.shape,
             dtype=condition_data.dtype,
             device=condition_data.device,
             generator=generator,
         )
-        self.noise_scheduler.set_timesteps(self.num_inference_steps)
-        for timestep in self.noise_scheduler.timesteps:
-            for _ in range(guidance_steps):
-                trajectory[condition_mask] = condition_data[condition_mask]
-                if guidance_fn is not None and guidance_scale != 0.0:
-                    with torch.enable_grad():
-                        guided = trajectory.detach().requires_grad_(True)
-                        result = guidance_fn(guided)
-                        if isinstance(result, tuple):
-                            _loss, grad = result
-                            if not torch.is_tensor(grad):
-                                grad = torch.as_tensor(grad, device=guided.device, dtype=guided.dtype)
-                        else:
-                            loss = result
-                            if not torch.is_tensor(loss):
-                                loss = torch.as_tensor(loss, device=guided.device, dtype=guided.dtype)
-                            grad = torch.autograd.grad(
-                                loss, guided, retain_graph=False, create_graph=False
-                            )[0]
-                        trajectory = (guided - float(guidance_scale) * grad).detach()
+        scheduler.set_timesteps(self.num_inference_steps)
+        inner_steps = mcmc_steps if guidance_fn is not None else 1
+        for timestep in scheduler.timesteps:
+            for inner_index in range(inner_steps):
                 trajectory[condition_mask] = condition_data[condition_mask]
                 model_output = self.model(
                     sample=trajectory,
                     timestep=timestep,
                     global_cond=global_cond,
                 )
-                trajectory = self.noise_scheduler.step(model_output, timestep, trajectory).prev_sample
+                if guidance_fn is not None and guide_ratio != 0.0 and int(timestep) > 0:
+                    with torch.enable_grad():
+                        guided = trajectory.detach().requires_grad_(True)
+                        energy = guidance_fn(guided)
+                        if not torch.is_tensor(energy):
+                            raise TypeError("guidance_fn must return a torch.Tensor")
+                        if energy.shape != (guided.shape[0],):
+                            raise ValueError(
+                                "guidance_fn must return one energy per batch item; "
+                                f"expected {(guided.shape[0],)}, got {tuple(energy.shape)}"
+                            )
+                        gradient = torch.autograd.grad(energy.sum(), guided)[0]
+                    model_output = model_output + float(guide_ratio) * gradient
+
+                scheduler_output = scheduler.step(
+                    model_output,
+                    timestep,
+                    trajectory,
+                    generator=generator,
+                )
+                if inner_index < inner_steps - 1:
+                    noise = torch.randn(
+                        scheduler_output.pred_original_sample.shape,
+                        dtype=scheduler_output.pred_original_sample.dtype,
+                        device=scheduler_output.pred_original_sample.device,
+                        generator=generator,
+                    )
+                    batch_timesteps = torch.full(
+                        (trajectory.shape[0],),
+                        int(timestep),
+                        device=trajectory.device,
+                        dtype=torch.long,
+                    )
+                    trajectory = scheduler.add_noise(
+                        scheduler_output.pred_original_sample,
+                        noise,
+                        batch_timesteps,
+                    )
+                else:
+                    trajectory = scheduler_output.prev_sample
         trajectory[condition_mask] = condition_data[condition_mask]
         return trajectory
 
-    def stochastic_sample_from_obs(
+    def predict_action_itps(
         self,
         obs_dict: ObsDict,
         *,
         generator: torch.Generator | None = None,
-        guidance_fn: Callable[
-            [torch.Tensor], torch.Tensor | float | tuple[torch.Tensor | float, torch.Tensor]
-        ]
-        | None = None,
-        guidance_scale: float = 0.0,
-        guidance_steps: int = 1,
-    ) -> torch.Tensor:
-        """Run guided denoising using the same observation conditioning as predict_action."""
+        guidance_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        guide_ratio: float = 60.0,
+        mcmc_steps: int = 4,
+    ) -> PolicyOutput:
+        """Return the normal DP3 action slice from a full ITPS-guided trajectory."""
         cond_data, cond_mask, global_cond = self._build_conditioning(obs_dict)
-        return self.stochastic_sample(
+        nsample = self.stochastic_sample(
             cond_data,
             cond_mask,
             global_cond=global_cond,
             generator=generator,
             guidance_fn=guidance_fn,
-            guidance_scale=guidance_scale,
-            guidance_steps=guidance_steps,
+            guide_ratio=guide_ratio,
+            mcmc_steps=mcmc_steps,
+        )
+        action_pred = self.normalizer["action"].unnormalize(nsample[..., : self.action_dim])
+        start = self.n_obs_steps - 1
+        end = start + self.n_action_steps
+        return {
+            "action": action_pred[:, start:end],
+            "action_pred": action_pred,
+        }
+
+    def _make_itps_scheduler(self) -> DDPMScheduler:
+        """Build an isolated DDPM scheduler for ITPS without changing base inference."""
+        config = self.noise_scheduler.config
+        return DDPMScheduler(
+            num_train_timesteps=int(config.num_train_timesteps),
+            beta_start=float(config.beta_start),
+            beta_end=float(config.beta_end),
+            beta_schedule=str(config.beta_schedule),
+            clip_sample=bool(config.clip_sample),
+            prediction_type=str(config.prediction_type),
         )
 
-    def predict_action(self, obs_dict: ObsDict, generator: torch.Generator | None = None) -> PolicyOutput:
+    def predict_action(
+        self,
+        obs_dict: ObsDict,
+        generator: torch.Generator | None = None,
+    ) -> PolicyOutput:
         """Sample an action sequence and return the chunk used by receding horizon."""
         cond_data, cond_mask, global_cond = self._build_conditioning(obs_dict)
         action_dim = self.action_dim
         obs_steps = self.n_obs_steps
 
-        nsample = self.conditional_sample(cond_data, cond_mask, global_cond=global_cond, generator=generator)
+        nsample = self.conditional_sample(
+            cond_data,
+            cond_mask,
+            global_cond=global_cond,
+            generator=generator,
+        )
         naction_pred = nsample[..., :action_dim]
         action_pred = self.normalizer["action"].unnormalize(naction_pred)
         start = obs_steps - 1
