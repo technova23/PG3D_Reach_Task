@@ -36,15 +36,16 @@ from pg3d.constraints import (
     RectRegion2D,
     SphereRegion,
 )
+from pg3d.constraints.torch_geometry import AvoidanceEnergyMode, avoidance_energy
 from pg3d.envs.maniskill_adapter import (
     ManiSkillGhostPandaGeometryProvider,
     register_pg3d_reach_envs,
 )
-from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import (
     PointCloudCropConfig,
     load_reach_metadata,
 )
+from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.eval import (
     AvoidOverlayConfig,
     EpisodePath,
@@ -77,9 +78,9 @@ from pg3d.utils.arrays import frame_to_numpy as _frame_to_numpy
 from pg3d.utils.devices import select_device
 from pg3d.utils.serialization import jsonable as _jsonable
 from pg3d.world_model import ActionChunk, GeometricWorldModel, ImaginedRollout
-from pg3d.world_model.panda_fk import panda_end_effector_position
 from pg3d.world_model.chunks import interpret_joint_chunk
 from pg3d.world_model.compositor import compose_robot_cloud, static_scene_from_robot_mask
+from pg3d.world_model.panda_fk import panda_end_effector_position
 from scripts.compare_world_model_rollout import (
     entry_to_world_model_observation,
     world_model_entry_from_rollout_step,
@@ -106,6 +107,22 @@ from scripts.rollout_dp3_reach_policy import (
 EvalMethod = Literal["base", "rejection", "reranking", "itps"]
 GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
+
+
+@dataclass(frozen=True)
+class ITPSGuidanceConfig:
+    guide_ratio: float = 60.0
+    mcmc_steps: int = 4
+    energy: AvoidanceEnergyMode = "smooth"
+    barrier_temperature: float = 0.01
+
+    def to_json(self) -> dict[str, float | int | str]:
+        return {
+            "guide_ratio": self.guide_ratio,
+            "mcmc_steps": self.mcmc_steps,
+            "energy": self.energy,
+            "barrier_temperature": self.barrier_temperature,
+        }
 # Z range used to extrude the height-agnostic avoid_projection footprint for the
 # overlay video. Display-only; the constraint itself penalizes XY at any height.
 _PROJECTION_OVERLAY_Z_RANGE = (0.0, 0.5)
@@ -215,6 +232,12 @@ class DP3ChunkPolicyAdapter:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    itps_config = ITPSGuidanceConfig(
+        guide_ratio=float(args.itps_guide_ratio),
+        mcmc_steps=int(args.itps_mcmc_steps),
+        energy=args.itps_energy,
+        barrier_temperature=float(args.itps_barrier_temperature),
+    )
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, args.checkpoint_dir)
     try:
         import gymnasium as gym
@@ -394,6 +417,7 @@ def main(argv: list[str] | None = None) -> int:
                         zarr_context=zarr_context,
                         directional_sign=_steer_sign(args.steer),
                         directional_weight=args.steer_weight,
+                        itps_config=itps_config,
                     )
                     rows.append(row)
                     with timer.time("json_write", artifact="metrics"):
@@ -447,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
         "execution_horizon_chunks": args.execution_horizon_chunks,
         "geometry_mode": args.geometry_mode,
         "k_schedule": list(args.k_schedule),
+        "itps": itps_config.to_json(),
         "constraint_source": _constraint_source_summary(args),
         "artifact_selection": _artifact_selection_summary(
             specs,
@@ -540,6 +565,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["base", "rejection", "reranking", "itps"],
         default=["base", "rejection", "reranking"],
     )
+    parser.add_argument("--itps-guide-ratio", type=float, default=60.0)
+    parser.add_argument("--itps-mcmc-steps", type=int, default=4)
+    parser.add_argument(
+        "--itps-energy",
+        choices=["smooth", "hinge"],
+        default="smooth",
+    )
+    parser.add_argument("--itps-barrier-temperature", type=float, default=0.01)
     parser.add_argument("--max-steps", type=int, default=80)
     parser.add_argument("--post-success-steps", type=int, default=16)
     parser.add_argument("--planning-horizon-chunks", type=int, default=1)
@@ -811,6 +844,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--k-schedule values must be positive")
     if args.policy_batch_size <= 0:
         raise ValueError("--policy-batch-size must be positive")
+    if args.itps_guide_ratio < 0.0:
+        raise ValueError("--itps-guide-ratio must be non-negative")
+    if args.itps_mcmc_steps <= 0:
+        raise ValueError("--itps-mcmc-steps must be positive")
+    if args.itps_barrier_temperature <= 0.0:
+        raise ValueError("--itps-barrier-temperature must be positive")
     if args.avoid_radius <= 0.0 or args.avoid_min_radius <= 0.0:
         raise ValueError("avoid radii must be positive")
     if any(h <= 0.0 for h in args.projection_half_extents):
@@ -853,6 +892,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--robot-clearance-stride must be positive")
     if args.robot_clearance_placement_margin < 0.0:
         raise ValueError("--robot-clearance-placement-margin must be non-negative")
+    if args.constraint_target == "robot" and "itps" in args.methods:
+        raise ValueError("--methods itps supports only --constraint-target eef")
     guidance_methods = {"rejection", "reranking"}
     if (
         args.constraint_target == "robot"
@@ -911,6 +952,7 @@ def run_eval_episode(
     decisions_file: Any,
     rng: np.random.Generator,
     timer: TimingRecorder,
+    itps_config: ITPSGuidanceConfig,
     video_env_factory: Callable[[], Any] | None = None,
     constraint_overlay_alpha: float = 0.25,
     constraint_overlay_color: tuple[float, float, float] = (1.0, 0.25, 0.05),
@@ -947,7 +989,9 @@ def run_eval_episode(
     _append_path(path, sim_entry)
     timeline = [sim_entry.copy()]
     frames = []
-    raw_action_log = output_dir / "debug" / method / f"episode_{spec.output_index:03d}_actions.jsonl"
+    raw_action_log = (
+        output_dir / "debug" / method / f"episode_{spec.output_index:03d}_actions.jsonl"
+    )
     raw_action_log.parent.mkdir(parents=True, exist_ok=True)
     if video:
         video_env = _maybe_create_overlay_video_env(
@@ -1004,6 +1048,7 @@ def run_eval_episode(
                 timer=timer,
                 directional_sign=directional_sign,
                 directional_weight=directional_weight,
+                itps_config=itps_config,
             )
             replans += 1
             if decision.result is not None:
@@ -1037,7 +1082,9 @@ def run_eval_episode(
             )
             raw_chunk = np.asarray(decision.selected_chunk.actions, dtype=np.float32)
             executed_actions: list[np.ndarray] = []
-            action_tcp_poses: list[np.ndarray] = [np.asarray(sim_entry["tcp_pose"], dtype=np.float32).copy()]
+            action_tcp_poses: list[np.ndarray] = [
+                np.asarray(sim_entry["tcp_pose"], dtype=np.float32).copy()
+            ]
             for policy_action in decision.selected_chunk.actions[:steps_to_execute]:
                 sim_action = policy_action_to_sim_action(
                     policy_action,
@@ -1187,6 +1234,7 @@ def _select_decision(
     match_current_robot_points: bool,
     rng: np.random.Generator,
     timer: TimingRecorder,
+    itps_config: ITPSGuidanceConfig,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
 ) -> EvalDecisionSummary:
@@ -1200,13 +1248,16 @@ def _select_decision(
             selection_reason=None,
         )
     if method == "itps":
+        if provider is None:
+            raise RuntimeError("ITPS guidance requires a live Panda geometry provider")
         return EvalDecisionSummary(
             selected_chunk=_select_itps_chunk(
                 policy=adapter.policy,
+                provider=provider,
                 obs_window=obs_window,
-                current_entry=current_entry,
                 constraints=constraints,
                 rng=rng,
+                config=itps_config,
             ),
             result=None,
             candidate_feasible=0,
@@ -1332,13 +1383,13 @@ def _select_multichunk(
 def _select_itps_chunk(
     *,
     policy: SimpleDP3,
+    provider: ManiSkillGhostPandaGeometryProvider,
     obs_window: list[Entry],
-    current_entry: Entry,
-    constraints: list[AvoidRegion],
+    constraints: list[AvoidRegion | AvoidProjection],
     rng: np.random.Generator,
+    config: ITPSGuidanceConfig,
 ) -> ActionChunk:
     device = policy.device
-    policy.set_scheduler("ddpm", num_inference_steps=policy.num_inference_steps)
     obs_batch = _repeat_obs_window_to_torch(
         obs_window,
         k=1,
@@ -1346,91 +1397,46 @@ def _select_itps_chunk(
         goal_marker_points=int(getattr(policy, "goal_marker_points", 0)),
         goal_marker_radius=float(getattr(policy, "goal_marker_radius", DEFAULT_GOAL_MARKER_RADIUS)),
     )
-    obstacle = _itps_obstacle_from_constraints(
-        constraints,
-        current_entry=current_entry,
+    world_from_base = torch.as_tensor(
+        provider.world_from_robot_base(),
         device=device,
         dtype=policy.dtype,
     )
 
     def guidance_fn(traj: torch.Tensor) -> torch.Tensor:
-        q = traj[..., :7]
-        eef_path = panda_end_effector_position(q)
-        violations = _itps_clearance_violation(eef_path, obstacle)
-        return torch.amax(violations, dim=1)
+        eef_path = _itps_eef_path(policy, traj, world_from_base)
+        return avoidance_energy(
+            eef_path,
+            constraints,
+            mode=config.energy,
+            temperature=config.barrier_temperature,
+        )
 
     output = policy.predict_action_itps(
         obs_batch,
         generator=torch.Generator(device=device).manual_seed(int(rng.integers(0, 2**31 - 1))),
         guidance_fn=guidance_fn,
-        guide_ratio=0.25,
-        mcmc_steps=3,
+        guide_ratio=config.guide_ratio,
+        mcmc_steps=config.mcmc_steps,
     )
     action = output["action"][0]
     return ActionChunk(
         actions=action.detach().cpu().numpy().astype(np.float32, copy=True),
         action_mode=_action_mode("abs_joint"),
         dt=1.0,
-        metadata={"method": "itps"},
+        metadata={"method": "itps", **config.to_json()},
     )
 
 
-def _itps_obstacle_from_constraints(
-    constraints: list[AvoidRegion],
-    *,
-    current_entry: Entry,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> dict[str, torch.Tensor | float | str]:
-    target = np.asarray(current_entry["target_position"], dtype=np.float32).reshape(3)
-    if not constraints:
-        return {
-            "kind": "sphere",
-            "center": torch.as_tensor(target, device=device, dtype=dtype),
-            "radius": 0.08,
-        }
-    region = getattr(constraints[0], "region", None)
-    if isinstance(region, RectRegion2D):
-        center = np.asarray(region.center, dtype=np.float32).reshape(2)
-        half_extents = np.asarray(region.half_extents, dtype=np.float32).reshape(2)
-        return {
-            "kind": "rect2d",
-            "center": torch.as_tensor(center, device=device, dtype=dtype),
-            "half_extents": torch.as_tensor(half_extents, device=device, dtype=dtype),
-        }
-    if hasattr(region, "center"):
-        center = np.asarray(region.center, dtype=np.float32).reshape(3)
-        radius = float(getattr(region, "radius", 0.08))
-        return {
-            "kind": "sphere",
-            "center": torch.as_tensor(center, device=device, dtype=dtype),
-            "radius": radius,
-        }
-    return {
-        "kind": "sphere",
-        "center": torch.as_tensor(target, device=device, dtype=dtype),
-        "radius": 0.08,
-    }
-
-
-def _itps_clearance_violation(
-    eef_path: torch.Tensor,
-    obstacle: dict[str, torch.Tensor | float | str],
+def _itps_eef_path(
+    policy: SimpleDP3,
+    normalized_trajectory: torch.Tensor,
+    world_from_base: torch.Tensor,
 ) -> torch.Tensor:
-    kind = obstacle["kind"]
-    if kind == "rect2d":
-        center = obstacle["center"]
-        half_extents = obstacle["half_extents"]
-        xy = eef_path[..., :2]
-        q = torch.abs(xy - center.view(1, 1, 2)) - half_extents.view(1, 1, 2)
-        outside = torch.linalg.norm(torch.clamp(q, min=0.0), dim=-1)
-        inside = torch.minimum(torch.amax(q, dim=-1), torch.zeros((), device=eef_path.device, dtype=eef_path.dtype))
-        signed_distance = outside + inside
-        return torch.clamp(-signed_distance, min=0.0)
-    center = obstacle["center"]
-    radius = float(obstacle["radius"])
-    distances = torch.linalg.norm(eef_path - center.view(1, 1, 3), dim=-1)
-    return torch.clamp(radius - distances, min=0.0)
+    """Unnormalize a denoised action trajectory and run differentiable Panda FK."""
+    normalized_actions = normalized_trajectory[..., : policy.action_dim]
+    actions = policy.normalizer["action"].unnormalize(normalized_actions)
+    return panda_end_effector_position(actions[..., :7], world_from_base)
 
 
 def _build_multichunk_candidates(
@@ -1699,6 +1705,8 @@ def _write_decision(
         "candidate_feasible": decision.candidate_feasible,
         "candidate_total": decision.candidate_total,
     }
+    if method == "itps":
+        row["itps"] = dict(decision.selected_chunk.metadata)
     if result is not None:
         scores = [candidate.total_score for candidate in result.candidates]
         row.update(
@@ -1857,16 +1865,18 @@ def _constraints_for_episode(
     env: Any,
     *,
     spec: RolloutSpec,
-    policy: SimpleDP3,
-    adapter: DP3ChunkPolicyAdapter,
-    action_mode: ActionMode,
+    policy: SimpleDP3 | None = None,
+    adapter: DP3ChunkPolicyAdapter | None = None,
+    action_mode: ActionMode = "abs_joint",
     crop_config: PointCloudCropConfig,
-    goal_thresh: float,
+    goal_thresh: float = 0.025,
     args: argparse.Namespace,
     zarr_context: dict[str, Any] | None = None,
 ) -> list[AvoidRegion]:
     if args.constraints_dir is not None:
         return load_episode_constraints(_precomputed_constraint_path(args.constraints_dir, spec))
+    if policy is None or adapter is None:
+        raise ValueError("generated constraints require a policy and DP3 adapter")
     if args.constraint_placement == "candidate_midpath":
         constraints = _candidate_midpath_constraints(
             env,
@@ -2456,8 +2466,8 @@ def _plot_candidate_paths(
     projection_half_extents: np.ndarray | None = None,
 ) -> None:
     try:
-        import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
+        import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
         from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
     except Exception as exc:
@@ -2495,7 +2505,7 @@ def _plot_candidate_paths(
         ys = [cy - hy, cy - hy, cy + hy, cy + hy, cy - hy]
         for z in (z_lo, z_hi):
             ax3d.plot(xs, ys, [z] * 5, color="crimson", alpha=0.5, linewidth=1.2)
-        for xc, yc in zip(xs[:-1], ys[:-1]):
+        for xc, yc in zip(xs[:-1], ys[:-1], strict=True):
             ax3d.plot([xc, xc], [yc, yc], [z_lo, z_hi], color="crimson", alpha=0.3, linewidth=0.8)
         ax3d.scatter(cx, cy, 0.5 * (z_lo + z_hi), color="crimson", s=60, zorder=10)
         constraint_legend_label = f"projection {2*hx:.3f}×{2*hy:.3f}m"
@@ -2516,7 +2526,14 @@ def _plot_candidate_paths(
     ax3d.set_title(f"Episode {episode_index} — 3-D candidate paths")
     legend_handles = [
         Line2D([0], [0], color="tab:green", lw=1.5, label=f"selected ({len(selected_paths)})"),
-        Line2D([0], [0], color="tab:gray", lw=0.8, alpha=0.5, label=f"failed ({len(paths) - len(successful_paths)})"),
+        Line2D(
+            [0],
+            [0],
+            color="tab:gray",
+            lw=0.8,
+            alpha=0.5,
+            label=f"failed ({len(paths) - len(successful_paths)})",
+        ),
         Line2D([0], [0], color="tab:blue", marker="o", lw=0, markersize=5, label="start"),
         Line2D([0], [0], color="tab:red", marker="o", lw=0, markersize=5, label="end"),
         Line2D([0], [0], color="crimson", lw=1, label=constraint_legend_label),
@@ -2657,7 +2674,9 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
         "projection_half_extents": [float(h) for h in args.projection_half_extents],
         "constraint_placement_candidates": int(args.constraint_placement_candidates),
         "constraint_placement_steps": (
-            None if args.constraint_placement_steps is None else int(args.constraint_placement_steps)
+            None
+            if args.constraint_placement_steps is None
+            else int(args.constraint_placement_steps)
         ),
         "avoid_path_fractions": [float(f) for f in args.avoid_path_fractions],
         "constraint_placement_success_only": bool(args.constraint_placement_success_only),
@@ -2665,7 +2684,6 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
         "avoid_min_radius": float(args.avoid_min_radius),
         "avoid_margin": float(args.avoid_margin),
         "avoid_weight": float(args.avoid_weight),
-        "avoid_path_fractions": [float(f) for f in args.avoid_path_fractions],
         "avoid_shape": str(args.avoid_shape),
         "avoid_box_half_extents": (
             [float(h) for h in args.avoid_box_half_extents]
@@ -3011,6 +3029,12 @@ def _init_wandb(
                 "planning_horizon_chunks": args.planning_horizon_chunks,
                 "execution_horizon_chunks": args.execution_horizon_chunks,
                 "k_schedule": list(args.k_schedule),
+                "itps": {
+                    "guide_ratio": float(args.itps_guide_ratio),
+                    "mcmc_steps": int(args.itps_mcmc_steps),
+                    "energy": str(args.itps_energy),
+                    "barrier_temperature": float(args.itps_barrier_temperature),
+                },
                 "constraint_source": _constraint_source_summary(args),
                 "artifact_selection": args.artifact_selection,
                 "artifact_episode_count": args.artifact_episode_count,

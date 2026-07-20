@@ -25,6 +25,28 @@ def trajectory_smoothness(rollout: ImaginedRollout, *, order: int = 2) -> float:
     return mean_squared_norm(np.diff(rollout.q, n=order, axis=0))
 
 
+def directional_preference(
+    rollout: ImaginedRollout,
+    target_position: np.ndarray | None,
+    *,
+    sign: int,
+) -> float:
+    """Return a signed XY lateral-path cost for optional left/right tie-breaking."""
+    if sign not in {-1, 1}:
+        raise ValueError("sign must be -1 or 1")
+    if target_position is None or rollout.eef_path.shape[0] == 0:
+        return 0.0
+    start = np.asarray(rollout.eef_path[0, :2], dtype=np.float32)
+    direction = np.asarray(target_position[:2], dtype=np.float32) - start
+    norm = float(np.linalg.norm(direction))
+    if norm <= 1e-8:
+        return 0.0
+    unit = direction / norm
+    offsets = np.asarray(rollout.eef_path[:, :2], dtype=np.float32) - start
+    signed_lateral = unit[0] * offsets[:, 1] - unit[1] * offsets[:, 0]
+    return -float(sign) * float(np.mean(signed_lateral))
+
+
 def consensus_deviations(chunks: list[ActionChunk]) -> list[float]:
     """Return per-chunk mean squared deviation from compatible candidate consensus."""
     deviations = [0.0 for _ in chunks]

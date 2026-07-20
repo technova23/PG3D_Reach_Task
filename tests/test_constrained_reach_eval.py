@@ -607,7 +607,7 @@ def test_constrained_eval_batch_input_inserts_goal_marker_tail_points() -> None:
 
     points = batch["point_cloud"].cpu().numpy()
     expected = np.broadcast_to(
-        np.asarray([1.0, 0.0, 0.2], dtype=np.float32),
+        np.asarray([[1.0, 0.0, 0.2], [1.015, 0.0, 0.2]], dtype=np.float32),
         (2, 2, 3),
     )
     np.testing.assert_allclose(points[0, :, -2:, :], expected)

@@ -82,6 +82,25 @@ class ManiSkillGhostPandaGeometryProvider(RobotGeometryProvider):
         """Return robot-segmented point-cloud points for one qpos."""
         return self._snapshot(q).robot_point_cloud
 
+    def world_from_robot_base(self) -> Array:
+        """Return the live robot-base homogeneous transform in world coordinates."""
+        unwrapped = getattr(self.env, "unwrapped", self.env)
+        agent = getattr(unwrapped, "agent", None)
+        robot = getattr(agent, "robot", None)
+        pose = getattr(robot, "pose", None)
+        if pose is None or not hasattr(pose, "to_transformation_matrix"):
+            raise RuntimeError("ghost ManiSkill env does not expose agent.robot.pose")
+        matrix = to_numpy(pose.to_transformation_matrix()).astype(np.float32, copy=True)
+        if matrix.ndim == 3:
+            if self.batch_index >= matrix.shape[0]:
+                raise IndexError(
+                    f"batch_index={self.batch_index} is out of range for base pose {matrix.shape}"
+                )
+            matrix = matrix[self.batch_index]
+        if matrix.shape != (4, 4):
+            raise RuntimeError(f"robot base transform must have shape (4, 4), got {matrix.shape}")
+        return matrix
+
     def reset(self, *, seed: int, options: dict[str, Any] | None = None) -> tuple[Any, Any]:
         """Reset the ghost env to match the comparison seed."""
         self._cache = None

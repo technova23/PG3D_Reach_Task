@@ -77,6 +77,7 @@ class CandidateDiagnostics:
     consensus_deviation: float
     policy_surrogate: float | None
     total_score: float
+    directional: float = 0.0
     selection_reason: str | None = None
 
 
