@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-07-20
+Last updated: 2026-07-22
 
 ## Current objective
 
@@ -37,6 +37,9 @@ Work for the inference-time policy steering baseline is now isolated on the
 ITPS guides the full normalized diffusion horizon, differentiably unnormalizes actions to
 physical joint radians for FK, and returns the same execution slice as normal DP3. It remains an
 EEF-only baseline; differentiable whole-robot collision guidance and sketch input are out of scope.
+The active DP3 architecture now has one canonical module implementation at
+`pg3d/policies/dp3/modules.py`; two unreferenced legacy copies at the top of `pg3d/policies/`
+were removed before writing line-referenced diffusion-policy documentation.
 
 ## Current phase
 
