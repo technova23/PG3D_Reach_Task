@@ -53,10 +53,11 @@ class SphereRegion:
 
 @dataclass(frozen=True)
 class BoxRegion:
-    """Axis-aligned box keep-out region."""
+    """Box keep-out region with an optional world-frame yaw rotation."""
 
     center: Array
     half_extents: Array
+    yaw: float = 0.0
     region_type: RegionType = "box"
 
     def __post_init__(self) -> None:
@@ -65,10 +66,26 @@ class BoxRegion:
         if np.any(half_extents <= 0.0):
             raise ValueError("half_extents must be positive")
         object.__setattr__(self, "half_extents", half_extents)
+        yaw = float(self.yaw)
+        if not np.isfinite(yaw):
+            raise ValueError("yaw must be finite")
+        object.__setattr__(self, "yaw", yaw)
 
     def signed_distance(self, points: Array) -> Array:
         points = _points(points)
-        q = np.abs(points - self.center.reshape(1, 3)) - self.half_extents.reshape(1, 3)
+        local = points - self.center.reshape(1, 3)
+        if self.yaw != 0.0:
+            cos_yaw = np.cos(self.yaw)
+            sin_yaw = np.sin(self.yaw)
+            local_xy = np.stack(
+                [
+                    local[:, 0] * cos_yaw + local[:, 1] * sin_yaw,
+                    -local[:, 0] * sin_yaw + local[:, 1] * cos_yaw,
+                ],
+                axis=1,
+            )
+            local = np.concatenate([local_xy, local[:, 2:3]], axis=1)
+        q = np.abs(local) - self.half_extents.reshape(1, 3)
         outside = np.linalg.norm(np.maximum(q, 0.0), axis=1)
         inside = np.minimum(np.max(q, axis=1), 0.0)
         return outside + inside
@@ -78,6 +95,7 @@ class BoxRegion:
             "type": self.region_type,
             "center": self.center.tolist(),
             "half_extents": self.half_extents.tolist(),
+            "yaw": self.yaw,
         }
 
 
@@ -125,7 +143,11 @@ def region_from_json(config: dict[str, Any]) -> Region:
     if region_type == "sphere":
         return SphereRegion(center=config["center"], radius=float(config["radius"]))
     if region_type == "box":
-        return BoxRegion(center=config["center"], half_extents=config["half_extents"])
+        return BoxRegion(
+            center=config["center"],
+            half_extents=config["half_extents"],
+            yaw=float(config.get("yaw", 0.0)),
+        )
     if region_type == "rect2d":
         return RectRegion2D(center=config["center"], half_extents=config["half_extents"])
     raise ValueError(f"unknown region type {region_type!r}")

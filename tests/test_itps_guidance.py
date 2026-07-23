@@ -50,6 +50,24 @@ def test_smooth_energy_guides_before_penetration_and_backpropagates() -> None:
     assert torch.count_nonzero(path.grad).item() > 0
 
 
+def test_rotated_box_torch_energy_matches_numpy_geometry() -> None:
+    region = BoxRegion(
+        center=[0.0, 0.0, 0.0],
+        half_extents=[1.0, 0.25, 0.5],
+        yaw=torch.pi / 2,
+    )
+    points = torch.tensor(
+        [[[0.0, 0.75, 0.0], [0.75, 0.0, 0.0]]], dtype=torch.float64
+    )
+
+    energy = avoidance_energy(
+        points, [AvoidRegion(region)], mode="hinge"
+    )
+
+    # First point is 0.25 m inside; second is outside.
+    torch.testing.assert_close(energy, torch.tensor([0.25], dtype=torch.float64))
+
+
 def test_avoidance_energy_validates_inputs_and_target() -> None:
     path = torch.zeros((1, 2, 3))
     robot_constraint = AvoidRegion(

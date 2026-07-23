@@ -268,8 +268,12 @@ observed 192 raw obstacle pixels/points but only 5 points after the original
 fixed-count crop. A semantic obstacle quota was therefore added while preserving the
 existing robot quota and tensor size; the repeated smoke retained 36 obstacle points
 after cropping and all 36 in the final DP3 tensor after goal-marker insertion with a
-requested minimum of 32. E2 is not complete: implement rotated boxes, carton, cabinet,
-and cylinder families and validate each with the same count-and-artifact protocol.
+requested minimum of 32. Rotated boxes are also implemented: yaw is serialized in the
+`BoxRegion` and shared by NumPy execution metrics, differentiable ITPS energy, Rerun
+wireframes, and the collidable actor. A 35-degree smoke retained 36 final obstacle
+points and produced its MP4/`.rrd` pair. E2 is not complete: implement carton,
+cabinet, and cylinder families and validate each with the same count-and-artifact
+protocol.
 
 ### E3 — Primary constrained-reach comparison
 

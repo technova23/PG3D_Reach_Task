@@ -56,7 +56,14 @@ def _signed_distance(
             device=points.device,
             dtype=points.dtype,
         )
-        q = torch.abs(points - center.view(1, 1, 3)) - half_extents.view(1, 1, 3)
+        local = points - center.view(1, 1, 3)
+        if region.yaw != 0.0:
+            cos_yaw = torch.cos(points.new_tensor(region.yaw))
+            sin_yaw = torch.sin(points.new_tensor(region.yaw))
+            local_x = local[..., 0] * cos_yaw + local[..., 1] * sin_yaw
+            local_y = -local[..., 0] * sin_yaw + local[..., 1] * cos_yaw
+            local = torch.stack([local_x, local_y, local[..., 2]], dim=-1)
+        q = torch.abs(local) - half_extents.view(1, 1, 3)
         outside = torch.linalg.norm(torch.clamp(q, min=0.0), dim=-1)
         inside = torch.minimum(torch.amax(q, dim=-1), torch.zeros_like(outside))
         return outside + inside

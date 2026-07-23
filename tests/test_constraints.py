@@ -44,6 +44,24 @@ def test_sphere_and_box_signed_distance() -> None:
     np.testing.assert_allclose(distances, np.asarray([-1.0, 1.0, 0.0], dtype=np.float32))
 
 
+def test_rotated_box_signed_distance_and_json_round_trip() -> None:
+    box = BoxRegion(
+        center=[0.0, 0.0, 0.0],
+        half_extents=[1.0, 0.25, 0.5],
+        yaw=np.pi / 2,
+    )
+
+    distances = box.signed_distance(
+        np.asarray([[0.0, 0.75, 0.0], [0.75, 0.0, 0.0]], dtype=np.float32)
+    )
+
+    np.testing.assert_allclose(distances, [-0.25, 0.5], atol=1e-6)
+    restored = region_from_json(box.to_json())
+    assert isinstance(restored, BoxRegion)
+    assert restored.yaw == pytest.approx(np.pi / 2)
+    np.testing.assert_allclose(restored.signed_distance([[0.0, 0.75, 0.0]]), [-0.25])
+
+
 def test_rect2d_signed_distance_ignores_height() -> None:
     rect = RectRegion2D(center=[0.5, 0.0], half_extents=[0.08, 0.08])
     # XY inside the footprint -> negative regardless of z; XY outside -> positive.

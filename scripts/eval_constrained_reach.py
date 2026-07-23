@@ -825,6 +825,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "downsampling in --embody-obstacle mode (default: 32)."
         ),
     )
+    parser.add_argument(
+        "--obstacle-yaw-deg",
+        type=float,
+        default=0.0,
+        help=(
+            "World-frame yaw of an embodied box and its synchronized BoxRegion, "
+            "in degrees (default: 0)."
+        ),
+    )
     parser.add_argument("--gripper-open", type=float, default=0.04)
     parser.add_argument(
         "--match-current-robot-points",
@@ -897,6 +906,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--embody-obstacle currently supports exactly one avoid region")
     if args.obstacle_point_quota < 0:
         raise ValueError("--obstacle-point-quota must be non-negative")
+    if not np.isfinite(args.obstacle_yaw_deg):
+        raise ValueError("--obstacle-yaw-deg must be finite")
     if args.episode_indices is not None and args.episode_indices_file is not None:
         raise ValueError("--episode-indices and --episode-indices-file are mutually exclusive")
     if args.episode_indices_file is not None and args.source != "dataset":
@@ -1965,7 +1976,9 @@ def _clear_region_from_robot(
     center = region.center.astype(np.float32).copy()
     half_extents = region.half_extents.astype(np.float32)
     for _ in range(max_iter):
-        candidate = BoxRegion(center=center, half_extents=half_extents)
+        candidate = BoxRegion(
+            center=center, half_extents=half_extents, yaw=region.yaw
+        )
         signed = candidate.signed_distance(pts)
         min_sd = float(np.min(signed))
         if min_sd >= clearance:
@@ -1983,7 +1996,7 @@ def _clear_region_from_robot(
         f"(min clearance still < {clearance:.3f} m after {max_iter} iters)",
         file=sys.stderr,
     )
-    return BoxRegion(center=center, half_extents=half_extents)
+    return BoxRegion(center=center, half_extents=half_extents, yaw=region.yaw)
 
 
 def _finalize_constraints(
@@ -2001,6 +2014,12 @@ def _finalize_constraints(
     finalized: list[AvoidRegion] = []
     for constraint in constraints:
         region = constraint.region
+        if isinstance(region, BoxRegion):
+            region = BoxRegion(
+                center=region.center,
+                half_extents=region.half_extents,
+                yaw=np.deg2rad(float(args.obstacle_yaw_deg)),
+            )
         if enable_clearance and isinstance(region, (SphereRegion, BoxRegion)):
             region = _clear_region_from_robot(
                 region,
@@ -3017,12 +3036,15 @@ def _embodied_obstacle_half_extents(
 
 def _embodied_obstacle_reset_options(
     constraints: list[AvoidRegion],
-) -> dict[str, list[float]]:
+) -> dict[str, list[float] | float]:
     if len(constraints) != 1 or not isinstance(constraints[0].region, BoxRegion):
         raise ValueError(
             "embodied obstacle evaluation currently requires exactly one box constraint"
         )
-    return {"pg3d_obstacle_center": constraints[0].region.center.astype(float).tolist()}
+    return {
+        "pg3d_obstacle_center": constraints[0].region.center.astype(float).tolist(),
+        "pg3d_obstacle_yaw": float(constraints[0].region.yaw),
+    }
 
 
 def _validate_embodied_obstacle_geometry(
@@ -3131,6 +3153,7 @@ def _add_constraint_overlay_actors(
                 initial_pose=sapien.Pose(p=region.center.tolist()),
             )
         elif isinstance(region, BoxRegion):
+            half_yaw = 0.5 * float(region.yaw)
             actors.build_box(
                 scene,
                 half_sizes=region.half_extents.tolist(),
@@ -3138,7 +3161,10 @@ def _add_constraint_overlay_actors(
                 name=name,
                 body_type="kinematic",
                 add_collision=False,
-                initial_pose=sapien.Pose(p=region.center.tolist()),
+                initial_pose=sapien.Pose(
+                    p=region.center.tolist(),
+                    q=[math.cos(half_yaw), 0.0, 0.0, math.sin(half_yaw)],
+                ),
             )
         elif isinstance(region, RectRegion2D):
             # Render the height-agnostic XY footprint as an extruded box for visibility.

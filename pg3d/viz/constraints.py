@@ -68,7 +68,9 @@ def avoid_region_line_visuals(
             visuals.append(
                 ConstraintLineVisual(
                     name=name,
-                    line_strips=box_wireframe(region.center, region.half_extents),
+                    line_strips=box_wireframe(
+                        region.center, region.half_extents, yaw=region.yaw
+                    ),
                 )
             )
         else:
@@ -105,8 +107,13 @@ def sphere_wireframe(
     return [(circle + center_array.reshape(1, 3)).astype(np.float32) for circle in circles]
 
 
-def box_wireframe(center: np.ndarray, half_extents: np.ndarray) -> list[np.ndarray]:
-    """Return twelve edge line strips for an axis-aligned box."""
+def box_wireframe(
+    center: np.ndarray,
+    half_extents: np.ndarray,
+    *,
+    yaw: float = 0.0,
+) -> list[np.ndarray]:
+    """Return twelve edge line strips for a yaw-oriented box."""
     center_array = _vector3(center, name="center")
     half_extents_array = _vector3(half_extents, name="half_extents")
     if np.any(half_extents_array <= 0.0) or not np.all(np.isfinite(half_extents_array)):
@@ -124,7 +131,17 @@ def box_wireframe(center: np.ndarray, half_extents: np.ndarray) -> list[np.ndarr
         ],
         dtype=np.float32,
     )
-    corners = center_array.reshape(1, 3) + signs * half_extents_array.reshape(1, 3)
+    corners = signs * half_extents_array.reshape(1, 3)
+    yaw = float(yaw)
+    if not np.isfinite(yaw):
+        raise ValueError("yaw must be finite")
+    if yaw != 0.0:
+        cos_yaw = np.cos(yaw)
+        sin_yaw = np.sin(yaw)
+        rotated_x = corners[:, 0] * cos_yaw - corners[:, 1] * sin_yaw
+        rotated_y = corners[:, 0] * sin_yaw + corners[:, 1] * cos_yaw
+        corners[:, :2] = np.stack([rotated_x, rotated_y], axis=1)
+    corners = center_array.reshape(1, 3) + corners
     edge_indices = [
         (0, 1),
         (1, 2),

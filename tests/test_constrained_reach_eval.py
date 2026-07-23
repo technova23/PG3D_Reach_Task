@@ -886,6 +886,7 @@ def test_embodied_box_uses_generated_constraint_geometry(tmp_path: Path) -> None
     assert _embodied_obstacle_half_extents(args) == pytest.approx((0.04, 0.06, 0.08))
     reset_options = _embodied_obstacle_reset_options([constraint])
     assert reset_options["pg3d_obstacle_center"] == pytest.approx([0.1, -0.2, 0.3])
+    assert reset_options["pg3d_obstacle_yaw"] == 0.0
 
 
 def test_embodied_obstacle_rejects_unsupported_geometry(tmp_path: Path) -> None:

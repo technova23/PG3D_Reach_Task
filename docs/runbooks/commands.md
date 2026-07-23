@@ -737,6 +737,7 @@ uv run python scripts/eval_constrained_reach.py \
   --avoid-box-half-extents 0.04 0.06 0.08 \
   --embody-obstacle \
   --obstacle-point-quota 32 \
+  --obstacle-yaw-deg 35 \
   --max-steps 1 \
   --post-success-steps 0 \
   --video \
@@ -752,6 +753,9 @@ validation. Without a quota, the first smoke measured 192, 5, and 5 respectively
 With the 32-point minimum shown above, the repeated smoke measured 192, 36, and 36
 and wrote a non-empty MP4/`.rrd` pair. The quota is a minimum rather than an exact
 count because remaining ordinary-scene slots may also select obstacle pixels.
+Set `--obstacle-yaw-deg 0` for the axis-aligned case. The 35-degree variant above
+serializes the yaw in `BoxRegion`; the control actor, NumPy/Torch signed-distance
+implementations, and Rerun wireframe consume the same value.
 
 Longer multi-chunk planning smoke:
 

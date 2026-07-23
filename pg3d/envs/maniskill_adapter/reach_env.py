@@ -140,7 +140,14 @@ class PG3DReachEnv(BaseEnv):
                     obstacle_xyz = torch.as_tensor(
                         obstacle_center, dtype=torch.float32
                     ).reshape(1, 3).expand(batch_size, -1)
-                self.pg3d_obstacle.set_pose(Pose.create_from_pq(obstacle_xyz))
+                yaw = float(options.get("pg3d_obstacle_yaw", 0.0))
+                obstacle_quat = torch.tensor(
+                    [[np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)]],
+                    dtype=torch.float32,
+                ).expand(batch_size, -1)
+                self.pg3d_obstacle.set_pose(
+                    Pose.create_from_pq(obstacle_xyz, obstacle_quat)
+                )
 
     def _get_obs_extra(self, info: dict[str, Any]) -> dict[str, Any]:
         return {

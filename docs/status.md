@@ -78,6 +78,10 @@ retained 192 raw obstacle points but only 5 after cropping and in the final poli
 tensor. A semantic-preserving minimum quota now coexists with the robot quota and
 fixed tensor size; a repeated smoke retained 36 cropped/final points with a requested
 minimum of 32.
+Yaw-oriented boxes are now synchronized across the control actor, serialized
+`BoxRegion`, NumPy metrics, differentiable ITPS energy, and Rerun visualization. A
+35-degree live smoke retained 36 obstacle points in the final policy input and wrote
+valid MP4/`.rrd` artifacts.
 
 ## Current phase
 
@@ -154,8 +158,8 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Extend E2 from the quota-validated axis-aligned box to rotated box, carton, cabinet,
-   and cylinder actor families.
+3. Extend E2 from the quota-validated axis-aligned and rotated boxes to carton,
+   cabinet, and cylinder actor families.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 

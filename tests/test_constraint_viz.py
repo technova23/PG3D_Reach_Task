@@ -40,6 +40,20 @@ def test_box_wireframe_matches_center_and_half_extents() -> None:
     np.testing.assert_allclose(vertices.max(axis=0), center + half_extents)
 
 
+def test_rotated_box_wireframe_rotates_xy_extents() -> None:
+    strips = box_wireframe(
+        np.zeros(3, dtype=np.float32),
+        np.asarray([0.1, 0.3, 0.2], dtype=np.float32),
+        yaw=np.pi / 2,
+    )
+    vertices = np.concatenate(strips, axis=0)
+
+    np.testing.assert_allclose(vertices[:, 0].min(), -0.3, atol=1e-6)
+    np.testing.assert_allclose(vertices[:, 0].max(), 0.3, atol=1e-6)
+    np.testing.assert_allclose(vertices[:, 1].min(), -0.1, atol=1e-6)
+    np.testing.assert_allclose(vertices[:, 1].max(), 0.1, atol=1e-6)
+
+
 def test_avoid_region_line_visuals_ignore_non_avoid_constraints() -> None:
     sphere = AvoidRegion(region=SphereRegion(center=[0.0, 0.0, 0.0], radius=0.1))
     box = AvoidRegion(
