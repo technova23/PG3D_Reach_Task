@@ -1,0 +1,12 @@
+# First-occurrence dataset indices for unique-seed ranks 25--34.
+# Pilot/tuning only; never include these episodes in the definitive E3 test.
+286
+297
+305
+317
+329
+341
+353
+365
+377
+389

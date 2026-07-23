@@ -722,6 +722,25 @@ test set must exclude these 25 nominal checkpoint-selection episodes. The compan
 three episodes and all four methods; base, rejection, and reranking chunks were
 bit-identical for every seed at `K=1`.
 
+### E3 locked episode split
+
+The E1 checkpoint-selection episodes, E3 pilot episodes, and definitive E3 test
+episodes are disjoint first-occurrence unique-seed partitions recorded in
+`configs/eval/e3_episode_split.json`. Use the pilot set while integrating and tuning:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --source dataset \
+  --episode-indices-file configs/eval/e3_pilot_episode_indices.txt \
+  ...
+```
+
+Reserve `configs/eval/e3_test_episode_indices.txt` for the definitive run only. Do
+not select checkpoints, obstacle parameters, or method hyperparameters using those 50
+episodes.
+
 ### E2 embodied-box smoke
 
 Create the generated box constraint as a collidable actor in the actual control

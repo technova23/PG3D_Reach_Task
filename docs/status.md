@@ -132,6 +132,11 @@ intervals for binary and continuous endpoints, exact two-sided McNemar tests for
 binary outcomes, excluded-pair counts, and path-length comparisons conditioned on
 both methods achieving stable combined success. A live three-method smoke wrote all
 three expected comparisons to `summary.json`.
+The E3 data split is now frozen before constrained outcomes are examined. The first
+25 unique seeds remain checkpoint-selection data, the next 10 are pilot/tuning data,
+and the following 50 are the definitive test pool. The exact dataset indices and
+simulator seeds are tracked in `configs/eval/e3_episode_split.json`; validation
+confirmed the three partitions are disjoint and match the current dataset metadata.
 
 ## Current phase
 
@@ -204,9 +209,11 @@ the full point-cloud tensor into memory.
 
 ## Immediate next steps
 
-1. Lock a disjoint E3 constrained-test episode set for the selected 100k checkpoint.
-2. Build nominal-path realistic-obstacle constraints without tuning on method outcomes.
-3. Run a small paired E3 pilot with required MP4/`.rrd` artifacts before scaling.
+1. Build nominal-path realistic-obstacle constraints on the locked pilot episodes
+   without tuning on method outcomes.
+2. Enable the evaluator to use those precomputed constraints with collidable,
+   camera-visible actors.
+3. Run the paired E3 pilot with required MP4/`.rrd` artifacts before scaling.
 
 ## Active risks
 

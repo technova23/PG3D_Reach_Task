@@ -338,6 +338,16 @@ constraint-quality, task-quality, motion-quality, and compute metrics. Run both:
 - the full held-out distribution, and
 - the explicitly labelled nominal-base-success subset.
 
+The dataset episode split is locked before constrained evaluation:
+
+- unique-seed ranks 0--24 are checkpoint-selection only;
+- ranks 25--34 are the 10-episode E3 pilot/tuning pool; and
+- ranks 35--84 are the 50-episode definitive E3 test pool.
+
+The exact indices and simulator seeds are versioned in
+`configs/eval/e3_episode_split.json`, with CLI-ready pilot and test index files beside
+it. Checkpoint selection, pilot tuning, and final testing must remain disjoint.
+
 ### E4 — Constraint difficulty sweep
 
 Sweep obstacle size/clearance margin, pose, orientation, placement along the nominal
