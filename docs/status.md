@@ -101,6 +101,9 @@ Artifact provenance is now enforced by `pg3d.artifact_manifest.v1`. Every select
 MP4/`.rrd` pair is linked to an exact metrics row, constraint file/fingerprint,
 obstacle configuration, paired seeds, checkpoint, dataset, and git commit, with
 non-empty size and SHA-256 validation. Video-only evaluation is rejected.
+The experiment plan now makes paired MP4/Rerun outputs a completion gate for E3--E9:
+aggregate graphs alone are insufficient, and every major experiment must retain a
+deterministic qualitative suite linked to the exact numerical rows.
 Rerun timelines now contain the exact final DP3 point tensor and separate semantic
 robot/scene/obstacle/goal-marker entities, executed TCP path, target and collision
 wireframes, per-step clearance/violation scalars, reranking candidate paths and

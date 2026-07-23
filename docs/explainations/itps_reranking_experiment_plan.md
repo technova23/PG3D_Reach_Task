@@ -174,6 +174,27 @@ obstacle ID, and constraint ID as the corresponding metrics row.
 - Treat a missing or unreadable required artifact as an incomplete experiment, even
   when plots and summary metrics were produced.
 
+### 3.4 Experiment completion gate
+
+Plots and tables are summary products, not substitutes for trajectory inspection.
+E3--E9 are complete only when the run directory contains:
+
+- the numerical rows and aggregate graphs;
+- a deterministic qualitative-selection manifest;
+- a playable MP4 and corresponding readable Rerun `.rrd` for every selected
+  method/episode pair; and
+- an artifact index linking each pair to its exact metrics row, seeds, obstacle,
+  constraint, checkpoint, and method configuration.
+
+The MP4 and `.rrd` are a single paired deliverable: neither counts on its own. The
+artifact validator must decode the video, open the `.rrd`, and verify their recorded
+identity and hashes before accepting the experiment. The `.rrd` must provide
+time-synchronized point-cloud and trajectory inspection with the overlays specified
+in Section 3.2, so reviewers can distinguish perception loss, sampling/scoring errors,
+world-model errors, collision, and task failure. At least one paired qualitative suite
+must be retained for every major experiment (E3--E9); large sweeps may use a
+predeclared representative subset rather than recording every episode.
+
 ## 4. Statistical reporting
 
 - Use a paired episode design: every method receives the exact same episode index,
