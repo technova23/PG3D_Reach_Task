@@ -55,11 +55,11 @@ primitives provide matched constraint geometry to reranking and ITPS. Point-clou
 inference is deferred to a later perception ablation. The protocol also makes paired MP4 videos
 and Rerun `.rrd` point-cloud timelines required outputs for a deterministic representative
 episode subset; plots alone do not complete an experiment. The current evaluator covers the
-pilot metrics and now logs stable-hold success, TCP violation duration/integral/events,
-TCP/joint path length, physical-time acceleration/jerk, maximum joint velocity, and robust
-continuous summaries. It still needs time-indexed whole-robot violations, executed-action
-replan discontinuity, paired statistical utilities, and compute-operation fields before the
-definitive comparison. E0 protocol validation now also assigns an order-independent shared
+pilot metrics and now logs stable-hold success, TCP/whole-robot violation
+duration/integral/events, TCP/joint path length, physical-time acceleration/jerk,
+maximum joint velocity, executed-action replan discontinuity, and robust continuous
+summaries. It still needs paired statistical utilities before the definitive
+comparison. E0 protocol validation now also assigns an order-independent shared
 policy seed per episode, fingerprints serialized constraints, records source/checkpoint/run
 identities, rejects mismatched method pairs, and reports CUDA-synchronized end-to-end
 action-selection latency. A one-step live ManiSkill smoke passed for base, rejection,
@@ -114,6 +114,13 @@ robot cloud per executed timestep and reports primary violation duration, fracti
 integral, and event count. Executed joint targets now also report overall and
 replan-boundary action discontinuity. A nine-step/two-replan live smoke populated all
 new fields.
+Compute work is now measured rather than inferred from candidate settings. Episode
+rows contain actual denoiser calls and batch-item-equivalent evaluations, vectorized
+ITPS FK calls and pose counts, reranking EEF/cloud query and render counts, per-replan
+totals, and absolute/incremental peak PyTorch CUDA allocation during action selection.
+The counters exclude Rerun and post-hoc whole-robot grading. A live `K=2` smoke
+measured 100/100 denoiser calls/evaluations for base, 100/200 plus 16 EEF queries for
+reranking, and 400/400 plus 396 FK calls over 6,336 poses for ITPS.
 
 ## Current phase
 
@@ -190,8 +197,7 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Add denoiser/FK/geometry counters, peak GPU memory, and paired statistical
-   utilities before the definitive E3 comparison.
+3. Add paired statistical comparison utilities before the definitive E3 comparison.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 

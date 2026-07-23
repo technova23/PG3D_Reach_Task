@@ -50,13 +50,19 @@ class ManiSkillGhostPandaGeometryProvider(RobotGeometryProvider):
         if self.crop_bounds is not None and self.crop_bounds.shape != (3, 2):
             raise ValueError(f"crop_bounds must have shape (3, 2), got {self.crop_bounds.shape}")
         self._cache: GhostGeometrySnapshot | None = None
+        self.end_effector_position_queries = 0
+        self.end_effector_position_only_queries = 0
+        self.robot_point_cloud_queries = 0
+        self.robot_point_cloud_renders = 0
 
     def end_effector_position(self, q: Array) -> Array:
         """Return the ghost-env TCP position for one qpos."""
+        self.end_effector_position_queries += 1
         return self._snapshot(q).eef_position
 
     def end_effector_position_only(self, q: Array) -> Array:
         """Return TCP position after setting qpos without rendering a point cloud."""
+        self.end_effector_position_only_queries += 1
         qpos = as_float_array(q, name="q", ndim=1)
         self._set_robot_qpos(qpos)
         unwrapped = getattr(self.env, "unwrapped", self.env)
@@ -80,7 +86,23 @@ class ManiSkillGhostPandaGeometryProvider(RobotGeometryProvider):
 
     def robot_point_cloud(self, q: Array) -> Array:
         """Return robot-segmented point-cloud points for one qpos."""
+        self.robot_point_cloud_queries += 1
         return self._snapshot(q).robot_point_cloud
+
+    def counter_snapshot(self) -> dict[str, int]:
+        """Return cumulative call-boundary counters for compute instrumentation."""
+        return {
+            "end_effector_position_queries": int(self.end_effector_position_queries),
+            "end_effector_position_only_queries": int(
+                self.end_effector_position_only_queries
+            ),
+            "eef_geometry_queries": int(
+                self.end_effector_position_queries
+                + self.end_effector_position_only_queries
+            ),
+            "robot_point_cloud_queries": int(self.robot_point_cloud_queries),
+            "robot_point_cloud_renders": int(self.robot_point_cloud_renders),
+        }
 
     def world_from_robot_base(self) -> Array:
         """Return the live robot-base homogeneous transform in world coordinates."""
@@ -133,6 +155,7 @@ class ManiSkillGhostPandaGeometryProvider(RobotGeometryProvider):
         if self._cache is not None and np.array_equal(self._cache.q, qpos):
             return self._cache
 
+        self.robot_point_cloud_renders += 1
         self._set_robot_qpos(qpos)
         unwrapped = getattr(self.env, "unwrapped", self.env)
         info = unwrapped.evaluate() if hasattr(unwrapped, "evaluate") else {}

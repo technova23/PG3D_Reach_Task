@@ -50,7 +50,9 @@ from scripts.build_nominal_path_constraints import (
     parse_args as parse_builder_args,
 )
 from scripts.eval_constrained_reach import (
+    ComputeOperationCounts,
     DP3ChunkPolicyAdapter,
+    ITPSGuidanceConfig,
     _artifact_file_record,
     _artifact_selection_summary,
     _build_multichunk_candidates,
@@ -69,6 +71,7 @@ from scripts.eval_constrained_reach import (
     _policy_obstacle_point_count,
     _read_episode_indices_file,
     _seed_torch,
+    _select_decision,
     _validate_embodied_obstacle_geometry,
     _write_artifact_manifest,
     validate_artifact_manifest,
@@ -590,6 +593,57 @@ def test_timing_recorder_aggregates_json_safe_events() -> None:
     assert summary["policy_sampling"]["count"] == pytest.approx(2.0)
     assert summary["policy_sampling"]["total"] >= 0.0
     assert events[0]["metadata"]["k"] == 16
+
+
+def test_compute_operation_counts_measure_actual_batches_and_geometry() -> None:
+    counts = ComputeOperationCounts()
+    denoiser = torch.nn.Linear(3, 2)
+    counts.start_denoiser_tracking(denoiser)
+
+    denoiser(torch.ones((4, 3), dtype=torch.float32))
+    denoiser(torch.ones((2, 3), dtype=torch.float32))
+    counts.stop_denoiser_tracking()
+    denoiser(torch.ones((8, 3), dtype=torch.float32))
+
+    counts.record_provider_delta(
+        {
+            "end_effector_position_queries": 1,
+            "end_effector_position_only_queries": 2,
+            "eef_geometry_queries": 3,
+            "robot_point_cloud_queries": 4,
+            "robot_point_cloud_renders": 2,
+        },
+        {
+            "end_effector_position_queries": 3,
+            "end_effector_position_only_queries": 7,
+            "eef_geometry_queries": 10,
+            "robot_point_cloud_queries": 9,
+            "robot_point_cloud_renders": 5,
+        },
+    )
+    counts.record_differentiable_fk(torch.zeros((3, 5, 7), dtype=torch.float32))
+    row = counts.to_metric_row(replans=2)
+
+    assert row["denoiser_forward_calls"] == 2
+    assert row["denoiser_evaluations"] == 6
+    assert row["denoiser_evaluations_per_replan"] == pytest.approx(3.0)
+    assert row["differentiable_fk_calls"] == 1
+    assert row["differentiable_fk_pose_evaluations"] == 15
+    assert row["eef_geometry_queries"] == 7
+    assert row["robot_point_cloud_queries"] == 5
+    assert row["robot_point_cloud_renders"] == 3
+    assert row["geometry_evaluations"] == 25
+    assert row["peak_gpu_memory_bytes"] is None
+
+
+def test_compute_operation_counts_reject_decreasing_provider_counter() -> None:
+    counts = ComputeOperationCounts()
+
+    with pytest.raises(ValueError, match="decreased"):
+        counts.record_provider_delta(
+            {"eef_geometry_queries": 2},
+            {"eef_geometry_queries": 1},
+        )
 
 
 def test_periodic_artifact_selection_includes_first_and_interval() -> None:
@@ -1265,6 +1319,50 @@ def test_fast_multichunk_renders_only_feedback_states() -> None:
     assert len(candidates) == 3
     assert provider.eef_calls == 12
     assert provider.robot_cloud_calls == 6
+
+
+def test_exact_single_chunk_selection_uses_supported_controller_arguments() -> None:
+    policy = _FakeDP3Policy(n_action_steps=2, n_obs_steps=2)
+    adapter = DP3ChunkPolicyAdapter(
+        policy,  # type: ignore[arg-type]
+        action_mode="abs_joint",
+        device=torch.device("cpu"),
+    )
+
+    class _ExactWorldModel:
+        def imagine(
+            self,
+            _observation: object,
+            action_chunk: ActionChunk,
+        ) -> ImaginedRollout:
+            return _rollout(action_chunk.actions.tolist())
+
+    decision = _select_decision(
+        method="reranking",
+        adapter=adapter,
+        world_model=_ExactWorldModel(),  # type: ignore[arg-type]
+        provider=_FakeFastProvider(),  # type: ignore[arg-type]
+        current_entry=_entry(),
+        obs_window=_window(),
+        scene=scene_context_for_constraints(
+            target_position=[1.0, 0.0, 0.2],
+            constraints=[],
+        ),
+        constraints=[],
+        crop_config=PointCloudCropConfig(num_points=4),
+        goal_thresh=0.01,
+        planning_horizon_chunks=1,
+        geometry_mode="exact",
+        k_schedule=(1,),
+        match_current_robot_points=False,
+        rng=np.random.default_rng(0),
+        timer=TimingRecorder(enabled=False),
+        compute_counts=ComputeOperationCounts(),
+        itps_config=ITPSGuidanceConfig(),
+    )
+
+    assert decision.result is not None
+    assert decision.selection_reason == "best_feasible"
 
 
 def test_eval_helpers_import_without_heavy_runtime_deps() -> None:

@@ -889,6 +889,39 @@ TCP-only diagnostics retain their `_tcp` suffix. Action targets always produce
 `action_discontinuity_{mean,max}` and
 `replan_boundary_discontinuity_{mean,max}`.
 
+All constrained-evaluation runs also record compute at the actual action-selection
+boundaries. `denoiser_forward_calls` counts model invocations while
+`denoiser_evaluations` includes the output batch size. Geometry fields separate
+differentiable ITPS FK calls/poses, fast EEF queries, and exact robot-cloud
+queries/cache-miss renders. `peak_gpu_memory_bytes` and
+`peak_gpu_memory_delta_bytes` use PyTorch CUDA allocation statistics and are `null`
+on CPU.
+
+Smoke the compute schema across the three main inference paths:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00065000.pt \
+  --methods base reranking itps \
+  --source dataset \
+  --episode-indices 0 \
+  --device cuda \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.04 0.06 0.08 \
+  --embody-obstacle \
+  --obstacle-family box \
+  --obstacle-point-quota 32 \
+  --k-schedule 2 \
+  --geometry-mode fast \
+  --max-steps 1 \
+  --post-success-steps 0 \
+  --profile \
+  --sync-cuda-timers \
+  --output-dir artifacts/compute-metrics-smoke \
+  --allow-failure
+```
+
 Longer multi-chunk planning smoke:
 
 ```bash

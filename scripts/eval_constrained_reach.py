@@ -7,7 +7,7 @@ import math
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -132,6 +132,159 @@ class ITPSGuidanceConfig:
             "energy": self.energy,
             "barrier_temperature": self.barrier_temperature,
         }
+
+
+@dataclass
+class ComputeOperationCounts:
+    """Measured action-selection work for one evaluation episode."""
+
+    denoiser_forward_calls: int = 0
+    denoiser_evaluations: int = 0
+    differentiable_fk_calls: int = 0
+    differentiable_fk_pose_evaluations: int = 0
+    end_effector_position_queries: int = 0
+    end_effector_position_only_queries: int = 0
+    eef_geometry_queries: int = 0
+    robot_point_cloud_queries: int = 0
+    robot_point_cloud_renders: int = 0
+    peak_gpu_memory_bytes: int | None = None
+    peak_gpu_memory_delta_bytes: int | None = None
+    _denoiser_hook: Any | None = field(default=None, init=False, repr=False)
+
+    def start_denoiser_tracking(self, model: torch.nn.Module) -> None:
+        """Attach a hook to the actual denoiser module used by DP3."""
+        if self._denoiser_hook is not None:
+            raise RuntimeError("denoiser tracking is already active")
+        self._denoiser_hook = model.register_forward_hook(self._record_denoiser_forward)
+
+    def stop_denoiser_tracking(self) -> None:
+        """Remove the denoiser hook without leaking it into later episodes."""
+        if self._denoiser_hook is not None:
+            self._denoiser_hook.remove()
+            self._denoiser_hook = None
+
+    def record_provider_delta(
+        self,
+        before: dict[str, int],
+        after: dict[str, int],
+    ) -> None:
+        """Accumulate geometry-provider work performed during action selection."""
+        for key in (
+            "end_effector_position_queries",
+            "end_effector_position_only_queries",
+            "eef_geometry_queries",
+            "robot_point_cloud_queries",
+            "robot_point_cloud_renders",
+        ):
+            delta = int(after.get(key, 0)) - int(before.get(key, 0))
+            if delta < 0:
+                raise ValueError(f"provider counter {key!r} decreased")
+            setattr(self, key, int(getattr(self, key)) + delta)
+
+    def record_differentiable_fk(self, trajectory: torch.Tensor) -> None:
+        """Count one vectorized FK call and the poses evaluated within it."""
+        if trajectory.ndim < 2:
+            raise ValueError("ITPS trajectory must have batch and horizon dimensions")
+        self.differentiable_fk_calls += 1
+        self.differentiable_fk_pose_evaluations += int(
+            trajectory.shape[0] * trajectory.shape[1]
+        )
+
+    def begin_action_selection(self, device: torch.device) -> int | None:
+        """Reset PyTorch CUDA peak stats and return the current allocation."""
+        if device.type != "cuda" or not torch.cuda.is_available():
+            return None
+        torch.cuda.synchronize(device)
+        baseline = int(torch.cuda.memory_allocated(device))
+        torch.cuda.reset_peak_memory_stats(device)
+        return baseline
+
+    def end_action_selection(
+        self,
+        device: torch.device,
+        baseline_bytes: int | None,
+    ) -> None:
+        """Retain the largest absolute and incremental CUDA allocation peaks."""
+        if baseline_bytes is None:
+            return
+        torch.cuda.synchronize(device)
+        peak = int(torch.cuda.max_memory_allocated(device))
+        delta = max(0, peak - int(baseline_bytes))
+        self.peak_gpu_memory_bytes = max(self.peak_gpu_memory_bytes or 0, peak)
+        self.peak_gpu_memory_delta_bytes = max(
+            self.peak_gpu_memory_delta_bytes or 0,
+            delta,
+        )
+
+    def to_metric_row(self, *, replans: int) -> dict[str, int | float | None]:
+        """Return schema-stable episode and per-replan operation metrics."""
+        geometry_evaluations = (
+            self.eef_geometry_queries
+            + self.robot_point_cloud_renders
+            + self.differentiable_fk_pose_evaluations
+        )
+        return {
+            "denoiser_forward_calls": int(self.denoiser_forward_calls),
+            "denoiser_evaluations": int(self.denoiser_evaluations),
+            "denoiser_forward_calls_per_replan": _per_replan(
+                self.denoiser_forward_calls, replans
+            ),
+            "denoiser_evaluations_per_replan": _per_replan(
+                self.denoiser_evaluations, replans
+            ),
+            "differentiable_fk_calls": int(self.differentiable_fk_calls),
+            "differentiable_fk_pose_evaluations": int(
+                self.differentiable_fk_pose_evaluations
+            ),
+            "end_effector_position_queries": int(
+                self.end_effector_position_queries
+            ),
+            "end_effector_position_only_queries": int(
+                self.end_effector_position_only_queries
+            ),
+            "eef_geometry_queries": int(self.eef_geometry_queries),
+            "robot_point_cloud_queries": int(self.robot_point_cloud_queries),
+            "robot_point_cloud_renders": int(self.robot_point_cloud_renders),
+            "geometry_evaluations": int(geometry_evaluations),
+            "geometry_evaluations_per_replan": _per_replan(
+                geometry_evaluations, replans
+            ),
+            "peak_gpu_memory_bytes": self.peak_gpu_memory_bytes,
+            "peak_gpu_memory_delta_bytes": self.peak_gpu_memory_delta_bytes,
+        }
+
+    def _record_denoiser_forward(
+        self,
+        _module: torch.nn.Module,
+        _inputs: tuple[Any, ...],
+        output: Any,
+    ) -> None:
+        batch_size = _first_tensor_batch_size(output)
+        if batch_size is None:
+            raise RuntimeError("denoiser output does not contain a batched tensor")
+        self.denoiser_forward_calls += 1
+        self.denoiser_evaluations += batch_size
+
+
+def _first_tensor_batch_size(value: Any) -> int | None:
+    """Return the leading dimension of the first tensor in a nested output."""
+    if isinstance(value, torch.Tensor):
+        return int(value.shape[0]) if value.ndim > 0 else None
+    if isinstance(value, dict):
+        for item in value.values():
+            batch_size = _first_tensor_batch_size(item)
+            if batch_size is not None:
+                return batch_size
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            batch_size = _first_tensor_batch_size(item)
+            if batch_size is not None:
+                return batch_size
+    return None
+
+
+def _per_replan(value: int, replans: int) -> float | None:
+    return float(value) / float(replans) if replans > 0 else None
 # Z range used to extrude the height-agnostic avoid_projection footprint for the
 # overlay video. Display-only; the constraint itself penalizes XY at any height.
 _PROJECTION_OVERLAY_Z_RANGE = (0.0, 0.5)
@@ -1198,9 +1351,11 @@ def run_eval_episode(
     action_selection_times: list[float] = []
     executed_action_targets: list[np.ndarray] = []
     replan_start_action_indices: list[int] = []
+    compute_counts = ComputeOperationCounts()
     terminated_or_truncated = False
     was_training = policy.training
     policy.eval()
+    compute_counts.start_denoiser_tracking(policy.model)
     try:
         while True:
             if first_success_step is None and steps >= max_steps:
@@ -1212,33 +1367,46 @@ def run_eval_episode(
                 post_success_steps=post_success_steps,
                 first_success_step=first_success_step,
             )
-            with timer.time(
-                "action_selection",
-                method=method,
-                episode=spec.output_index,
-                replan=replans,
-            ):
-                decision = _select_decision(
+            provider_counts_before = (
+                provider.counter_snapshot() if provider is not None else {}
+            )
+            memory_baseline = compute_counts.begin_action_selection(policy.device)
+            try:
+                with timer.time(
+                    "action_selection",
                     method=method,
-                    adapter=adapter,
-                    world_model=world_model,
-                    provider=provider,
-                    current_entry=sim_entry,
-                    obs_window=obs_window,
-                    scene=scene,
-                    constraints=constraints,
-                    crop_config=crop_config,
-                    goal_thresh=goal_thresh,
-                    planning_horizon_chunks=planning_horizon_chunks,
-                    geometry_mode=geometry_mode,
-                    k_schedule=k_schedule,
-                    match_current_robot_points=match_current_robot_points,
-                    rng=rng,
-                    timer=timer,
-                    directional_sign=directional_sign,
-                    directional_weight=directional_weight,
-                    itps_config=itps_config,
-                )
+                    episode=spec.output_index,
+                    replan=replans,
+                ):
+                    decision = _select_decision(
+                        method=method,
+                        adapter=adapter,
+                        world_model=world_model,
+                        provider=provider,
+                        current_entry=sim_entry,
+                        obs_window=obs_window,
+                        scene=scene,
+                        constraints=constraints,
+                        crop_config=crop_config,
+                        goal_thresh=goal_thresh,
+                        planning_horizon_chunks=planning_horizon_chunks,
+                        geometry_mode=geometry_mode,
+                        k_schedule=k_schedule,
+                        match_current_robot_points=match_current_robot_points,
+                        rng=rng,
+                        timer=timer,
+                        compute_counts=compute_counts,
+                        directional_sign=directional_sign,
+                        directional_weight=directional_weight,
+                        itps_config=itps_config,
+                    )
+            finally:
+                compute_counts.end_action_selection(policy.device, memory_baseline)
+                if provider is not None:
+                    compute_counts.record_provider_delta(
+                        provider_counts_before,
+                        provider.counter_snapshot(),
+                    )
             if timer.enabled:
                 action_selection_times.append(timer.events[-1].seconds)
             replans += 1
@@ -1377,6 +1545,7 @@ def run_eval_episode(
             if terminated_or_truncated:
                 break
     finally:
+        compute_counts.stop_denoiser_tracking()
         if was_training:
             policy.train()
         if video_env is not None:
@@ -1442,6 +1611,7 @@ def run_eval_episode(
         executed_actions=executed_action_targets,
         replan_start_action_indices=replan_start_action_indices,
     )
+    row.update(compute_counts.to_metric_row(replans=replans))
     if embody_obstacle:
         goal_marker_points = int(getattr(policy, "goal_marker_points", 0))
         obstacle_reset = _embodied_obstacle_reset_options(constraints)
@@ -1530,6 +1700,7 @@ def _select_decision(
     match_current_robot_points: bool,
     rng: np.random.Generator,
     timer: TimingRecorder,
+    compute_counts: ComputeOperationCounts,
     itps_config: ITPSGuidanceConfig,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
@@ -1554,6 +1725,7 @@ def _select_decision(
                 constraints=constraints,
                 rng=rng,
                 config=itps_config,
+                compute_counts=compute_counts,
             ),
             result=None,
             candidate_feasible=0,
@@ -1572,7 +1744,11 @@ def _select_decision(
         scene=scene,
         policy_input=obs_window,
     )
-    if geometry_mode == "exact" and planning_horizon_chunks == 1:
+    if (
+        geometry_mode == "exact"
+        and planning_horizon_chunks == 1
+        and directional_sign == 0
+    ):
         controller_cls = RejectionController if method == "rejection" else RerankingController
         with timer.time("candidate_scoring", method=method, geometry_mode=geometry_mode):
             result = controller_cls(
@@ -1580,8 +1756,7 @@ def _select_decision(
                 world_model=world_model,
                 constraints=constraints,
                 k_schedule=k_schedule,
-                score_weights=ScoreWeights(directional=directional_weight),
-                directional_sign=directional_sign,
+                score_weights=ScoreWeights(),
             ).select(controller_input, rng=rng)
     else:
         result = _select_multichunk(
@@ -1684,6 +1859,7 @@ def _select_itps_chunk(
     constraints: list[AvoidRegion | AvoidProjection],
     rng: np.random.Generator,
     config: ITPSGuidanceConfig,
+    compute_counts: ComputeOperationCounts,
 ) -> ActionChunk:
     device = policy.device
     obs_batch = _repeat_obs_window_to_torch(
@@ -1700,6 +1876,7 @@ def _select_itps_chunk(
     )
 
     def guidance_fn(traj: torch.Tensor) -> torch.Tensor:
+        compute_counts.record_differentiable_fk(traj)
         eef_path = _itps_eef_path(policy, traj, world_from_base)
         return avoidance_energy(
             eef_path,

@@ -90,9 +90,9 @@ should not be the only paper metric.
 | --- | --- |
 | Action-selection latency | Wall-clock time from receiving an observation window to returning the selected action chunk; report median, p90, and p95 per replan. Synchronize CUDA around timing. |
 | Episode planning time | Sum of action-selection time across replans, excluding rendering and artifact writing. |
-| Policy-network evaluations | Total denoiser forward passes per replan and per episode. |
-| FK / geometry evaluations | Number of differentiable FK calls for ITPS and imagined rollout/geometry evaluations for reranking. |
-| Peak GPU memory | Maximum allocated GPU memory during action selection. |
+| Policy-network evaluations | Actual denoiser module calls per replan and episode, plus batch-item-equivalent evaluations so one batched `K`-candidate call is not treated as the same amount of work as a batch-one call. |
+| FK / geometry evaluations | Differentiable FK calls and evaluated poses for ITPS; EEF queries, point-cloud queries, and cache-miss renders for reranking. Count only calls made inside action selection. |
+| Peak GPU memory | Maximum absolute and incremental PyTorch CUDA allocation during any action-selection call in the episode. |
 | Throughput | Executed control steps per wall-clock second without video, Rerun, W&B upload, or plot generation. |
 
 Latency should be reported both at the methods' standard settings and under a
@@ -388,7 +388,10 @@ min_clearance_m, max_violation_depth_m, violation_steps,
 violation_fraction, integrated_violation_m_s,
 tcp_path_length_m, joint_path_length_rad, post_success_drift_m,
 action_selection_time_s, episode_planning_time_s,
-denoiser_evaluations, geometry_evaluations, peak_gpu_memory_bytes,
+denoiser_forward_calls, denoiser_evaluations,
+differentiable_fk_calls, differentiable_fk_pose_evaluations,
+eef_geometry_queries, robot_point_cloud_queries, robot_point_cloud_renders,
+geometry_evaluations, peak_gpu_memory_bytes, peak_gpu_memory_delta_bytes,
 steps, replans, timeout, error_type,
 video_path, rerun_path, artifact_manifest_path
 ```
@@ -414,13 +417,17 @@ distant or zero-weight obstacle. Success termination is ignored only while colle
 the configured post-success hold, and that hold extends beyond rather than consumes
 the nominal task-step budget.
 
-Before the paper-scale comparison, add:
+Before the paper-scale comparison, add paired statistical comparison utilities and,
+if a stable sampler seam becomes available, an ITPS before/after-guidance trajectory
+overlay.
 
-- denoiser/FK/geometry operation counts,
-- peak GPU memory, and
-- paired statistical comparison utilities,
-- obstacle/goal-marker point categories in Rerun, and
-- richer candidate/guidance overlays.
+Measured compute instrumentation is now implemented at the actual call boundaries.
+Each episode reports denoiser module calls and batch-item-equivalent evaluations;
+differentiable ITPS FK calls and evaluated poses; fast EEF queries; exact robot-cloud
+queries and cache-miss renders; episode/per-replan geometry totals; and the maximum
+absolute and incremental PyTorch CUDA allocation observed during action selection.
+Provider deltas are sampled immediately around planning, so Rerun recording and
+post-hoc whole-robot safety grading do not inflate method compute.
 
 Artifact manifests are now implemented. Each run writes
 `pg3d.artifact_manifest.v1`, and each selected method/episode entry binds the MP4,
@@ -446,7 +453,6 @@ fraction, integral, and event count. The paper default samples every timestep.
 Executed simulator joint targets also produce overall mean/maximum action
 discontinuity and a separate mean/maximum over replan boundaries.
 
-No experiment should be blocked on every diagnostic metric. E0 and E1 can run with the
-current schema. Complete realistic-obstacle observation validation in E2 before a
-pilot E3, and complete the missing primary/compute fields and required qualitative
-artifact outputs before the definitive E3 run.
+No experiment should be blocked on every diagnostic metric. E0--E2 are complete.
+Add the paired statistical utilities and clear the nominal checkpoint gate before the
+definitive E3 run.
