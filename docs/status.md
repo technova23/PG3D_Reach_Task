@@ -282,6 +282,14 @@ the full point-cloud tensor into memory.
 - The P11 balanced-checkpoint constrained rerun uses precomputed nominal-path spherical avoid
   regions on a held-out base-success subset. This isolates steering behavior from base reach
   failure, and results must be labeled as base-success-subset constrained evals.
+- The E3 realistic-obstacle pilot supersedes the sphere only for the paper comparison: its
+  precomputed tall-carton `BoxRegion` instances retain nominal-path XY placement but are grounded
+  on the world-`z=0` tabletop. The control actor, policy-visible camera points, and serialized
+  collision geometry use the same pose.
+- Semantic obstacle quotas are kept in the prefix of the fixed-size point tensor so ordered
+  trailing goal tokens cannot erase the reserved camera-observed obstacle points.
+- Qualitative artifact validation is fail-closed: hashes are recomputed, every MP4 frame is
+  decoded, and every Rerun `.rrd` is parsed before a run manifest is accepted.
 - Eval geometry mode defaults to `fast`; use `--geometry-mode exact` for one-episode reference
   comparisons when validating speedups.
 - Constrained reach validation should use a held-out solved validation Zarr with `--source dataset`

@@ -348,6 +348,13 @@ The exact indices and simulator seeds are versioned in
 `configs/eval/e3_episode_split.json`, with CLI-ready pilot and test index files beside
 it. Checkpoint selection, pilot tuning, and final testing must remain disjoint.
 
+E3 pilot integration now uses a fixed, physically supported realistic obstacle
+protocol: a collidable tall carton with half-extents `[0.055, 0.08, 0.16]` m, 20-degree
+yaw, and its bottom face on the ManiSkill tabletop (`z=0`). For each nominal-base-success
+episode, XY is fixed at the 0.5 arc-length point of the successful nominal TCP path.
+The locked 10-episode pilot pool produced eight such precomputed instances; all eight
+intersect the nominal TCP path and are reserved for integration/tuning only.
+
 ### E4 — Constraint difficulty sweep
 
 Sweep obstacle size/clearance margin, pose, orientation, placement along the nominal
@@ -459,8 +466,10 @@ Artifact manifests are now implemented. Each run writes
 `pg3d.artifact_manifest.v1`, and each selected method/episode entry binds the MP4,
 `.rrd`, and constraint JSON to its exact `metrics.jsonl` row, paired seeds,
 constraint fingerprint, obstacle pose/geometry, checkpoint, dataset, and git commit.
-File sizes and SHA-256 digests are validated before the run is accepted. The CLI
-rejects `--video` without `--rerun`, so an MP4 cannot be emitted without its
+File sizes and SHA-256 digests are recomputed before the run is accepted. The
+validator also decodes every MP4 frame and parses each `.rrd` with Rerun's own CLI;
+the manifest records decoded frame dimensions/count and successful RRD opening. The
+CLI rejects `--video` without `--rerun`, so an MP4 cannot be emitted without its
 point-cloud timeline.
 
 The required semantic Rerun timeline is also implemented for constrained evaluation.
@@ -479,6 +488,6 @@ fraction, integral, and event count. The paper default samples every timestep.
 Executed simulator joint targets also produce overall mean/maximum action
 discontinuity and a separate mean/maximum over replan boundaries.
 
-No experiment should be blocked on every diagnostic metric. E0--E2 and the
-paper-metric/statistics instrumentation are complete. Clear the nominal checkpoint
-gate before the definitive E3 run.
+No experiment should be blocked on every diagnostic metric. E0--E2, the nominal
+checkpoint gate, and the paper-metric/statistics instrumentation are complete. Finish
+the paired E3 pilot and lock method settings before touching the definitive test set.

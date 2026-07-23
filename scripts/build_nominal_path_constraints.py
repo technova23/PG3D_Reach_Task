@@ -68,7 +68,11 @@ def main(argv: list[str] | None = None) -> int:
         source="dataset",
         dataset_episode_seeds=dataset_episode_seeds,
         episodes=args.episodes,
-        episode_indices=args.episode_indices,
+        episode_indices=(
+            _read_episode_indices_file(args.episode_indices_file)
+            if args.episode_indices_file is not None
+            else args.episode_indices
+        ),
         seed_start=args.seed_start,
     )
     if not specs:
@@ -128,6 +132,15 @@ def main(argv: list[str] | None = None) -> int:
                     margin=args.avoid_margin,
                     weight=args.avoid_weight,
                     tolerance=args.avoid_tolerance,
+                    shape=args.avoid_shape,
+                    box_half_extents=(
+                        tuple(float(value) for value in args.avoid_box_half_extents)
+                        if args.avoid_box_half_extents is not None
+                        else None
+                    ),
+                    yaw=np.deg2rad(float(args.obstacle_yaw_deg)),
+                    cylinder_half_length=args.avoid_cylinder_half_length,
+                    support_plane_z=args.support_plane_z,
                 ),
             )
             constraint_path = constraints_dir / f"episode_{selected_output_index:03d}.json"
@@ -145,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                     "tcp_path_points": int(tcp_path.shape[0]),
                     "tcp_path_length": _path_length(tcp_path),
                     "center": constraint.region.center.tolist(),
-                    "radius": float(constraint.region.radius),
+                    "collision_geometry": constraint.region.to_json(),
                     "discrete_min_clearance": min_constraint_clearance(tcp_path, [constraint]),
                     "final_distance": row["final_distance"],
                     "min_distance": row["min_distance"],
@@ -186,6 +199,11 @@ def main(argv: list[str] | None = None) -> int:
             "avoid_margin": args.avoid_margin,
             "avoid_weight": args.avoid_weight,
             "avoid_tolerance": args.avoid_tolerance,
+            "avoid_shape": args.avoid_shape,
+            "avoid_box_half_extents": args.avoid_box_half_extents,
+            "avoid_cylinder_half_length": args.avoid_cylinder_half_length,
+            "obstacle_yaw_deg": args.obstacle_yaw_deg,
+            "support_plane_z": args.support_plane_z,
         },
         "attempts": attempts,
         "selected": selected,
@@ -215,6 +233,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--episode-indices", type=int, nargs="+", default=None)
+    parser.add_argument("--episode-indices-file", type=Path, default=None)
     parser.add_argument("--seed-start", type=int, default=10000)
     parser.add_argument("--max-steps", type=int, default=100)
     parser.add_argument("--replan-stride", type=int, default=None)
@@ -225,11 +244,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--avoid-margin", type=float, default=0.0)
     parser.add_argument("--avoid-weight", type=float, default=1.0)
     parser.add_argument("--avoid-tolerance", type=float, default=1e-6)
+    parser.add_argument(
+        "--avoid-shape",
+        choices=["sphere", "box", "cuboid", "cylinder"],
+        default="sphere",
+    )
+    parser.add_argument("--avoid-box-half-extents", type=float, nargs=3, default=None)
+    parser.add_argument("--avoid-cylinder-half-length", type=float, default=None)
+    parser.add_argument("--obstacle-yaw-deg", type=float, default=0.0)
+    parser.add_argument(
+        "--support-plane-z",
+        type=float,
+        default=None,
+        help=(
+            "Ground the obstacle on this world-z support plane while retaining the "
+            "nominal path point's x/y position. ManiSkill's tabletop is z=0."
+        ),
+    )
     parser.add_argument("--min-successes", type=int, default=15)
     parser.add_argument("--allow-too-few-successes", action="store_true")
     args = parser.parse_args(argv)
     if args.episodes <= 0:
         raise ValueError("--episodes must be positive")
+    if args.episode_indices is not None and args.episode_indices_file is not None:
+        raise ValueError(
+            "--episode-indices and --episode-indices-file are mutually exclusive"
+        )
     if args.max_steps <= 0:
         raise ValueError("--max-steps must be positive")
     if args.replan_stride is not None and args.replan_stride <= 0:
@@ -244,9 +284,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--avoid-margin must be non-negative")
     if args.avoid_tolerance < 0.0:
         raise ValueError("--avoid-tolerance must be non-negative")
+    if args.avoid_box_half_extents is not None and (
+        not np.all(np.isfinite(args.avoid_box_half_extents))
+        or np.any(np.asarray(args.avoid_box_half_extents) <= 0.0)
+    ):
+        raise ValueError("--avoid-box-half-extents must contain three positive values")
+    if (
+        args.avoid_cylinder_half_length is not None
+        and (
+            not np.isfinite(args.avoid_cylinder_half_length)
+            or args.avoid_cylinder_half_length <= 0.0
+        )
+    ):
+        raise ValueError("--avoid-cylinder-half-length must be positive")
+    if not np.isfinite(args.obstacle_yaw_deg):
+        raise ValueError("--obstacle-yaw-deg must be finite")
+    if args.support_plane_z is not None and not np.isfinite(args.support_plane_z):
+        raise ValueError("--support-plane-z must be finite")
     if args.min_successes < 0:
         raise ValueError("--min-successes must be non-negative")
     return args
+
+
+def _read_episode_indices_file(path: Path) -> list[int]:
+    indices: list[int] = []
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            value = int(line)
+        except ValueError as exc:
+            raise ValueError(f"{path}:{line_number} is not an integer episode index") from exc
+        if value < 0:
+            raise ValueError(f"{path}:{line_number} episode index must be non-negative")
+        indices.append(value)
+    if not indices:
+        raise ValueError(f"{path} does not contain any episode indices")
+    return indices
 
 
 def _rollout_base_episode(

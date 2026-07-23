@@ -113,6 +113,10 @@ def test_crop_point_cloud_reserves_obstacle_and_robot_quotas() -> None:
 
     assert int(cropped["robot_mask"].sum()) == 2
     assert int(cropped["obstacle_mask"].sum()) >= 3
+    assert cropped["obstacle_mask"][:3].tolist() == [True, True, True]
+    # Goal conditioning overwrites trailing point-cloud slots. The reserved
+    # obstacle prefix must therefore survive that later transformation.
+    assert int(cropped["obstacle_mask"][:-2].sum()) >= 3
     assert int(cropped["point_valid_mask"].sum()) == 8
 
 

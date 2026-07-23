@@ -5,6 +5,8 @@ import hashlib
 import json
 import math
 import os
+import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -1115,6 +1117,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.embody_obstacle and args.obstacle_family == "cabinet":
         args.avoid_shape = "box"
         args.avoid_box_half_extents = list(_CABINET_ENVELOPE_HALF_EXTENTS)
+    if args.embody_obstacle and args.obstacle_family == "carton":
+        args.avoid_shape = "box"
+        if args.avoid_box_half_extents is None:
+            args.avoid_box_half_extents = list(_CARTON_HALF_EXTENTS)
     if args.embody_obstacle and args.avoid_shape not in ("box", "cuboid", "cylinder"):
         raise ValueError(
             "--embody-obstacle currently requires a box or cylinder avoid shape"
@@ -1125,11 +1131,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         and args.avoid_shape == "cylinder"
     ):
         raise ValueError("--avoid-shape cylinder requires --obstacle-family cylinder")
-    if args.embody_obstacle and args.constraints_dir is not None:
-        raise ValueError(
-            "--embody-obstacle does not yet support --constraints-dir because actor "
-            "dimensions must be known when the environment is created"
-        )
     if args.embody_obstacle and len(args.avoid_path_fractions) != 1:
         raise ValueError("--embody-obstacle currently supports exactly one avoid region")
     if args.video and not args.rerun:
@@ -1138,12 +1139,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--obstacle-point-quota must be non-negative")
     if not np.isfinite(args.obstacle_yaw_deg):
         raise ValueError("--obstacle-yaw-deg must be finite")
-    if (
-        args.embody_obstacle
-        and args.obstacle_family == "carton"
-        and args.avoid_box_half_extents is None
-    ):
-        args.avoid_box_half_extents = list(_CARTON_HALF_EXTENTS)
     if args.episode_indices is not None and args.episode_indices_file is not None:
         raise ValueError("--episode-indices and --episode-indices-file are mutually exclusive")
     if args.episode_indices_file is not None and args.source != "dataset":
@@ -2474,7 +2469,15 @@ def _constraints_for_episode(
     if args.no_constraints:
         return []
     if args.constraints_dir is not None:
-        return load_episode_constraints(_precomputed_constraint_path(args.constraints_dir, spec))
+        constraints = load_episode_constraints(
+            _precomputed_constraint_path(args.constraints_dir, spec)
+        )
+        _validate_precomputed_constraints(
+            constraints,
+            env=env,
+            args=args,
+        )
+        return constraints
     if policy is None or adapter is None:
         raise ValueError("generated constraints require a policy and DP3 adapter")
     if args.constraint_placement == "candidate_midpath":
@@ -2513,6 +2516,29 @@ def _constraints_for_episode(
             env, spec=spec, crop_config=crop_config, zarr_context=zarr_context
         )
     return _finalize_constraints(constraints, robot_points=robot_points, args=args)
+
+
+def _validate_precomputed_constraints(
+    constraints: list[AvoidRegion],
+    *,
+    env: Any,
+    args: argparse.Namespace,
+) -> None:
+    """Validate that serialized constraints match the requested evaluation protocol."""
+    mismatched_targets = [
+        constraint.target
+        for constraint in constraints
+        if constraint.target != args.constraint_target
+    ]
+    if mismatched_targets:
+        raise ValueError(
+            "precomputed constraint targets do not match --constraint-target "
+            f"{args.constraint_target!r}: {mismatched_targets}"
+        )
+    if args.embody_obstacle:
+        if env is None:
+            raise ValueError("embodied precomputed constraints require a live environment")
+        _validate_embodied_obstacle_geometry(env, constraints)
 
 
 def _precomputed_constraint_path(constraints_dir: Path, spec: RolloutSpec) -> Path:
@@ -3807,12 +3833,12 @@ def _write_artifact_manifest(
         },
         "artifacts": artifacts,
     }
+    validate_artifact_manifest(manifest, rows=rows, inspect_content=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(_jsonable(manifest), indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    validate_artifact_manifest(manifest, rows=rows)
     return manifest
 
 
@@ -3837,6 +3863,7 @@ def validate_artifact_manifest(
     manifest: dict[str, Any],
     *,
     rows: list[dict[str, Any]],
+    inspect_content: bool = True,
 ) -> None:
     if manifest.get("schema_version") != "pg3d.artifact_manifest.v1":
         raise ValueError("unsupported artifact manifest schema")
@@ -3867,6 +3894,75 @@ def validate_artifact_manifest(
                 continue
             if len(str(record["sha256"])) != 64 or int(record["size_bytes"]) <= 0:
                 raise ValueError(f"invalid file record in {artifact['artifact_id']}")
+            actual = _artifact_file_record(Path(str(record["path"])))
+            if actual != record:
+                raise ValueError(
+                    f"artifact file changed after hashing in {artifact['artifact_id']}: "
+                    f"{record['path']}"
+                )
+        if inspect_content:
+            artifact["validation"] = {
+                "video": (
+                    _decode_video_artifact(Path(str(files["video"]["path"])))
+                    if files.get("video") is not None
+                    else None
+                ),
+                "rerun": (
+                    _open_rerun_artifact(Path(str(files["rerun"]["path"])))
+                    if files.get("rerun") is not None
+                    else None
+                ),
+            }
+
+
+def _decode_video_artifact(path: Path) -> dict[str, int | bool]:
+    """Decode every video frame so truncated/corrupt MP4s fail the run."""
+    import imageio.v2 as imageio
+
+    frame_count = 0
+    width: int | None = None
+    height: int | None = None
+    reader = imageio.get_reader(path)
+    try:
+        for frame in reader:
+            array = np.asarray(frame)
+            if array.ndim != 3 or array.shape[2] not in (3, 4):
+                raise ValueError(f"decoded video frame has invalid shape {array.shape}: {path}")
+            if width is None:
+                height, width = int(array.shape[0]), int(array.shape[1])
+            elif array.shape[:2] != (height, width):
+                raise ValueError(f"video frame dimensions changed while decoding: {path}")
+            frame_count += 1
+    finally:
+        reader.close()
+    if frame_count <= 0 or width is None or height is None:
+        raise ValueError(f"video contains no decodable frames: {path}")
+    return {
+        "decoded": True,
+        "frame_count": frame_count,
+        "width": width,
+        "height": height,
+    }
+
+
+def _open_rerun_artifact(path: Path) -> dict[str, bool]:
+    """Parse an RRD with Rerun's own CLI so unreadable recordings fail closed."""
+    sibling_cli = Path(sys.executable).with_name("rerun")
+    rerun_cli = str(sibling_cli) if sibling_cli.is_file() else shutil.which("rerun")
+    if rerun_cli is None:
+        raise ValueError("cannot validate RRD: the rerun CLI is unavailable")
+    result = subprocess.run(
+        [rerun_cli, "rrd", "print", str(path)],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else ""
+        raise ValueError(f"Rerun could not open {path}: {detail}")
+    return {"opened": True}
 
 
 def _selected_spec_summary(

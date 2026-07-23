@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from pg3d.constraints import AvoidRegion, BoxRegion
+from pg3d.constraints import AvoidRegion, BoxRegion, CylinderRegion
 from pg3d.envs.maniskill_adapter.dataset import PointCloudCropConfig
 from pg3d.eval import (
     AvoidOverlayConfig,
@@ -217,6 +217,37 @@ def test_nominal_path_avoid_region_validates_inputs() -> None:
         )
     with pytest.raises(ValueError, match=r"\[T, 3\]"):
         nominal_path_avoid_region([0.0, 0.0, 0.0])
+
+
+def test_nominal_path_avoid_region_supports_embodied_box_and_cylinder() -> None:
+    path = [[0.0, 0.0, 0.2], [0.2, 0.0, 0.2]]
+    box = nominal_path_avoid_region(
+        path,
+        config=NominalPathAvoidConfig(
+            shape="box",
+            box_half_extents=(0.04, 0.06, 0.08),
+            yaw=np.deg2rad(25.0),
+            support_plane_z=0.0,
+        ),
+    )
+    cylinder = nominal_path_avoid_region(
+        path,
+        config=NominalPathAvoidConfig(
+            radius=0.05,
+            shape="cylinder",
+            cylinder_half_length=0.12,
+            support_plane_z=0.0,
+        ),
+    )
+
+    assert isinstance(box.region, BoxRegion)
+    np.testing.assert_allclose(box.region.half_extents, [0.04, 0.06, 0.08])
+    assert box.region.center[2] == pytest.approx(0.08)
+    assert box.region.yaw == pytest.approx(np.deg2rad(25.0))
+    assert isinstance(cylinder.region, CylinderRegion)
+    assert cylinder.region.radius == pytest.approx(0.05)
+    assert cylinder.region.half_length == pytest.approx(0.12)
+    assert cylinder.region.center[2] == pytest.approx(0.12)
 
 
 def test_wilson_interval_bounds_known_center() -> None:
@@ -847,7 +878,18 @@ def test_video_requires_corresponding_rerun_output(tmp_path: Path) -> None:
         )
 
 
-def test_artifact_manifest_links_nonempty_files_to_metrics_row(tmp_path: Path) -> None:
+def test_artifact_manifest_links_nonempty_files_to_metrics_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "scripts.eval_constrained_reach._decode_video_artifact",
+        lambda _path: {"decoded": True, "frame_count": 1, "width": 1, "height": 1},
+    )
+    monkeypatch.setattr(
+        "scripts.eval_constrained_reach._open_rerun_artifact",
+        lambda _path: {"opened": True},
+    )
     video = tmp_path / "videos" / "base" / "episode_000.mp4"
     rerun = tmp_path / "rerun" / "base" / "episode_000.rrd"
     constraint = tmp_path / "constraints" / "episode_000.json"
@@ -891,6 +933,8 @@ def test_artifact_manifest_links_nonempty_files_to_metrics_row(tmp_path: Path) -
     assert artifact["paired_identity"]["constraint_id"] == "abc"
     assert artifact["files"]["video"] == _artifact_file_record(video)
     assert artifact["files"]["rerun"] == _artifact_file_record(rerun)
+    assert artifact["validation"]["video"]["decoded"] is True
+    assert artifact["validation"]["rerun"]["opened"] is True
 
 
 def test_artifact_manifest_rejects_video_without_rerun(tmp_path: Path) -> None:
@@ -1047,6 +1091,63 @@ def test_eval_episode_indices_file_and_precomputed_constraints(tmp_path: Path) -
     np.testing.assert_allclose(loaded[0].region.center, [0.1, 0.0, 0.2])
 
 
+def test_precomputed_box_constraint_can_drive_embodied_actor(tmp_path: Path) -> None:
+    constraints_dir = tmp_path / "constraints"
+    constraint = AvoidRegion(
+        region=BoxRegion(
+            center=[0.1, 0.0, 0.3],
+            half_extents=[0.04, 0.06, 0.08],
+            yaw=np.deg2rad(25.0),
+        ),
+        target="eef",
+    )
+    save_episode_constraints(constraints_dir / "episode_000.json", [constraint])
+    args = parse_eval_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "eval"),
+            "--constraints-dir",
+            str(constraints_dir),
+            "--embody-obstacle",
+            "--avoid-shape",
+            "box",
+            "--avoid-box-half-extents",
+            "0.04",
+            "0.06",
+            "0.08",
+        ]
+    )
+    env = SimpleNamespace(
+        unwrapped=SimpleNamespace(
+            pg3d_obstacle_half_extents=(0.04, 0.06, 0.08),
+            pg3d_obstacle_family="box",
+        )
+    )
+
+    loaded = _constraints_for_episode(
+        env,
+        spec=RolloutSpec(output_index=0, seed=1, source="dataset"),
+        crop_config=PointCloudCropConfig(num_points=4),
+        args=args,
+    )
+
+    assert isinstance(loaded[0].region, BoxRegion)
+    assert loaded[0].region.yaw == pytest.approx(np.deg2rad(25.0))
+
+    env.unwrapped.pg3d_obstacle_half_extents = (0.04, 0.06, 0.09)
+    with pytest.raises(ValueError, match="half-extents differ"):
+        _constraints_for_episode(
+            env,
+            spec=RolloutSpec(output_index=0, seed=1, source="dataset"),
+            crop_config=PointCloudCropConfig(num_points=4),
+            args=args,
+        )
+
+
 def test_eval_episode_indices_file_requires_dataset_source(tmp_path: Path) -> None:
     indices_path = tmp_path / "episode_indices.txt"
     indices_path.write_text("0\n", encoding="utf-8")
@@ -1082,8 +1183,45 @@ def test_nominal_path_constraint_builder_defaults(tmp_path: Path) -> None:
 
     assert args.episodes == 25
     assert args.avoid_radius == pytest.approx(0.03)
+    assert args.avoid_shape == "sphere"
     assert args.path_fraction == pytest.approx(0.5)
     assert args.min_successes == 15
+
+
+def test_nominal_path_constraint_builder_accepts_locked_box_protocol(
+    tmp_path: Path,
+) -> None:
+    indices_path = tmp_path / "episodes.txt"
+    indices_path.write_text("286\n297\n", encoding="utf-8")
+
+    args = parse_builder_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "constraints"),
+            "--episode-indices-file",
+            str(indices_path),
+            "--avoid-shape",
+            "box",
+            "--avoid-box-half-extents",
+            "0.04",
+            "0.06",
+            "0.08",
+            "--obstacle-yaw-deg",
+            "25",
+            "--support-plane-z",
+            "0",
+        ]
+    )
+
+    assert args.episode_indices_file == indices_path
+    assert args.avoid_shape == "box"
+    assert args.avoid_box_half_extents == pytest.approx([0.04, 0.06, 0.08])
+    assert args.obstacle_yaw_deg == pytest.approx(25.0)
+    assert args.support_plane_z == pytest.approx(0.0)
 
 
 def test_eval_constraint_overlay_flags_parse_and_validate(tmp_path: Path) -> None:
@@ -1271,14 +1409,13 @@ def test_carton_family_has_reproducible_default_geometry(tmp_path: Path) -> None
             str(tmp_path / "checkpoint.pt"),
             "--output-dir",
             str(tmp_path / "output"),
-            "--avoid-shape",
-            "box",
             "--embody-obstacle",
             "--obstacle-family",
             "carton",
         ]
     )
 
+    assert args.avoid_shape == "box"
     assert args.avoid_box_half_extents == pytest.approx([0.055, 0.08, 0.16])
     assert _embodied_obstacle_half_extents(args) == pytest.approx(
         (0.055, 0.08, 0.16)

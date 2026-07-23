@@ -41,3 +41,17 @@ rerun.
 - Fresh random avoid regions: broader coverage, but too noisy for the first post-P11 steering check.
 - Larger keep-out spheres: easier to visualize, but likely over-constrains reach and measures
   avoidance failure rather than small trajectory nudges.
+
+## 2026-07-23 E3 amendment
+
+The historical spherical protocol remains valid for the P11 diagnostic, but E3 uses
+the realistic-obstacle requirement added later. The pilot's fixed nominal-path
+instances are collidable tall cartons with half-extents `[0.055, 0.08, 0.16]` m and
+20-degree yaw. Their XY position comes from the 0.5 arc-length point of the successful
+nominal TCP path; their Z center is `0.16` m so the bottom face rests on ManiSkill's
+world-`z=0` tabletop. The serialized `BoxRegion` and control actor share this exact
+pose and geometry.
+
+This grounding rule is explicit rather than inferred from camera points. The 10 locked
+pilot episodes are used only for integration/tuning; the definitive 50-episode test
+partition remains untouched.

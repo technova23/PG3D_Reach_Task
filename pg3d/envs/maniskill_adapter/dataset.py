@@ -249,7 +249,13 @@ def _downsample_with_robot_and_obstacle_quotas(
     robot_point_fraction: float,
     obstacle_point_quota: int,
 ) -> Array:
-    """Reserve visible obstacle points without changing the fixed tensor size."""
+    """Reserve visible obstacle points without changing the fixed tensor size.
+
+    Keep the reserved obstacle samples at the front of the returned ordering.
+    Ordered goal conditioning overwrites the point tensor's trailing slots, so
+    sorting these indices back into camera order could silently erase most of
+    the quota before the tensor reaches DP3.
+    """
     obstacle_indices = indices[obstacle_mask[indices]]
     selected_obstacle = _linspace_select(
         obstacle_indices, min(obstacle_point_quota, obstacle_indices.size)
@@ -276,7 +282,7 @@ def _downsample_with_robot_and_obstacle_quotas(
         selected = np.concatenate(
             [selected, _linspace_select(remaining, num_points - selected.size)], axis=0
         )
-    return np.sort(selected.astype(np.int64, copy=False))
+    return selected.astype(np.int64, copy=False)
 
 
 def _linspace_select(values: Array, count: int) -> Array:

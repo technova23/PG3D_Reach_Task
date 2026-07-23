@@ -105,6 +105,11 @@ class NominalPathAvoidConfig:
     weight: float = 1.0
     tolerance: float = 1e-6
     name: str = "nominal_path_avoid_region"
+    shape: Literal["sphere", "box", "cuboid", "cylinder"] = "sphere"
+    box_half_extents: tuple[float, float, float] | None = None
+    yaw: float = 0.0
+    cylinder_half_length: float | None = None
+    support_plane_z: float | None = None
 
 
 @dataclass
@@ -280,7 +285,12 @@ def nominal_path_avoid_region(
     *,
     config: NominalPathAvoidConfig | None = None,
 ) -> AvoidRegion:
-    """Create a sphere centered at a fixed arc-length fraction of an executed TCP path."""
+    """Create an avoid region at a fixed arc-length fraction of an executed TCP path.
+
+    When ``support_plane_z`` is set, the path point supplies only the obstacle's
+    horizontal position and the primitive is translated vertically until its
+    bottom face touches that support plane.
+    """
     cfg = config or NominalPathAvoidConfig()
     if float(cfg.radius) <= 0.0:
         raise ValueError("nominal path avoid radius must be positive")
@@ -290,9 +300,51 @@ def nominal_path_avoid_region(
         raise ValueError("nominal path avoid margin must be non-negative")
     if float(cfg.tolerance) < 0.0:
         raise ValueError("nominal path avoid tolerance must be non-negative")
+    if not np.isfinite(float(cfg.yaw)):
+        raise ValueError("nominal path obstacle yaw must be finite")
+    if cfg.support_plane_z is not None and not np.isfinite(float(cfg.support_plane_z)):
+        raise ValueError("nominal path support plane z must be finite")
     center = _point_at_arc_fraction(tcp_positions, fraction=float(cfg.path_fraction))
+    if cfg.shape in ("box", "cuboid"):
+        half_extents = (
+            np.asarray(cfg.box_half_extents, dtype=np.float32)
+            if cfg.box_half_extents is not None
+            else np.full((3,), float(cfg.radius), dtype=np.float32)
+        )
+        if half_extents.shape != (3,) or not np.all(np.isfinite(half_extents)):
+            raise ValueError("box_half_extents must contain three finite values")
+        if np.any(half_extents <= 0.0):
+            raise ValueError("box_half_extents must be positive")
+        if cfg.support_plane_z is not None:
+            center[2] = float(cfg.support_plane_z) + float(half_extents[2])
+        region: SphereRegion | BoxRegion | CylinderRegion = BoxRegion(
+            center=center,
+            half_extents=half_extents,
+            yaw=float(cfg.yaw),
+        )
+    elif cfg.shape == "cylinder":
+        half_length = (
+            float(cfg.cylinder_half_length)
+            if cfg.cylinder_half_length is not None
+            else float(cfg.radius)
+        )
+        if not np.isfinite(half_length) or half_length <= 0.0:
+            raise ValueError("cylinder_half_length must be positive and finite")
+        if cfg.support_plane_z is not None:
+            center[2] = float(cfg.support_plane_z) + half_length
+        region = CylinderRegion(
+            center=center,
+            radius=float(cfg.radius),
+            half_length=half_length,
+        )
+    elif cfg.shape == "sphere":
+        if cfg.support_plane_z is not None:
+            center[2] = float(cfg.support_plane_z) + float(cfg.radius)
+        region = SphereRegion(center=center, radius=float(cfg.radius))
+    else:
+        raise ValueError(f"unsupported nominal path avoid shape {cfg.shape!r}")
     return AvoidRegion(
-        region=SphereRegion(center=center, radius=float(cfg.radius)),
+        region=region,
         margin=float(cfg.margin),
         weight=float(cfg.weight),
         tolerance=float(cfg.tolerance),

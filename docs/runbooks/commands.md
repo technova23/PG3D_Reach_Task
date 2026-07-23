@@ -741,6 +741,55 @@ Reserve `configs/eval/e3_test_episode_indices.txt` for the definitive run only. 
 not select checkpoints, obstacle parameters, or method hyperparameters using those 50
 episodes.
 
+Build the fixed nominal-base-success subset from the locked pilot pool using a
+tabletop-supported carton:
+
+```bash
+uv run python scripts/build_nominal_path_constraints.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --episode-indices-file configs/eval/e3_pilot_episode_indices.txt \
+  --output-dir artifacts/e3-pilot-carton-constraints-v1 \
+  --device cuda \
+  --max-steps 80 \
+  --post-success-steps 16 \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.055 0.08 0.16 \
+  --obstacle-yaw-deg 20 \
+  --support-plane-z 0 \
+  --min-successes 1
+```
+
+The builder writes a remapped `episode_indices.txt` beside the serialized constraints.
+Use both together so output episode `NNN` loads `constraints/episode_NNN.json`:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --methods base rejection reranking itps \
+  --source dataset \
+  --episode-indices-file artifacts/e3-pilot-carton-constraints-v1/episode_indices.txt \
+  --constraints-dir artifacts/e3-pilot-carton-constraints-v1/constraints \
+  --device cuda \
+  --avoid-shape box \
+  --embody-obstacle \
+  --obstacle-family carton \
+  --obstacle-yaw-deg 20 \
+  --obstacle-point-quota 32 \
+  --max-steps 80 \
+  --post-success-steps 16 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --output-dir artifacts/e3-pilot-carton-comparison-v1 \
+  --allow-failure
+```
+
+For large runs, replace `--artifact-selection all` with a predeclared deterministic
+subset. Manifest validation recomputes hashes, decodes every selected MP4 frame, and
+parses every matching `.rrd`; an unreadable pair fails the command.
+
 ### E2 embodied-box smoke
 
 Create the generated box constraint as a collidable actor in the actual control
