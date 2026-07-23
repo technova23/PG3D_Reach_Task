@@ -14,6 +14,7 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.pose import Pose
 
 from pg3d.envs.maniskill_adapter.reach_config import REACH_TASK_SPECS, ReachGoalRegion
+from pg3d.envs.obstacles import CABINET_COMPONENTS, transform_box_component
 
 
 class PG3DReachEnv(BaseEnv):
@@ -84,6 +85,7 @@ class PG3DReachEnv(BaseEnv):
             initial_pose=sapien.Pose(),
         )
         self.pg3d_obstacle = None
+        self.pg3d_obstacle_actors: list[Any] = []
         if self.pg3d_obstacle_half_extents is not None:
             half_extents = np.asarray(self.pg3d_obstacle_half_extents, dtype=np.float32)
             if half_extents.shape != (3,) or np.any(half_extents <= 0):
@@ -97,13 +99,30 @@ class PG3DReachEnv(BaseEnv):
                 "add_collision": True,
                 "initial_pose": sapien.Pose(p=[0.0, 0.0, -10.0]),
             }
-            if self.pg3d_obstacle_family == "cylinder":
+            if self.pg3d_obstacle_family == "cabinet":
+                for component in CABINET_COMPONENTS:
+                    actor = actors.build_box(
+                        half_sizes=list(component.half_extents),
+                        color=(
+                            [0.35, 0.22, 0.12, 1.0]
+                            if component.name != "open_door"
+                            else [0.48, 0.30, 0.15, 1.0]
+                        ),
+                        **{
+                            **common,
+                            "name": f"pg3d_obstacle_{component.name}",
+                        },
+                    )
+                    self.pg3d_obstacle_actors.append(actor)
+                self.pg3d_obstacle = self.pg3d_obstacle_actors[0]
+            elif self.pg3d_obstacle_family == "cylinder":
                 self.pg3d_obstacle = actors.build_cylinder(
                     radius=float(half_extents[0]),
                     half_length=float(half_extents[2]),
                     color=[0.25, 0.45, 0.72, 1.0],
                     **common,
                 )
+                self.pg3d_obstacle_actors = [self.pg3d_obstacle]
             else:
                 self.pg3d_obstacle = actors.build_box(
                     half_sizes=half_extents.tolist(),
@@ -114,6 +133,7 @@ class PG3DReachEnv(BaseEnv):
                     ),
                     **common,
                 )
+                self.pg3d_obstacle_actors = [self.pg3d_obstacle]
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict[str, Any]) -> None:
         with torch.device(self.device):
@@ -157,7 +177,36 @@ class PG3DReachEnv(BaseEnv):
                     obstacle_xyz = torch.as_tensor(
                         obstacle_center, dtype=torch.float32
                     ).reshape(1, 3).expand(batch_size, -1)
-                if self.pg3d_obstacle_family == "cylinder":
+                if self.pg3d_obstacle_family == "cabinet":
+                    root_center = obstacle_xyz[0].detach().cpu().numpy()
+                    root_yaw = float(options.get("pg3d_obstacle_yaw", 0.0))
+                    for actor, component in zip(
+                        self.pg3d_obstacle_actors, CABINET_COMPONENTS, strict=True
+                    ):
+                        component_center, component_yaw = transform_box_component(
+                            component,
+                            center=root_center,
+                            yaw=root_yaw,
+                        )
+                        component_xyz = torch.as_tensor(
+                            component_center, dtype=torch.float32
+                        ).reshape(1, 3).expand(batch_size, -1)
+                        component_quat = torch.tensor(
+                            [
+                                [
+                                    np.cos(0.5 * component_yaw),
+                                    0.0,
+                                    0.0,
+                                    np.sin(0.5 * component_yaw),
+                                ]
+                            ],
+                            dtype=torch.float32,
+                        ).expand(batch_size, -1)
+                        actor.set_pose(
+                            Pose.create_from_pq(component_xyz, component_quat)
+                        )
+                    obstacle_quat = None
+                elif self.pg3d_obstacle_family == "cylinder":
                     # ManiSkill's primitive is X-axis aligned; rotate +X onto +Z
                     # so it matches CylinderRegion's documented world-Z axis.
                     obstacle_quat = torch.tensor(
@@ -170,9 +219,10 @@ class PG3DReachEnv(BaseEnv):
                         [[np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)]],
                         dtype=torch.float32,
                     ).expand(batch_size, -1)
-                self.pg3d_obstacle.set_pose(
-                    Pose.create_from_pq(obstacle_xyz, obstacle_quat)
-                )
+                if obstacle_quat is not None:
+                    self.pg3d_obstacle.set_pose(
+                        Pose.create_from_pq(obstacle_xyz, obstacle_quat)
+                    )
 
     def _get_obs_extra(self, info: dict[str, Any]) -> dict[str, Any]:
         return {

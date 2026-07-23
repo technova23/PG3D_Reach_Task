@@ -103,6 +103,14 @@ def segmentation_context_from_env(env: Any) -> SegmentationContext:
         ids = _ids_from_actor(getattr(unwrapped, name, None))
         if ids:
             object_ids[name] = ids
+    obstacle_actors = getattr(unwrapped, "pg3d_obstacle_actors", ())
+    obstacle_ids = frozenset(
+        actor_id
+        for actor in obstacle_actors
+        for actor_id in _ids_from_actor(actor)
+    )
+    if obstacle_ids:
+        object_ids["pg3d_obstacle"] = obstacle_ids
     return SegmentationContext(robot_ids=frozenset(robot_ids), object_ids=object_ids)
 
 

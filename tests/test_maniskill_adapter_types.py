@@ -177,6 +177,15 @@ def test_segmentation_context_labels_embodied_obstacle() -> None:
     assert context.object_ids["pg3d_obstacle"] == frozenset({29})
 
 
+def test_segmentation_context_combines_composite_obstacle_actor_ids() -> None:
+    fake_env = _FakeEnv()
+    fake_env.unwrapped.pg3d_obstacle_actors = [_FakeActor(29), _FakeActor(30)]
+
+    context = segmentation_context_from_env(fake_env)
+
+    assert context.object_ids["pg3d_obstacle"] == frozenset({29, 30})
+
+
 class _FakeActor:
     def __init__(self, value: int) -> None:
         self.per_scene_id = np.asarray([value], dtype=np.int32)

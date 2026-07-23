@@ -810,6 +810,33 @@ The cylinder preset is vertical, with radius `0.055` m and half-length `0.12` m.
 These values are serialized as a `CylinderRegion` and consumed directly by NumPy and
 Torch signed-distance implementations.
 
+For the composite open cabinet:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00065000.pt \
+  --methods base \
+  --source dataset \
+  --episode-indices 0 \
+  --device cuda \
+  --embody-obstacle \
+  --obstacle-family cabinet \
+  --obstacle-yaw-deg 10 \
+  --obstacle-point-quota 64 \
+  --max-steps 1 \
+  --post-success-steps 0 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --output-dir artifacts/e2-cabinet-smoke \
+  --allow-failure
+```
+
+The cabinet serializes seven `BoxRegion` primitives: left/right sides, top, bottom,
+back, shelf, and a 70-degree open door. The 64-point quota applies to their combined
+segmentation mask.
+
 Longer multi-chunk planning smoke:
 
 ```bash

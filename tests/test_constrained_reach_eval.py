@@ -59,6 +59,7 @@ from scripts.eval_constrained_reach import (
     _episode_policy_seed,
     _episode_should_stop,
     _episode_step_limit,
+    _finalize_constraints,
     _local_path_points_xy,
     _obs_windows_to_torch,
     _point_at_arc_fraction_xy,
@@ -956,6 +957,47 @@ def test_cylinder_family_has_reproducible_default_geometry(tmp_path: Path) -> No
     assert _embodied_obstacle_half_extents(args) == pytest.approx(
         (0.055, 0.055, 0.12)
     )
+
+
+def test_cabinet_family_expands_root_into_component_constraints(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint.pt"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--embody-obstacle",
+            "--obstacle-family",
+            "cabinet",
+            "--obstacle-yaw-deg",
+            "15",
+        ]
+    )
+    root = AvoidRegion(
+        region=BoxRegion(center=[0.1, -0.2, 0.4], half_extents=[0.08, 0.085, 0.2]),
+        name="root",
+    )
+
+    constraints = _finalize_constraints([root], robot_points=None, args=args)
+    reset = _embodied_obstacle_reset_options(constraints)
+
+    assert len(constraints) == 7
+    assert {constraint.name for constraint in constraints} == {
+        f"root/cabinet_{name}"
+        for name in (
+            "left_side",
+            "right_side",
+            "top",
+            "bottom",
+            "back",
+            "shelf",
+            "open_door",
+        )
+    }
+    assert reset["pg3d_obstacle_center"] == pytest.approx([0.1, -0.2, 0.4])
+    assert reset["pg3d_obstacle_yaw"] == pytest.approx(np.deg2rad(15))
 
 
 def test_policy_obstacle_count_excludes_goal_marker_slots() -> None:

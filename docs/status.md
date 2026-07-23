@@ -89,6 +89,10 @@ The curved-object family now uses a finite vertical cylinder with matched collid
 serialized, NumPy, Torch, and Rerun geometry. Visual inspection caught and corrected
 ManiSkill's native X-axis cylinder orientation. The corrected smoke observed 218 raw
 points and retained 36 in the final policy input.
+The composite cabinet family now creates seven collidable actors and the same seven
+serialized `BoxRegion` primitives for its sides, top/bottom, back, shelf, and open
+door. Its smoke observed 768 raw points and retained 92 in the final policy input;
+the decoded MP4 clearly shows the open structure.
 
 ## Current phase
 
@@ -165,8 +169,8 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Implement the composite cabinet actor/constraint family and validate
-   simulator-contact versus signed-clearance agreement for every E2 family.
+3. Validate simulator-contact versus signed-clearance agreement for every E2 family,
+   then close the obstacle-embodiment gate.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 

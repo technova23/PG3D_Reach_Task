@@ -276,9 +276,12 @@ predeclared half-extents `[0.055, 0.08, 0.16]`; its 20-degree smoke retained 46 
 obstacle points and logs obstacle ID, family, pose, and exact collision geometry. The
 curved family is a true finite `CylinderRegion`, not a box proxy: NumPy metrics, Torch
 guidance, Rerun wireframes, and the collidable actor use the same radius and
-half-length. Its corrected vertical-cylinder smoke retained 36 final points. E2 is not
-complete: implement the composite cabinet family and validate simulator
-contact-versus-clearance agreement.
+half-length. Its corrected vertical-cylinder smoke retained 36 final points. The
+cabinet family is a composite rather than a solid proxy: two sides, top, bottom, back,
+shelf, and a 70-degree open door are represented by seven matching actor/constraint
+box primitives. Its smoke retained 92 final obstacle points and wrote the matched
+MP4/`.rrd` pair. All planned visual families now exist; E2 still requires
+simulator-contact-versus-clearance agreement checks before completion.
 
 ### E3 — Primary constrained-reach comparison
 

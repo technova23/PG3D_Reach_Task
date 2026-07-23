@@ -47,6 +47,7 @@ from pg3d.envs.maniskill_adapter.dataset import (
     PointCloudCropConfig,
     load_reach_metadata,
 )
+from pg3d.envs.obstacles import CABINET_COMPONENTS, transform_box_component
 from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.eval import (
     AvoidOverlayConfig,
@@ -113,6 +114,7 @@ GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
 _CARTON_HALF_EXTENTS = (0.055, 0.08, 0.16)
 _CYLINDER_DIMENSIONS = (0.055, 0.055, 0.12)
+_CABINET_ENVELOPE_HALF_EXTENTS = (0.08, 0.085, 0.20)
 
 
 @dataclass(frozen=True)
@@ -841,12 +843,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--obstacle-family",
-        choices=["box", "carton", "cylinder"],
+        choices=["box", "carton", "cylinder", "cabinet"],
         default="box",
         help=(
             "Named embodied-obstacle family. Carton defaults to half-extents "
             f"{_CARTON_HALF_EXTENTS}; cylinder uses radius/half-length encoded as "
-            f"{_CYLINDER_DIMENSIONS}. Explicit --avoid-box-half-extents overrides."
+            f"{_CYLINDER_DIMENSIONS}; cabinet uses a composite open structure. "
+            "Explicit --avoid-box-half-extents overrides box/carton only."
         ),
     )
     parser.add_argument("--gripper-open", type=float, default=0.04)
@@ -914,6 +917,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.avoid_shape = "cylinder"
         if args.avoid_box_half_extents is None:
             args.avoid_box_half_extents = list(_CYLINDER_DIMENSIONS)
+    if args.embody_obstacle and args.obstacle_family == "cabinet":
+        args.avoid_shape = "box"
+        args.avoid_box_half_extents = list(_CABINET_ENVELOPE_HALF_EXTENTS)
     if args.embody_obstacle and args.avoid_shape not in ("box", "cuboid", "cylinder"):
         raise ValueError(
             "--embody-obstacle currently requires a box or cylinder avoid shape"
@@ -1373,6 +1379,7 @@ def run_eval_episode(
     )
     if embody_obstacle:
         goal_marker_points = int(getattr(policy, "goal_marker_points", 0))
+        obstacle_reset = _embodied_obstacle_reset_options(constraints)
         raw_counts = [int(entry.get("obstacle_points_raw", 0)) for entry in timeline]
         cropped_counts = [
             int(entry.get("obstacle_points_cropped", 0)) for entry in timeline
@@ -1386,14 +1393,12 @@ def run_eval_episode(
                 "obstacle_id": f"{obstacle_family}:episode_{spec.output_index:03d}",
                 "obstacle_family": obstacle_family,
                 "obstacle_pose": {
-                    "center": constraints[0].region.center.astype(float).tolist(),
-                    "yaw": (
-                        float(constraints[0].region.yaw)
-                        if isinstance(constraints[0].region, BoxRegion)
-                        else 0.0
-                    ),
+                    "center": obstacle_reset["pg3d_obstacle_center"],
+                    "yaw": obstacle_reset["pg3d_obstacle_yaw"],
                 },
-                "obstacle_collision_geometry": constraints[0].region.to_json(),
+                "obstacle_collision_geometry": [
+                    constraint.region.to_json() for constraint in constraints
+                ],
                 "obstacle_points_raw": min(raw_counts, default=0),
                 "obstacle_points_cropped": min(cropped_counts, default=0),
                 "obstacle_points_policy_input": min(policy_counts, default=0),
@@ -2102,6 +2107,30 @@ def _finalize_constraints(
                 name=constraint.name,
             )
         finalized.append(replace(constraint, region=region, target=args.constraint_target))
+    if args.embody_obstacle and args.obstacle_family == "cabinet":
+        if len(finalized) != 1 or not isinstance(finalized[0].region, BoxRegion):
+            raise ValueError("cabinet family requires one root BoxRegion before expansion")
+        root = finalized[0]
+        root_region = root.region
+        return [
+            replace(
+                root,
+                name=f"{root.name}/cabinet_{component.name}",
+                region=BoxRegion(
+                    center=component_center,
+                    half_extents=component.half_extents,
+                    yaw=component_yaw,
+                ),
+            )
+            for component in CABINET_COMPONENTS
+            for component_center, component_yaw in [
+                transform_box_component(
+                    component,
+                    center=root_region.center,
+                    yaw=root_region.yaw,
+                )
+            ]
+        ]
     return finalized
 
 
@@ -3123,6 +3152,20 @@ def _embodied_obstacle_half_extents(
 def _embodied_obstacle_reset_options(
     constraints: list[AvoidRegion],
 ) -> dict[str, list[float] | float]:
+    cabinet_shelf = next(
+        (
+            constraint
+            for constraint in constraints
+            if constraint.name.endswith("/cabinet_shelf")
+            and isinstance(constraint.region, BoxRegion)
+        ),
+        None,
+    )
+    if cabinet_shelf is not None:
+        return {
+            "pg3d_obstacle_center": cabinet_shelf.region.center.astype(float).tolist(),
+            "pg3d_obstacle_yaw": float(cabinet_shelf.region.yaw),
+        }
     if len(constraints) != 1 or not isinstance(
         constraints[0].region, (BoxRegion, CylinderRegion)
     ):
@@ -3144,12 +3187,38 @@ def _validate_embodied_obstacle_geometry(
     env: Any,
     constraints: list[AvoidRegion],
 ) -> None:
-    _embodied_obstacle_reset_options(constraints)
-    configured = getattr(
-        getattr(env, "unwrapped", env), "pg3d_obstacle_half_extents", None
-    )
+    reset_options = _embodied_obstacle_reset_options(constraints)
+    unwrapped = getattr(env, "unwrapped", env)
+    configured = getattr(unwrapped, "pg3d_obstacle_half_extents", None)
     if configured is None:
         raise ValueError("control environment has no configured pg3d obstacle actor")
+    if getattr(unwrapped, "pg3d_obstacle_family", None) == "cabinet":
+        root_center = np.asarray(reset_options["pg3d_obstacle_center"], dtype=np.float32)
+        root_yaw = float(reset_options["pg3d_obstacle_yaw"])
+        expected_regions = []
+        for component in CABINET_COMPONENTS:
+            center, yaw = transform_box_component(
+                component, center=root_center, yaw=root_yaw
+            )
+            expected_regions.append(
+                BoxRegion(
+                    center=center,
+                    half_extents=component.half_extents,
+                    yaw=yaw,
+                )
+            )
+        actual_regions = [constraint.region for constraint in constraints]
+        if len(actual_regions) != len(expected_regions) or any(
+            not isinstance(actual, BoxRegion)
+            or not np.allclose(actual.center, expected.center, atol=1e-7, rtol=0.0)
+            or not np.allclose(
+                actual.half_extents, expected.half_extents, atol=1e-7, rtol=0.0
+            )
+            or not np.isclose(actual.yaw, expected.yaw, atol=1e-7, rtol=0.0)
+            for actual, expected in zip(actual_regions, expected_regions, strict=False)
+        ):
+            raise ValueError("cabinet actor components and serialized constraints differ")
+        return
     region = constraints[0].region
     expected = (
         np.asarray(region.half_extents, dtype=np.float32)
