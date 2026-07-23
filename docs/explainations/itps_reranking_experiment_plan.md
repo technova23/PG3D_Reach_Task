@@ -280,8 +280,10 @@ half-length. Its corrected vertical-cylinder smoke retained 36 final points. The
 cabinet family is a composite rather than a solid proxy: two sides, top, bottom, back,
 shelf, and a 70-degree open door are represented by seven matching actor/constraint
 box primitives. Its smoke retained 92 final obstacle points and wrote the matched
-MP4/`.rrd` pair. All planned visual families now exist; E2 still requires
-simulator-contact-versus-clearance agreement checks before completion.
+MP4/`.rrd` pair. All planned visual families now exist. The final collision validator
+ran intersecting and separated PhysX probe cases for box, carton, cylinder, and
+cabinet; all eight simulator-contact decisions agreed with serialized signed
+clearance. E2's obstacle embodiment and observation gate is therefore complete.
 
 ### E3 — Primary constrained-reach comparison
 

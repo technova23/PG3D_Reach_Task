@@ -837,6 +837,19 @@ The cabinet serializes seven `BoxRegion` primitives: left/right sides, top, bott
 back, shelf, and a 70-degree open door. The 64-point quota applies to their combined
 segmentation mask.
 
+Validate that simulator collision geometry agrees with serialized signed clearance
+for intersecting and separated probes across every family:
+
+```bash
+uv run python scripts/validate_obstacle_collision_geometry.py \
+  --output artifacts/e2-obstacle-collision-validation/results.json
+```
+
+The command exits nonzero if any PhysX contact decision differs from the corresponding
+signed-clearance classification. It uses raw contact pairs for the boolean decision;
+contact-force magnitude is retained only as a diagnostic because a valid resting
+contact can have nearly zero instantaneous force.
+
 Longer multi-chunk planning smoke:
 
 ```bash

@@ -35,6 +35,7 @@ class PG3DReachEnv(BaseEnv):
         robot_init_qpos_noise: float = 0.0,
         pg3d_obstacle_half_extents: tuple[float, float, float] | None = None,
         pg3d_obstacle_family: str = "box",
+        pg3d_collision_probe_radius: float | None = None,
         **kwargs: Any,
     ) -> None:
         self.goal_center = goal_center
@@ -45,6 +46,7 @@ class PG3DReachEnv(BaseEnv):
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.pg3d_obstacle_half_extents = pg3d_obstacle_half_extents
         self.pg3d_obstacle_family = str(pg3d_obstacle_family)
+        self.pg3d_collision_probe_radius = pg3d_collision_probe_radius
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     @property
@@ -134,6 +136,17 @@ class PG3DReachEnv(BaseEnv):
                     **common,
                 )
                 self.pg3d_obstacle_actors = [self.pg3d_obstacle]
+        self.pg3d_collision_probe = None
+        if self.pg3d_collision_probe_radius is not None:
+            self.pg3d_collision_probe = actors.build_sphere(
+                self.scene,
+                radius=float(self.pg3d_collision_probe_radius),
+                color=[1.0, 0.0, 1.0, 1.0],
+                name="pg3d_collision_probe",
+                body_type="dynamic",
+                add_collision=True,
+                initial_pose=sapien.Pose(p=[0.0, 0.0, -10.0]),
+            )
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict[str, Any]) -> None:
         with torch.device(self.device):
@@ -223,6 +236,17 @@ class PG3DReachEnv(BaseEnv):
                     self.pg3d_obstacle.set_pose(
                         Pose.create_from_pq(obstacle_xyz, obstacle_quat)
                     )
+            if self.pg3d_collision_probe is not None:
+                probe_center = options.get(
+                    "pg3d_collision_probe_center", [0.0, 0.0, -10.0]
+                )
+                probe_xyz = torch.as_tensor(
+                    probe_center, dtype=torch.float32
+                ).reshape(1, 3).expand(batch_size, -1)
+                self.pg3d_collision_probe.set_pose(Pose.create_from_pq(probe_xyz))
+                zero = torch.zeros((batch_size, 3), dtype=torch.float32)
+                self.pg3d_collision_probe.set_linear_velocity(zero)
+                self.pg3d_collision_probe.set_angular_velocity(zero)
 
     def _get_obs_extra(self, info: dict[str, Any]) -> dict[str, Any]:
         return {

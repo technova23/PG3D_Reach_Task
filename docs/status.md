@@ -93,6 +93,10 @@ The composite cabinet family now creates seven collidable actors and the same se
 serialized `BoxRegion` primitives for its sides, top/bottom, back, shelf, and open
 door. Its smoke observed 768 raw points and retained 92 in the final policy input;
 the decoded MP4 clearly shows the open structure.
+E2 is complete: an eight-case collision probe covering intersecting and separated
+placements for box, carton, cylinder, and cabinet produced zero disagreements between
+raw PhysX contacts and serialized signed clearance. Every family has also passed the
+camera-to-crop-to-policy point-count gate with a decoded MP4 and matching `.rrd`.
 
 ## Current phase
 
@@ -169,8 +173,8 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Validate simulator-contact versus signed-clearance agreement for every E2 family,
-   then close the obstacle-embodiment gate.
+3. Add `artifact_manifest.json` and enrich Rerun timelines with the complete semantic
+   overlays required by the experiment plan.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 
