@@ -605,6 +605,7 @@ def main(argv: list[str] | None = None) -> int:
                         zarr_context=zarr_context,
                         embody_obstacle=args.embody_obstacle,
                         obstacle_family=args.obstacle_family,
+                        terminate_on_obstacle_contact=args.terminate_on_obstacle_contact,
                         directional_sign=_steer_sign(args.steer),
                         directional_weight=args.steer_weight,
                         itps_config=itps_config,
@@ -1072,6 +1073,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "direct-path placement, height is resolved from the selected path point."
         ),
     )
+    parser.add_argument(
+        "--terminate-on-obstacle-contact",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "End an embodied-obstacle episode immediately when a robot link has a "
+            "PhysX contact pair with the obstacle (default: enabled)."
+        ),
+    )
     parser.add_argument("--gripper-open", type=float, default=0.04)
     parser.add_argument(
         "--match-current-robot-points",
@@ -1316,6 +1326,7 @@ def run_eval_episode(
     directional_weight: float = 1.0,
     embody_obstacle: bool = False,
     obstacle_family: str = "box",
+    terminate_on_obstacle_contact: bool = True,
 ) -> dict[str, Any]:
     if embody_obstacle:
         _validate_embodied_obstacle_geometry(sim_env, constraints)
@@ -1393,6 +1404,9 @@ def run_eval_episode(
     replan_start_action_indices: list[int] = []
     compute_counts = ComputeOperationCounts()
     terminated_or_truncated = False
+    physical_collision = False
+    physical_collision_step: int | None = None
+    physical_collision_pairs: list[list[str]] = []
     was_training = policy.training
     policy.eval()
     compute_counts.start_denoiser_tracking(policy.model)
@@ -1546,7 +1560,16 @@ def run_eval_episode(
                     first_success_step = steps
                 elif first_success_step is not None:
                     observed_post_success_steps += 1
-                terminated_or_truncated = _episode_should_stop(
+                contact_pairs = (
+                    _robot_obstacle_contact_pairs(sim_env)
+                    if embody_obstacle and terminate_on_obstacle_contact
+                    else []
+                )
+                if contact_pairs and physical_collision_step is None:
+                    physical_collision = True
+                    physical_collision_step = steps
+                    physical_collision_pairs = contact_pairs
+                terminated_or_truncated = physical_collision or _episode_should_stop(
                     terminated=terminated,
                     truncated=truncated,
                     success=success,
@@ -1650,6 +1673,26 @@ def run_eval_episode(
         replan_start_action_indices=replan_start_action_indices,
     )
     row.update(compute_counts.to_metric_row(replans=replans))
+    row.update(
+        {
+            "physical_collision": physical_collision,
+            "physical_collision_step": physical_collision_step,
+            "physical_collision_pairs": physical_collision_pairs,
+            "termination_reason": _termination_reason(
+                physical_collision=physical_collision,
+                terminated_or_truncated=terminated_or_truncated,
+                first_success_step=first_success_step,
+                observed_post_success_steps=observed_post_success_steps,
+                post_success_steps=post_success_steps,
+                steps=steps,
+                max_steps=max_steps,
+            ),
+        }
+    )
+    if physical_collision:
+        row["constraint_satisfied"] = False
+        row["combined_success"] = False
+        row["stable_combined_success"] = False
     if rerun_path is not None:
         row.update(
             {
@@ -1710,6 +1753,59 @@ def _episode_should_stop(*, terminated: Any, truncated: Any, success: bool) -> b
     if _bool_any(truncated):
         return True
     return bool(_bool_any(terminated) and not success)
+
+
+def _contact_body_name(body: Any) -> str:
+    name = getattr(body, "name", None)
+    if name is None and hasattr(body, "get_name"):
+        name = body.get_name()
+    return str(name or "")
+
+
+def _robot_obstacle_contact_pairs(env: Any) -> list[list[str]]:
+    """Return PhysX contact pairs between robot links and embodied obstacles."""
+    unwrapped = getattr(env, "unwrapped", env)
+    scene = getattr(unwrapped, "scene", None)
+    agent = getattr(unwrapped, "agent", None)
+    robot = getattr(agent, "robot", None)
+    links = getattr(robot, "links", None)
+    if links is None and robot is not None and hasattr(robot, "get_links"):
+        links = robot.get_links()
+    robot_names = {_contact_body_name(link) for link in (links or [])}
+    robot_names.discard("")
+    if scene is None or not hasattr(scene, "get_contacts") or not robot_names:
+        return []
+    pairs: list[list[str]] = []
+    for contact in scene.get_contacts():
+        names = {_contact_body_name(body) for body in contact.bodies}
+        names.discard("")
+        obstacle_names = {name for name in names if "pg3d_obstacle" in name}
+        contacted_robot = names & robot_names
+        for robot_name in sorted(contacted_robot):
+            for obstacle_name in sorted(obstacle_names):
+                pairs.append([robot_name, obstacle_name])
+    return pairs
+
+
+def _termination_reason(
+    *,
+    physical_collision: bool,
+    terminated_or_truncated: bool,
+    first_success_step: int | None,
+    observed_post_success_steps: int,
+    post_success_steps: int,
+    steps: int,
+    max_steps: int,
+) -> str:
+    if physical_collision:
+        return "physical_obstacle_collision"
+    if first_success_step is not None and observed_post_success_steps >= post_success_steps:
+        return "stable_success"
+    if terminated_or_truncated:
+        return "simulator_termination"
+    if steps >= max_steps:
+        return "task_horizon"
+    return "stopped"
 
 
 def _episode_step_limit(

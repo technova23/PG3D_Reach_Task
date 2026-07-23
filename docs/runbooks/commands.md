@@ -813,6 +813,13 @@ uv run python scripts/eval_constrained_reach.py \
   --allow-failure
 ```
 
+With `--embody-obstacle`, this command terminates by default on the first raw PhysX
+contact between any robot link and an embodied-obstacle actor. The contact frame is
+saved, and the episode row records the collision step/body pairs and forces
+constraint/combined success to false. Use `--no-terminate-on-obstacle-contact` only
+for a deliberate non-terminal-contact ablation; otherwise later motion would
+contaminate trajectory and clearance metrics.
+
 For large runs, replace `--artifact-selection all` with a predeclared deterministic
 subset. Manifest validation recomputes hashes, decodes every selected MP4 frame, and
 parses every matching `.rrd`; an unreadable pair fails the command.

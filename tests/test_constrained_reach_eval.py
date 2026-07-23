@@ -77,8 +77,10 @@ from scripts.eval_constrained_reach import (
     _policy_obstacle_point_count,
     _read_episode_indices_file,
     _resolve_grounded_embodied_obstacle_height,
+    _robot_obstacle_contact_pairs,
     _seed_torch,
     _select_decision,
+    _termination_reason,
     _validate_embodied_obstacle_geometry,
     _write_artifact_manifest,
     validate_artifact_manifest,
@@ -87,6 +89,53 @@ from scripts.eval_constrained_reach import (
     parse_args as parse_eval_args,
 )
 from scripts.rollout_dp3_reach_policy import RolloutSpec
+
+
+def test_robot_obstacle_contact_pairs_filters_non_robot_contacts() -> None:
+    robot_link = SimpleNamespace(name="panda_link7")
+    obstacle = SimpleNamespace(name="pg3d_obstacle")
+    table = SimpleNamespace(name="table")
+    scene = SimpleNamespace(
+        get_contacts=lambda: [
+            SimpleNamespace(bodies=[robot_link, obstacle]),
+            SimpleNamespace(bodies=[table, obstacle]),
+        ]
+    )
+    env = SimpleNamespace(
+        unwrapped=SimpleNamespace(
+            scene=scene,
+            agent=SimpleNamespace(robot=SimpleNamespace(links=[robot_link])),
+        )
+    )
+
+    assert _robot_obstacle_contact_pairs(env) == [["panda_link7", "pg3d_obstacle"]]
+
+
+def test_termination_reason_prioritizes_physical_collision() -> None:
+    assert (
+        _termination_reason(
+            physical_collision=True,
+            terminated_or_truncated=True,
+            first_success_step=100,
+            observed_post_success_steps=16,
+            post_success_steps=16,
+            steps=150,
+            max_steps=150,
+        )
+        == "physical_obstacle_collision"
+    )
+    assert (
+        _termination_reason(
+            physical_collision=False,
+            terminated_or_truncated=False,
+            first_success_step=None,
+            observed_post_success_steps=0,
+            post_success_steps=16,
+            steps=150,
+            max_steps=150,
+        )
+        == "task_horizon"
+    )
 
 
 def test_point_at_arc_fraction_xy_ignores_vertical_lift() -> None:
@@ -1420,7 +1469,24 @@ def test_carton_family_has_reproducible_default_geometry(tmp_path: Path) -> None
 
     assert args.avoid_shape == "box"
     assert args.avoid_box_half_extents == pytest.approx([0.055, 0.08, 0.16])
+    assert args.terminate_on_obstacle_contact
     assert _embodied_obstacle_half_extents(args) == pytest.approx((0.055, 0.08, 0.16))
+
+
+def test_physical_contact_termination_can_be_disabled_for_ablation(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint.pt"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--no-terminate-on-obstacle-contact",
+        ]
+    )
+
+    assert not args.terminate_on_obstacle_contact
 
 
 def test_cylinder_family_has_reproducible_default_geometry(tmp_path: Path) -> None:

@@ -20,8 +20,8 @@
         },
         "rerun": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cabinet/rerun/base/episode_000.rrd",
-          "sha256": "c9d79861e74283c71c436d29ad957a3d09964d0e9114dbbf3333de0a51c91c47",
-          "size_bytes": 1724487
+          "sha256": "afe70fe392b1928bbb7e22bd3269877f4e645e8be50f2caa999210e57aaeceec",
+          "size_bytes": 1724574
         },
         "video": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cabinet/videos/base/episode_000.mp4",
@@ -171,7 +171,7 @@
   "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
   "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
   "git": {
-    "commit": "68a2a5b0591dfb8b79af82e1fc545c89f0d7fa1c",
+    "commit": "b6ae1d6efeaf78b6d52013abae97f7fe029dc84c",
     "dirty": true
   },
   "rerun_writer_version": "0.35.0",

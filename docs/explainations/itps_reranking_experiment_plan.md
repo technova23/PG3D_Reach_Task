@@ -354,6 +354,15 @@ never reaches receives all 150 task steps. This horizon was locked from pilot-si
 qualitative evidence before definitive-test evaluation: several grounded-obstacle
 rollouts first reached after step 80.
 
+Physical robot-obstacle contact is an immediate terminal failure. After every
+simulator step, evaluation inspects the raw PhysX contact pairs for any robot link
+and embodied-obstacle actor. The first-contact frame is retained in the MP4/Rerun
+timeline, but no later motion contributes to clearance, path, or smoothness metrics.
+Metrics record `physical_collision`, `physical_collision_step`, the contacting body
+pairs, and `termination_reason=physical_obstacle_collision`; constraint and combined
+success are forced false. `--no-terminate-on-obstacle-contact` exists only for an
+explicit ablation.
+
 E3 pilot integration now uses a fixed, physically supported realistic obstacle
 protocol: a collidable tall carton with half-extents `[0.055, 0.08, 0.16]` m, 20-degree
 yaw, and its bottom face on the ManiSkill tabletop (`z=0`). For each nominal-base-success

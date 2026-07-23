@@ -145,6 +145,12 @@ four-family suites span `z=0` to `z=0.4431` for the selected path point at
 Future constrained evaluation now defaults to a 150-step task horizon instead of 80.
 The stable-success hold remains separate, so successes stop after the configured
 hold while failures receive all 150 task steps.
+Embodied-obstacle evaluation now also stops immediately after the first raw PhysX
+contact between a robot link and an obstacle actor. The first-contact frame is kept,
+collision metadata and a dedicated termination reason are logged, and constraint
+plus combined success are forced false so post-impact motion cannot distort safety
+or trajectory metrics. The four reference obstacle videos were regenerated under
+this rule; none produced a physical contact.
 Whole-robot safety is no longer flattened across time: enabling the metric retains one
 robot cloud per executed timestep and reports primary violation duration, fraction,
 integral, and event count. Executed joint targets now also report overall and
