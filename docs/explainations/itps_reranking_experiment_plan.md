@@ -271,9 +271,11 @@ after cropping and all 36 in the final DP3 tensor after goal-marker insertion wi
 requested minimum of 32. Rotated boxes are also implemented: yaw is serialized in the
 `BoxRegion` and shared by NumPy execution metrics, differentiable ITPS energy, Rerun
 wireframes, and the collidable actor. A 35-degree smoke retained 36 final obstacle
-points and produced its MP4/`.rrd` pair. E2 is not complete: implement carton,
-cabinet, and cylinder families and validate each with the same count-and-artifact
-protocol.
+points and produced its MP4/`.rrd` pair. A named tall-carton family now supplies
+predeclared half-extents `[0.055, 0.08, 0.16]`; its 20-degree smoke retained 46 final
+obstacle points and logs obstacle ID, family, pose, and exact collision geometry. E2
+is not complete: implement cabinet and cylinder families and validate each with the
+same count-and-artifact protocol.
 
 ### E3 — Primary constrained-reach comparison
 

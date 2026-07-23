@@ -757,6 +757,33 @@ Set `--obstacle-yaw-deg 0` for the axis-aligned case. The 35-degree variant abov
 serializes the yaw in `BoxRegion`; the control actor, NumPy/Torch signed-distance
 implementations, and Rerun wireframe consume the same value.
 
+For the predeclared tall-carton family, omit custom half-extents and use:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00065000.pt \
+  --methods base \
+  --source dataset \
+  --episode-indices 0 \
+  --device cuda \
+  --avoid-shape box \
+  --embody-obstacle \
+  --obstacle-family carton \
+  --obstacle-yaw-deg 20 \
+  --obstacle-point-quota 32 \
+  --max-steps 1 \
+  --post-success-steps 0 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --output-dir artifacts/e2-carton-smoke \
+  --allow-failure
+```
+
+The carton preset uses half-extents `[0.055, 0.08, 0.16]` metres. Explicit
+`--avoid-box-half-extents` values override the preset.
+
 Longer multi-chunk planning smoke:
 
 ```bash

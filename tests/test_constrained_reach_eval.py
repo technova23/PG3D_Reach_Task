@@ -914,6 +914,29 @@ def test_embodied_obstacle_rejects_unsupported_geometry(tmp_path: Path) -> None:
         )
 
 
+def test_carton_family_has_reproducible_default_geometry(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint.pt"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--avoid-shape",
+            "box",
+            "--embody-obstacle",
+            "--obstacle-family",
+            "carton",
+        ]
+    )
+
+    assert args.avoid_box_half_extents == pytest.approx([0.055, 0.08, 0.16])
+    assert _embodied_obstacle_half_extents(args) == pytest.approx(
+        (0.055, 0.08, 0.16)
+    )
+
+
 def test_policy_obstacle_count_excludes_goal_marker_slots() -> None:
     entry = {
         "obstacle_mask": np.asarray([True, False, True, True, True], dtype=bool)

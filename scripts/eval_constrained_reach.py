@@ -110,6 +110,7 @@ from scripts.rollout_dp3_reach_policy import (
 EvalMethod = Literal["base", "rejection", "reranking", "itps"]
 GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
+_CARTON_HALF_EXTENTS = (0.055, 0.08, 0.16)
 
 
 @dataclass(frozen=True)
@@ -354,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                 metadata,
                 render_mode="rgb_array" if args.video else None,
                 obstacle_half_extents=_embodied_obstacle_half_extents(args),
+                obstacle_family=args.obstacle_family,
             ),
         )
         ghost_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
@@ -440,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
                         robot_clearance_stride=args.robot_clearance_stride,
                         zarr_context=zarr_context,
                         embody_obstacle=args.embody_obstacle,
+                        obstacle_family=args.obstacle_family,
                         directional_sign=_steer_sign(args.steer),
                         directional_weight=args.steer_weight,
                         itps_config=itps_config,
@@ -834,6 +837,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "in degrees (default: 0)."
         ),
     )
+    parser.add_argument(
+        "--obstacle-family",
+        choices=["box", "carton"],
+        default="box",
+        help=(
+            "Named embodied-obstacle family. Carton defaults to half-extents "
+            f"{_CARTON_HALF_EXTENTS}; explicit --avoid-box-half-extents overrides them."
+        ),
+    )
     parser.add_argument("--gripper-open", type=float, default=0.04)
     parser.add_argument(
         "--match-current-robot-points",
@@ -908,6 +920,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--obstacle-point-quota must be non-negative")
     if not np.isfinite(args.obstacle_yaw_deg):
         raise ValueError("--obstacle-yaw-deg must be finite")
+    if (
+        args.embody_obstacle
+        and args.obstacle_family == "carton"
+        and args.avoid_box_half_extents is None
+    ):
+        args.avoid_box_half_extents = list(_CARTON_HALF_EXTENTS)
     if args.episode_indices is not None and args.episode_indices_file is not None:
         raise ValueError("--episode-indices and --episode-indices-file are mutually exclusive")
     if args.episode_indices_file is not None and args.source != "dataset":
@@ -1051,6 +1069,7 @@ def run_eval_episode(
     directional_sign: int = 0,
     directional_weight: float = 1.0,
     embody_obstacle: bool = False,
+    obstacle_family: str = "box",
 ) -> dict[str, Any]:
     if embody_obstacle:
         _validate_embodied_obstacle_geometry(sim_env, constraints)
@@ -1349,6 +1368,13 @@ def run_eval_episode(
         ]
         row.update(
             {
+                "obstacle_id": f"{obstacle_family}:episode_{spec.output_index:03d}",
+                "obstacle_family": obstacle_family,
+                "obstacle_pose": {
+                    "center": constraints[0].region.center.astype(float).tolist(),
+                    "yaw": float(constraints[0].region.yaw),
+                },
+                "obstacle_collision_geometry": constraints[0].region.to_json(),
                 "obstacle_points_raw": min(raw_counts, default=0),
                 "obstacle_points_cropped": min(cropped_counts, default=0),
                 "obstacle_points_policy_input": min(policy_counts, default=0),
@@ -3008,6 +3034,7 @@ def _env_kwargs(
     *,
     render_mode: str | None,
     obstacle_half_extents: tuple[float, float, float] | None = None,
+    obstacle_family: str = "box",
 ) -> dict[str, Any]:
     env_kwargs = dict(metadata["env_kwargs"])
     env_kwargs["obs_mode"] = "pointcloud"
@@ -3018,6 +3045,7 @@ def _env_kwargs(
         env_kwargs["render_mode"] = render_mode
     if obstacle_half_extents is not None:
         env_kwargs["pg3d_obstacle_half_extents"] = obstacle_half_extents
+        env_kwargs["pg3d_obstacle_family"] = obstacle_family
     return env_kwargs
 
 

@@ -33,6 +33,7 @@ class PG3DReachEnv(BaseEnv):
         require_static: bool = False,
         robot_init_qpos_noise: float = 0.0,
         pg3d_obstacle_half_extents: tuple[float, float, float] | None = None,
+        pg3d_obstacle_family: str = "box",
         **kwargs: Any,
     ) -> None:
         self.goal_center = goal_center
@@ -42,6 +43,7 @@ class PG3DReachEnv(BaseEnv):
         self.require_static = require_static
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.pg3d_obstacle_half_extents = pg3d_obstacle_half_extents
+        self.pg3d_obstacle_family = str(pg3d_obstacle_family)
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     @property
@@ -91,7 +93,11 @@ class PG3DReachEnv(BaseEnv):
             self.pg3d_obstacle = actors.build_box(
                 self.scene,
                 half_sizes=half_extents.tolist(),
-                color=[0.55, 0.32, 0.12, 1.0],
+                color=(
+                    [0.72, 0.50, 0.22, 1.0]
+                    if self.pg3d_obstacle_family == "carton"
+                    else [0.55, 0.32, 0.12, 1.0]
+                ),
                 name="pg3d_obstacle",
                 body_type="kinematic",
                 add_collision=True,
