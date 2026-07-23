@@ -395,8 +395,6 @@ the nominal task-step budget.
 
 Before the paper-scale comparison, add:
 
-- time-indexed whole-robot violation metrics rather than only flattened robot clearance,
-- executed-action replan-boundary discontinuity,
 - denoiser/FK/geometry operation counts,
 - peak GPU memory, and
 - paired statistical comparison utilities,
@@ -419,6 +417,13 @@ clearance and violation state; all reranking candidates with feasibility colors 
 scores; and the selected predicted path for base, reranking, and ITPS. ITPS currently
 has only its final guided path because the isolated sampler does not expose a stable
 before-guidance trajectory artifact.
+
+Time-indexed whole-robot violations and action discontinuity are now implemented.
+When whole-robot grading is enabled, the evaluator retains one mesh-derived robot
+cloud per sampled executed timestep and reports primary violation depth, duration,
+fraction, integral, and event count. The paper default samples every timestep.
+Executed simulator joint targets also produce overall mean/maximum action
+discontinuity and a separate mean/maximum over replan boundaries.
 
 No experiment should be blocked on every diagnostic metric. E0 and E1 can run with the
 current schema. Complete realistic-obstacle observation validation in E2 before a

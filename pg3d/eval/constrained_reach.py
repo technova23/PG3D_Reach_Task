@@ -404,7 +404,29 @@ def constraint_violation_metrics(
         ),
         axis=0,
     )
-    depths = np.maximum(0.0, -adjusted_clearances)
+    return clearance_violation_metrics(adjusted_clearances, dt=dt)
+
+
+def clearance_violation_metrics(
+    adjusted_clearances: Any,
+    *,
+    dt: float,
+) -> dict[str, float | int]:
+    """Summarize a time-indexed clearance series after tolerance adjustment."""
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be a positive finite value")
+    clearances = np.asarray(adjusted_clearances, dtype=np.float32).reshape(-1)
+    if np.any(np.isnan(clearances)):
+        raise ValueError("adjusted_clearances must not contain NaN")
+    if clearances.size == 0:
+        return {
+            "max_violation_depth": 0.0,
+            "violation_steps": 0,
+            "violation_fraction": 0.0,
+            "integrated_violation": 0.0,
+            "violation_event_count": 0,
+        }
+    depths = np.maximum(0.0, -clearances)
     violating = depths > 0.0
     starts = violating & ~np.concatenate(
         [np.zeros((1,), dtype=bool), violating[:-1]]
@@ -416,6 +438,40 @@ def constraint_violation_metrics(
         "integrated_violation": float(np.sum(depths) * float(dt)),
         "violation_event_count": int(np.count_nonzero(starts)),
     }
+
+
+def point_set_constraint_clearance_series(
+    point_sets: list[Any],
+    constraints: list[AvoidRegion],
+    *,
+    apply_tolerance: bool = False,
+) -> np.ndarray:
+    """Return whole-geometry minimum clearance for each time-indexed point set."""
+    if not point_sets:
+        return np.zeros((0,), dtype=np.float32)
+    if not constraints:
+        return np.full((len(point_sets),), np.inf, dtype=np.float32)
+    values: list[float] = []
+    for step_index, value in enumerate(point_sets):
+        points = np.asarray(value, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError(
+                f"point_sets[{step_index}] must have shape [N, 3], got {points.shape}"
+            )
+        if points.shape[0] == 0:
+            values.append(float("inf"))
+            continue
+        per_constraint = []
+        for constraint in constraints:
+            clearance = (
+                np.asarray(constraint.region.signed_distance(points), dtype=np.float32)
+                - np.float32(constraint.margin)
+            )
+            if apply_tolerance:
+                clearance = clearance + np.float32(constraint.tolerance)
+            per_constraint.append(float(np.min(clearance)))
+        values.append(min(per_constraint))
+    return np.asarray(values, dtype=np.float32)
 
 
 def trajectory_path_length(points: Any) -> float:
@@ -465,6 +521,52 @@ def max_joint_velocity(q: Any, *, dt: float) -> float:
     if trajectory.shape[0] < 2:
         return 0.0
     return float(np.max(np.abs(np.diff(trajectory, axis=0) / np.float32(dt))))
+
+
+def action_discontinuity_metrics(
+    actions: Any,
+    *,
+    replan_start_indices: list[int] | None = None,
+) -> dict[str, float]:
+    """Measure target jumps overall and specifically across replan boundaries."""
+    action_array = np.asarray(actions, dtype=np.float32)
+    if action_array.size == 0:
+        action_array = np.zeros((0, 0), dtype=np.float32)
+    if action_array.ndim != 2:
+        raise ValueError(f"actions must have shape [T, D], got {action_array.shape}")
+    if not np.all(np.isfinite(action_array)):
+        raise ValueError("actions must be finite")
+    differences = (
+        np.linalg.norm(np.diff(action_array, axis=0), axis=1)
+        if action_array.shape[0] >= 2
+        else np.zeros((0,), dtype=np.float32)
+    )
+    boundary_indices = sorted(set(replan_start_indices or []))
+    if any(index <= 0 or index >= action_array.shape[0] for index in boundary_indices):
+        raise ValueError("replan_start_indices must index actions after the first action")
+    boundary_differences = (
+        differences[np.asarray(boundary_indices, dtype=np.int64) - 1]
+        if boundary_indices
+        else np.zeros((0,), dtype=np.float32)
+    )
+    return {
+        "action_discontinuity_mean": (
+            float(np.mean(differences)) if differences.size else 0.0
+        ),
+        "action_discontinuity_max": (
+            float(np.max(differences)) if differences.size else 0.0
+        ),
+        "replan_boundary_discontinuity_mean": (
+            float(np.mean(boundary_differences))
+            if boundary_differences.size
+            else 0.0
+        ),
+        "replan_boundary_discontinuity_max": (
+            float(np.max(boundary_differences))
+            if boundary_differences.size
+            else 0.0
+        ),
+    }
 
 
 def stable_goal_reached(
@@ -528,10 +630,14 @@ def episode_metric_row(
     video: str | None = None,
     rerun: str | None = None,
     robot_clearance_points: Any | None = None,
+    robot_clearance_point_clouds: list[Any] | None = None,
+    robot_clearance_dt: float | None = None,
     goal_threshold: float | None = None,
     hold_steps: int = 0,
     control_dt: float = 1.0,
     action_selection_times: list[float] | None = None,
+    executed_actions: Any | None = None,
+    replan_start_action_indices: list[int] | None = None,
 ) -> dict[str, Any]:
     """Build the stable episode-level constrained-reach metric row.
 
@@ -551,7 +657,37 @@ def episode_metric_row(
         constraints,
         dt=control_dt,
     )
-    if robot_clearance_points is not None:
+    robot_violation: dict[str, float | int] | None = None
+    if robot_clearance_point_clouds is not None:
+        robot_clearances = point_set_constraint_clearance_series(
+            robot_clearance_point_clouds,
+            constraints,
+        )
+        robot_adjusted_clearances = point_set_constraint_clearance_series(
+            robot_clearance_point_clouds,
+            constraints,
+            apply_tolerance=True,
+        )
+        min_clearance = (
+            float(np.min(robot_clearances)) if robot_clearances.size else None
+        )
+        robot_violation = clearance_violation_metrics(
+            robot_adjusted_clearances,
+            dt=(
+                control_dt
+                if robot_clearance_dt is None
+                else float(robot_clearance_dt)
+            ),
+        )
+        constraint_satisfied = bool(
+            not constraints
+            or (
+                robot_adjusted_clearances.size > 0
+                and np.all(robot_adjusted_clearances >= 0.0)
+            )
+        )
+        constraint_target = "robot"
+    elif robot_clearance_points is not None:
         min_clearance = min_constraint_clearance(robot_clearance_points, constraints)
         constraint_satisfied = path_satisfies_constraints(robot_clearance_points, constraints)
         constraint_target = "robot"
@@ -569,15 +705,28 @@ def episode_metric_row(
         if goal_threshold is not None
         else bool(reach_success and hold_steps == 0)
     )
-    max_violation_depth = (
-        max(0.0, -float(min_clearance))
-        if min_clearance is not None and np.isfinite(float(min_clearance))
-        else 0.0
-    )
+    if robot_violation is not None:
+        max_violation_depth = float(robot_violation["max_violation_depth"])
+    elif robot_clearance_points is not None:
+        max_violation_depth = (
+            max(0.0, -float(min_clearance))
+            if min_clearance is not None and np.isfinite(float(min_clearance))
+            else 0.0
+        )
+    else:
+        max_violation_depth = float(tcp_violation["max_violation_depth"])
     selection_times = np.asarray(action_selection_times or [], dtype=np.float64)
     if np.any(~np.isfinite(selection_times)) or np.any(selection_times < 0.0):
         raise ValueError("action_selection_times must be finite and non-negative")
-    return {
+    discontinuity = action_discontinuity_metrics(
+        (
+            np.asarray(executed_actions, dtype=np.float32)
+            if executed_actions is not None
+            else np.zeros((0, 0), dtype=np.float32)
+        ),
+        replan_start_indices=replan_start_action_indices,
+    )
+    row = {
         "method": method,
         "episode": int(episode),
         "seed": int(seed),
@@ -641,6 +790,26 @@ def episode_metric_row(
         "video": video,
         "rerun": rerun,
     }
+    row.update(discontinuity)
+    if robot_violation is not None:
+        row.update(
+            {
+                "violation_steps": robot_violation["violation_steps"],
+                "violation_fraction": robot_violation["violation_fraction"],
+                "integrated_violation": robot_violation["integrated_violation"],
+                "violation_event_count": robot_violation["violation_event_count"],
+            }
+        )
+    else:
+        row.update(
+            {
+                "violation_steps": tcp_violation["violation_steps"],
+                "violation_fraction": tcp_violation["violation_fraction"],
+                "integrated_violation": tcp_violation["integrated_violation"],
+                "violation_event_count": tcp_violation["violation_event_count"],
+            }
+        )
+    return row
 
 
 def wilson_interval(successes: int, total: int, *, z: float = 1.96) -> tuple[float, float]:
@@ -693,6 +862,10 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "violation_fraction_tcp",
             "integrated_violation_tcp",
             "violation_event_count_tcp",
+            "violation_steps",
+            "violation_fraction",
+            "integrated_violation",
+            "violation_event_count",
             "tcp_path_length",
             "joint_path_length",
             "tcp_acceleration_mse",
@@ -700,6 +873,10 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "joint_acceleration_mse",
             "joint_jerk_mse",
             "max_joint_velocity",
+            "action_discontinuity_mean",
+            "action_discontinuity_max",
+            "replan_boundary_discontinuity_mean",
+            "replan_boundary_discontinuity_max",
             "action_selection_time_total",
             "action_selection_time_median",
             "action_selection_time_p90",

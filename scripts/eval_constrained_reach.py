@@ -810,7 +810,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--robot-clearance-stride",
         type=int,
-        default=4,
+        default=1,
         help="Subsample stride over executed timesteps when sampling the whole-robot "
         "clearance cloud (1 = every step).",
     )
@@ -1196,6 +1196,8 @@ def run_eval_episode(
     candidate_total = 0
     fallback_count = 0
     action_selection_times: list[float] = []
+    executed_action_targets: list[np.ndarray] = []
+    replan_start_action_indices: list[int] = []
     terminated_or_truncated = False
     was_training = policy.training
     policy.eval()
@@ -1279,7 +1281,9 @@ def run_eval_episode(
                     f"execution_horizon_chunks={execution_horizon_chunks} "
                     f"steps_to_execute={steps_to_execute}",
                     flush=True,
-            )
+                )
+            if executed_action_targets and steps_to_execute > 0:
+                replan_start_action_indices.append(len(executed_action_targets))
             raw_chunk = np.asarray(decision.selected_chunk.actions, dtype=np.float32)
             executed_actions: list[np.ndarray] = []
             action_tcp_poses: list[np.ndarray] = [
@@ -1296,6 +1300,9 @@ def run_eval_episode(
                     gripper_open=gripper_open,
                 )
                 executed_actions.append(np.asarray(sim_action, dtype=np.float32).copy())
+                executed_action_targets.append(
+                    np.asarray(sim_action, dtype=np.float32).reshape(-1)[:7].copy()
+                )
                 with timer.time("sim_step", method=method):
                     sim_obs, _reward, terminated, truncated, sim_info = sim_env.step(sim_action)
                 steps += 1
@@ -1394,11 +1401,12 @@ def run_eval_episode(
                     getattr(policy, "goal_marker_radius", DEFAULT_GOAL_MARKER_RADIUS)
                 ),
             )
-    robot_clearance_points: np.ndarray | None = None
+    control_dt = _env_control_dt(sim_env)
+    robot_clearance_point_clouds: list[np.ndarray] | None = None
     if robot_clearance_metric and constraints and provider is not None:
         try:
             with timer.time("robot_clearance_points", method=method):
-                robot_clearance_points = _whole_robot_clearance_points(
+                robot_clearance_point_clouds = _whole_robot_clearance_point_clouds(
                     path, provider, stride=robot_clearance_stride
                 )
         except Exception as exc:
@@ -1407,14 +1415,15 @@ def run_eval_episode(
                 f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
-            robot_clearance_points = None
+            robot_clearance_point_clouds = None
     row = episode_metric_row(
         method=method,
         episode=spec.output_index,
         seed=spec.seed,
         path=path,
         constraints=constraints,
-        robot_clearance_points=robot_clearance_points,
+        robot_clearance_point_clouds=robot_clearance_point_clouds,
+        robot_clearance_dt=control_dt * robot_clearance_stride,
         reach_success=first_success_step is not None,
         first_success_step=first_success_step,
         steps=steps,
@@ -1428,8 +1437,10 @@ def run_eval_episode(
         rerun=str(rerun_path) if rerun_path is not None else None,
         goal_threshold=goal_thresh,
         hold_steps=post_success_steps,
-        control_dt=_env_control_dt(sim_env),
+        control_dt=control_dt,
         action_selection_times=action_selection_times,
+        executed_actions=executed_action_targets,
+        replan_start_action_indices=replan_start_action_indices,
     )
     if embody_obstacle:
         goal_marker_points = int(getattr(policy, "goal_marker_points", 0))
@@ -3195,21 +3206,22 @@ def _append_path(path: EpisodePath, entry: Entry) -> None:
     )
 
 
-def _whole_robot_clearance_points(
+def _whole_robot_clearance_point_clouds(
     path: EpisodePath,
     provider: ManiSkillGhostPandaGeometryProvider,
     *,
     stride: int = 4,
-) -> np.ndarray:
+) -> list[np.ndarray]:
     """Sample the URDF/mesh robot point cloud across the executed trajectory.
 
     Sets the ghost env to each stored qpos (subsampled by ``stride``) and collects the
     mesh-derived robot points, so constraint clearance reflects the whole arm and base
-    rather than only the TCP. Returns a [M, 3] cloud (empty when no q is available).
+    rather than only the TCP. Keeps one cloud per sampled time for duration/integral
+    metrics instead of flattening time.
     """
     q_array = path.q_array
     if q_array.size == 0:
-        return np.zeros((0, 3), dtype=np.float32)
+        return []
     stride = max(1, int(stride))
     indices = list(range(0, q_array.shape[0], stride))
     if indices[-1] != q_array.shape[0] - 1:
@@ -3218,10 +3230,10 @@ def _whole_robot_clearance_points(
     for idx in indices:
         points = np.asarray(provider.robot_point_cloud(q_array[idx]), dtype=np.float32)
         if points.size:
-            clouds.append(points.reshape(-1, 3))
-    if not clouds:
-        return np.zeros((0, 3), dtype=np.float32)
-    return np.concatenate(clouds, axis=0).astype(np.float32, copy=False)
+            clouds.append(points.reshape(-1, 3).astype(np.float32, copy=False))
+        else:
+            clouds.append(np.zeros((0, 3), dtype=np.float32))
+    return clouds
 
 
 def _env_kwargs(

@@ -106,6 +106,11 @@ robot/scene/obstacle/goal-marker entities, executed TCP path, target and collisi
 wireframes, per-step clearance/violation scalars, reranking candidate paths and
 scores, and selected predicted paths for base/reranking/ITPS. A live three-method
 recording was inspected with `rerun rrd print`.
+Whole-robot safety is no longer flattened across time: enabling the metric retains one
+robot cloud per executed timestep and reports primary violation duration, fraction,
+integral, and event count. Executed joint targets now also report overall and
+replan-boundary action discontinuity. A nine-step/two-replan live smoke populated all
+new fields.
 
 ## Current phase
 
@@ -182,7 +187,7 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Complete the remaining primary/compute metric fields and paired statistical
+3. Add denoiser/FK/geometry counters, peak GPU memory, and paired statistical
    utilities before the definitive E3 comparison.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.

@@ -874,6 +874,21 @@ subsets, `world/executed_tcp_path`, `metrics/min_clearance_m`,
 `metrics/constraint_violation`, `planning/replan_*/candidates/*`, candidate scores,
 and `planning/replan_*/selected`.
 
+For time-indexed whole-robot safety and replan-boundary action discontinuity, enable:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  ... \
+  --robot-clearance-metric \
+  --robot-clearance-stride 1
+```
+
+The primary row then includes whole-robot `violation_steps`,
+`violation_fraction`, `integrated_violation`, and `violation_event_count`, while the
+TCP-only diagnostics retain their `_tcp` suffix. Action targets always produce
+`action_discontinuity_{mean,max}` and
+`replan_boundary_discontinuity_{mean,max}`.
+
 Longer multi-chunk planning smoke:
 
 ```bash

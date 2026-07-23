@@ -17,6 +17,7 @@ from pg3d.eval import (
     EpisodePath,
     NominalPathAvoidConfig,
     TimingRecorder,
+    action_discontinuity_metrics,
     candidate_feasibility_fraction,
     concatenate_rollouts,
     constraint_clearance_series,
@@ -29,6 +30,7 @@ from pg3d.eval import (
     min_constraint_clearance,
     nominal_path_avoid_region,
     path_satisfies_constraints,
+    point_set_constraint_clearance_series,
     progress_series,
     save_episode_constraints,
     scene_context_for_constraints,
@@ -365,6 +367,62 @@ def test_clearance_series_and_violation_metrics_preserve_events() -> None:
     assert metrics["violation_fraction"] == pytest.approx(0.5)
     assert metrics["integrated_violation"] == pytest.approx(0.015)
     assert metrics["violation_event_count"] == 2
+
+
+def test_time_indexed_whole_robot_clearance_preserves_violation_duration() -> None:
+    constraint = AvoidRegion(
+        region=BoxRegion(center=[0.0, 0.0, 0.0], half_extents=[0.1, 0.1, 0.1]),
+        tolerance=0.0,
+    )
+    point_clouds = [
+        np.asarray([[0.3, 0.0, 0.0]], dtype=np.float32),
+        np.asarray([[0.05, 0.0, 0.0]], dtype=np.float32),
+        np.asarray([[0.0, 0.0, 0.0]], dtype=np.float32),
+        np.asarray([[0.3, 0.0, 0.0]], dtype=np.float32),
+    ]
+
+    clearances = point_set_constraint_clearance_series(point_clouds, [constraint])
+
+    np.testing.assert_allclose(clearances, [0.2, -0.05, -0.1, 0.2], atol=1e-6)
+    path = EpisodePath()
+    for index in range(4):
+        path.append(
+            tcp_position=[0.3, 0.0, 0.0],
+            q=[float(index)],
+            target_distance=1.0,
+        )
+    row = episode_metric_row(
+        method="base",
+        episode=0,
+        seed=0,
+        path=path,
+        constraints=[constraint],
+        reach_success=False,
+        first_success_step=None,
+        steps=3,
+        replans=1,
+        candidate_feasibility_fraction=None,
+        robot_clearance_point_clouds=point_clouds,
+        control_dt=0.1,
+    )
+
+    assert row["constraint_target"] == "robot"
+    assert row["violation_steps"] == 2
+    assert row["violation_fraction"] == pytest.approx(0.5)
+    assert row["integrated_violation"] == pytest.approx(0.015)
+    assert row["violation_event_count"] == 1
+
+
+def test_action_discontinuity_separates_replan_boundaries() -> None:
+    metrics = action_discontinuity_metrics(
+        np.asarray([[0.0, 0.0], [1.0, 0.0], [1.0, 2.0]], dtype=np.float32),
+        replan_start_indices=[2],
+    )
+
+    assert metrics["action_discontinuity_mean"] == pytest.approx(1.5)
+    assert metrics["action_discontinuity_max"] == pytest.approx(2.0)
+    assert metrics["replan_boundary_discontinuity_mean"] == pytest.approx(2.0)
+    assert metrics["replan_boundary_discontinuity_max"] == pytest.approx(2.0)
 
 
 def test_physical_trajectory_metrics_use_control_dt() -> None:
