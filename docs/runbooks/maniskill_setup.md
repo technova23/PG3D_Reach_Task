@@ -36,6 +36,11 @@ uv sync --extra cu129 --extra maniskill --extra viz --group dev --group notebook
 The `viz` extra currently pins `rerun-sdk==0.22.1` because newer Rerun releases tested during P04
 require NumPy 2, while pg3d still constrains NumPy to `<2`.
 
+Do not resolve this incompatibility by upgrading the main environment. New policy
+point-cloud recordings use the isolated Rerun 0.35 exporter documented in
+`docs/runbooks/commands.md`; the simulator writes a neutral `.npz` bundle and the
+isolated environment converts it to a native 0.35 `.rrd`.
+
 Keep the `maniskill` extra out of default docs/test environments. Base `pg3d` imports must not
 require ManiSkill, SAPIEN, rendering, Vulkan, or a GPU.
 

@@ -98,9 +98,9 @@ def test_point_at_arc_fraction_xy_ignores_vertical_lift() -> None:
 
 
 def test_local_path_points_xy_restricts_to_window() -> None:
-    path = np.stack(
-        [np.linspace(0.0, 1.0, 11), np.zeros(11), np.full(11, 0.2)], axis=1
-    ).astype(np.float32)
+    path = np.stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.full(11, 0.2)], axis=1).astype(
+        np.float32
+    )
 
     local = _local_path_points_xy(path, fraction=0.5, window=0.15)
 
@@ -666,9 +666,7 @@ def test_paired_method_comparisons_include_primary_and_conditional_metrics() -> 
     assert comparison["primary_metric"]["mcnemar_exact"]["p_value_two_sided"] == (
         pytest.approx(0.25)
     )
-    conditional = comparison["conditional_on_both_stable_combined_success"][
-        "tcp_path_length"
-    ]
+    conditional = comparison["conditional_on_both_stable_combined_success"]["tcp_path_length"]
     assert conditional["paired_episodes"] == 1
     assert conditional["excluded_condition_pairs"] == 3
 
@@ -927,6 +925,7 @@ def test_artifact_manifest_links_nonempty_files_to_metrics_row(
     )
 
     assert manifest_path.is_file()
+    assert manifest["rerun_writer_version"] == "0.35.0"
     assert len(manifest["artifacts"]) == 1
     artifact = manifest["artifacts"][0]
     assert artifact["metrics"]["row_index"] == 0
@@ -1417,9 +1416,7 @@ def test_carton_family_has_reproducible_default_geometry(tmp_path: Path) -> None
 
     assert args.avoid_shape == "box"
     assert args.avoid_box_half_extents == pytest.approx([0.055, 0.08, 0.16])
-    assert _embodied_obstacle_half_extents(args) == pytest.approx(
-        (0.055, 0.08, 0.16)
-    )
+    assert _embodied_obstacle_half_extents(args) == pytest.approx((0.055, 0.08, 0.16))
 
 
 def test_cylinder_family_has_reproducible_default_geometry(tmp_path: Path) -> None:
@@ -1438,9 +1435,7 @@ def test_cylinder_family_has_reproducible_default_geometry(tmp_path: Path) -> No
     )
 
     assert args.avoid_shape == "cylinder"
-    assert _embodied_obstacle_half_extents(args) == pytest.approx(
-        (0.055, 0.055, 0.12)
-    )
+    assert _embodied_obstacle_half_extents(args) == pytest.approx((0.055, 0.055, 0.12))
 
 
 def test_cabinet_family_expands_root_into_component_constraints(tmp_path: Path) -> None:
@@ -1485,9 +1480,7 @@ def test_cabinet_family_expands_root_into_component_constraints(tmp_path: Path) 
 
 
 def test_policy_obstacle_count_excludes_goal_marker_slots() -> None:
-    entry = {
-        "obstacle_mask": np.asarray([True, False, True, True, True], dtype=bool)
-    }
+    entry = {"obstacle_mask": np.asarray([True, False, True, True, True], dtype=bool)}
 
     assert _policy_obstacle_point_count(entry, goal_marker_points=2) == 2
 
@@ -1496,9 +1489,7 @@ def test_embodied_actor_geometry_must_match_serialized_constraint() -> None:
     constraint = AvoidRegion(
         region=BoxRegion(center=[0.1, -0.2, 0.3], half_extents=[0.04, 0.06, 0.08])
     )
-    env = SimpleNamespace(
-        unwrapped=SimpleNamespace(pg3d_obstacle_half_extents=(0.04, 0.06, 0.08))
-    )
+    env = SimpleNamespace(unwrapped=SimpleNamespace(pg3d_obstacle_half_extents=(0.04, 0.06, 0.08)))
     _validate_embodied_obstacle_geometry(env, [constraint])
 
     env.unwrapped.pg3d_obstacle_half_extents = (0.04, 0.06, 0.09)
@@ -1644,10 +1635,7 @@ def _rollout(actions: list[list[float]]) -> ImaginedRollout:
     q = np.zeros((horizon, 9), dtype=np.float32)
     q[:, :7] = chunk.actions
     eef = np.stack(
-        [
-            np.asarray([float(idx), 0.0, 0.2], dtype=np.float32)
-            for idx in range(horizon)
-        ],
+        [np.asarray([float(idx), 0.0, 0.2], dtype=np.float32) for idx in range(horizon)],
         axis=0,
     )
     return ImaginedRollout(

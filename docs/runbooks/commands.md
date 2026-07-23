@@ -103,7 +103,34 @@ For optional Rerun export, first sync the `viz` extra:
 uv sync --extra cu129 --extra maniskill --extra viz --group dev --group notebooks
 ```
 
-The optional `viz` extra uses `rerun-sdk==0.22.1` while pg3d remains on NumPy 1.x.
+The main environment intentionally remains on `rerun-sdk==0.22.1` and NumPy 1.x.
+Do **not** upgrade either dependency to produce newer `.rrd` files: Rerun 0.35 requires
+NumPy 2 and would change the policy/simulator environment.
+
+Create the isolated Rerun 0.35 exporter once:
+
+```bash
+UV_CACHE_DIR=/tmp/pg3d-rerun35-cache \
+  uv venv --python 3.11 .venv-rerun35
+UV_CACHE_DIR=/tmp/pg3d-rerun35-cache \
+  uv pip install --python .venv-rerun35/bin/python \
+  "numpy>=2,<3" "rerun-sdk==0.35.0"
+```
+
+Constrained evaluation and policy rollout `--rerun` outputs then use that interpreter
+automatically. Set `PG3D_RERUN35_PYTHON=/absolute/path/to/python` when the isolated
+environment lives elsewhere.
+
+Every new `.rrd` is written natively by Rerun 0.35 and is accompanied by:
+
+- `episode_XXX.policy_input.npz`, containing the exact fixed-size point tensor sent
+  to DP3 at every step plus valid/robot/obstacle/scene/goal masks, TCP, and target;
+- `episode_XXX.policy_input.json`, containing schema, constraint-visual, replan, and
+  writer-version metadata.
+
+The neutral `.npz` is the source-of-truth interoperability artifact for non-Rerun
+viewers. Artifact manifests hash all three files and record
+`rerun_writer_version: 0.35.0`.
 
 ## ManiSkill reach dataset
 

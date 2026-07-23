@@ -114,6 +114,25 @@ robot/scene/obstacle/goal-marker entities, executed TCP path, target and collisi
 wireframes, per-step clearance/violation scalars, reranking candidate paths and
 scores, and selected predicted paths for base/reranking/ITPS. A live three-method
 recording was inspected with `rerun rrd print`.
+Future policy-input recordings are now authored natively with Rerun 0.35 without
+changing the policy/simulator dependency environment. The NumPy 1/Rerun 0.22 main
+environment first writes a neutral `pg3d.policy_pointcloud_bundle.v1` `.npz` plus
+JSON metadata; an ignored `.venv-rerun35` environment running NumPy 2 and
+`rerun-sdk==0.35.0` converts and validates the `.rrd`. The neutral bundle retains the
+exact fixed-size DP3 tensor at every step and its valid/robot/obstacle/scene/goal
+masks, TCP, and target. Artifact manifests hash the bundle and metadata beside the
+RRD and record the writer version. Do not upgrade NumPy or Rerun in the main
+environment to solve viewer compatibility.
+A four-family exact-input suite now lives under
+`artifacts/e2-policy-input-rerun35`: rotated box, tall carton, vertical cylinder,
+and open cabinet. Every neutral bundle has two `[1024, 3]` tensors (reset and one
+executed step) from the same dataset episode and locked 100k checkpoint. Initial
+obstacle counts in the exact policy tensors are respectively 32, 50, 32, and 92;
+all four native 0.35 RRDs passed the isolated parser.
+A companion moving simulator suite under `artifacts/e2-simulator-visuals-rerun35`
+pairs each family with a 41-frame 512×512 MP4 at the true 20 Hz control rate and a
+synchronized `[41, 1024, 3]` exact-input bundle/native 0.35 RRD. All four videos
+decoded completely and all four RRDs passed the isolated parser.
 Whole-robot safety is no longer flattened across time: enabling the metric retains one
 robot cloud per executed timestep and reports primary violation duration, fraction,
 integral, and event count. Executed joint targets now also report overall and
@@ -222,7 +241,8 @@ the full point-cloud tensor into memory.
 - ManiSkill v3 is a fast-moving stack; keep the adapter isolated and commands pinned in runbooks.
 - Rendering and point-cloud observation modes may require Vulkan/driver setup beyond the
   non-rendering `obs_mode="state"` smoke.
-- Optional Rerun visualization is pinned to `rerun-sdk==0.22.1` while pg3d remains on NumPy 1.x.
+- The main environment remains pinned to Rerun 0.22/NumPy 1; all new policy-input
+  `.rrd` files require the isolated Rerun 0.35 exporter described in the runbook.
 - Reach is useful for mechanism validation, but code-only planners may be strong; avoid over-claiming from reach-only results.
 - The kinematic point-cloud world model is the novel project pivot and should be validated visually early.
 - New clones and fresh virtualenvs must sync the `maniskill` optional extra before running

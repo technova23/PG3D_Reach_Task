@@ -1,0 +1,90 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "episode_000:base",
+      "files": {
+        "constraint": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/constraints/episode_000.json",
+          "sha256": "34da7c2993ff78f0c4c2cae3154ec79f10839884f23bc6a731e6692611bad816",
+          "size_bytes": 403
+        },
+        "policy_pointcloud_bundle": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/rerun/base/episode_000.policy_input.npz",
+          "sha256": "f29f48b2cf17a1c9ee4c8851ebfc06ff59ca67f4bdb4539683b96746f3e19b39",
+          "size_bytes": 224601
+        },
+        "policy_pointcloud_metadata": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/rerun/base/episode_000.policy_input.json",
+          "sha256": "b278801b38cc72bb3e1441b94021034f9ab5bc1402de9b8aff69db4e3edf4563",
+          "size_bytes": 12735
+        },
+        "rerun": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/rerun/base/episode_000.rrd",
+          "sha256": "6fa713b33852a01e674251d0da0bfd3187fc419c70f812259788ef16cc64cfa1",
+          "size_bytes": 602756
+        },
+        "video": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/videos/base/episode_000.mp4",
+          "sha256": "00bf12f33c1f99efea548d49941fc046a6650086a86279e75de1ee137f46a44b",
+          "size_bytes": 113056
+        }
+      },
+      "metrics": {
+        "episode": 0,
+        "method": "base",
+        "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/metrics.jsonl",
+        "row_index": 0
+      },
+      "obstacle": {
+        "collision_geometry": [
+          {
+            "center": [
+              -0.10075885057449341,
+              -0.06924144923686981,
+              0.4230938255786896
+            ],
+            "half_length": 0.11999999731779099,
+            "radius": 0.054999999701976776,
+            "type": "cylinder"
+          }
+        ],
+        "family": "cylinder",
+        "id": "cylinder:episode_000",
+        "pose": {
+          "center": [
+            -0.10075885057449341,
+            -0.06924144923686981,
+            0.4230938255786896
+          ],
+          "yaw": 0.0
+        }
+      },
+      "paired_identity": {
+        "constraint_id": "37c4a0900689fe3ccc93a264a74aa22fdec2424d2528687ed9a2a0724510a825",
+        "dataset_episode_index": 0,
+        "policy_seed": 916202559,
+        "simulator_seed": 48572821
+      },
+      "validation": {
+        "rerun": {
+          "opened": true
+        },
+        "video": {
+          "decoded": true,
+          "frame_count": 41,
+          "height": 512,
+          "width": 512
+        }
+      }
+    }
+  ],
+  "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
+  "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
+  "git": {
+    "commit": "abdff865d1ba1c8fec894eeea956536a7d532815",
+    "dirty": true
+  },
+  "rerun_writer_version": "0.35.0",
+  "run_id": "/scratch2/skills/puru/pg3d/artifacts/e2-simulator-visuals-rerun35/cylinder",
+  "schema_version": "pg3d.artifact_manifest.v1"
+}

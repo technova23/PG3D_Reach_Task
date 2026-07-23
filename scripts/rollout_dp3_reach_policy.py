@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -307,8 +309,7 @@ def run_policy_rollout(
                     if np.isfinite(final_distance):
                         post_success_distances.append(final_distance)
             post_success_done = (
-                first_success_step is not None
-                and observed_post_success_steps >= post_success_steps
+                first_success_step is not None and observed_post_success_steps >= post_success_steps
             )
             if metrics_file is not None:
                 metrics_file.write(
@@ -396,9 +397,7 @@ def rollout_observation_entry(
     cropped = crop_point_cloud(
         adapted.point_cloud,
         robot_mask=adapted.robot_mask,
-        aligned_masks={
-            "obstacle_mask": adapted.object_masks["pg3d_obstacle"]
-        }
+        aligned_masks={"obstacle_mask": adapted.object_masks["pg3d_obstacle"]}
         if "pg3d_obstacle" in adapted.object_masks
         else None,
         config=crop_config,
@@ -425,9 +424,7 @@ def rollout_observation_entry(
     }
     if "obstacle_mask" in cropped:
         entry["obstacle_mask"] = cropped["obstacle_mask"]
-        entry["obstacle_points_raw"] = int(
-            np.count_nonzero(adapted.object_masks["pg3d_obstacle"])
-        )
+        entry["obstacle_points_raw"] = int(np.count_nonzero(adapted.object_masks["pg3d_obstacle"]))
         entry["obstacle_points_cropped"] = int(np.count_nonzero(cropped["obstacle_mask"]))
     return entry
 
@@ -496,9 +493,7 @@ def obs_window_to_torch(
             )
         family = np.zeros((len(window), trajectory_family_count), dtype=np.float32)
         family[:, family_id] = 1.0
-        batch["trajectory_family_onehot"] = (
-            torch.from_numpy(family).unsqueeze(0).to(device)
-        )
+        batch["trajectory_family_onehot"] = torch.from_numpy(family).unsqueeze(0).to(device)
     return batch
 
 
@@ -660,9 +655,7 @@ def select_random_dataset_rollout_specs(
         return []
     count = min(total_count, len(dataset_episode_seeds))
     rng = np.random.default_rng(seed)
-    selected = np.sort(
-        rng.choice(len(dataset_episode_seeds), size=count, replace=False)
-    )
+    selected = np.sort(rng.choice(len(dataset_episode_seeds), size=count, replace=False))
     return [
         RolloutSpec(
             output_index=output_idx,
@@ -701,123 +694,98 @@ def save_rerun_timeline(
     goal_marker_points: int = 0,
     goal_marker_radius: float = DEFAULT_GOAL_MARKER_RADIUS,
 ) -> None:
-    try:
-        import rerun as rr
-    except Exception as exc:
-        raise RuntimeError(
-            "Rerun export requires: "
-            "uv sync --extra cu129 --extra maniskill --extra viz --group dev --group notebooks"
-        ) from exc
-
     path.parent.mkdir(parents=True, exist_ok=True)
-    rr.init("pg3d_dp3_reach_policy_rollout", spawn=False)
-    rr.save(str(path))
+    bundle_path = path.with_suffix(".policy_input.npz")
+    metadata_path = path.with_suffix(".policy_input.json")
+    semantics = [
+        _policy_point_cloud_semantics(
+            entry,
+            goal_marker_points=goal_marker_points,
+            goal_marker_radius=goal_marker_radius,
+        )
+        for entry in timeline
+    ]
+    np.savez_compressed(
+        bundle_path,
+        point_cloud=np.stack([item["all_points"] for item in semantics]),
+        colors=np.stack([item["all_colors"] for item in semantics]),
+        valid_mask=np.stack([item["all_valid_mask"] for item in semantics]),
+        robot_mask=np.stack([item["all_robot_mask"] for item in semantics]),
+        obstacle_mask=np.stack([item["all_obstacle_mask"] for item in semantics]),
+        scene_mask=np.stack([item["all_scene_mask"] for item in semantics]),
+        goal_mask=np.stack([item["all_goal_mask"] for item in semantics]),
+        target_position=np.stack(
+            [np.asarray(entry["target_position"], dtype=np.float32) for entry in timeline]
+        ),
+        tcp_position=np.stack(
+            [np.asarray(entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3] for entry in timeline]
+        ),
+        tcp_clearance=np.asarray(
+            [
+                _rerun_tcp_clearance(
+                    np.asarray(entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3],
+                    constraints or [],
+                )
+                for entry in timeline
+            ],
+            dtype=np.float32,
+        ),
+    )
+    constraint_visuals: list[dict[str, Any]] = []
     if constraints:
         from pg3d.viz.constraints import avoid_region_line_visuals
 
-        rr.set_time_sequence("step", 0)
         for visual in avoid_region_line_visuals(constraints):
-            rr.log(
-                f"world/constraints/{visual.name}",
-                rr.LineStrips3D(visual.line_strips, colors=visual.color),
-                static=True,
+            constraint_visuals.append(
+                {
+                    "name": visual.name,
+                    "line_strips": [line.tolist() for line in visual.line_strips],
+                    "color": list(visual.color),
+                }
             )
-    for step_idx, entry in enumerate(timeline):
-        rr.set_time_sequence("step", step_idx)
-        valid = np.asarray(entry["point_valid_mask"], dtype=bool)
-        points = np.asarray(entry["point_cloud"], dtype=np.float32)[valid]
-        if points.size:
-            semantics = _policy_point_cloud_semantics(
-                entry,
-                goal_marker_points=goal_marker_points,
-                goal_marker_radius=goal_marker_radius,
-            )
-            rr.log(
-                "policy_input/point_cloud",
-                rr.Points3D(
-                    semantics["all_points"], colors=semantics["all_colors"]
-                ),
-            )
-            robot_points = points[np.asarray(entry["robot_mask"], dtype=bool)[valid]]
-            if robot_points.size:
-                rr.log(
-                    "policy_input/robot_points",
-                    rr.Points3D(robot_points, colors=[0, 128, 255]),
-                )
-            obstacle_mask = entry.get("obstacle_mask")
-            if obstacle_mask is not None:
-                obstacle_points = points[np.asarray(obstacle_mask, dtype=bool)[valid]]
-                if obstacle_points.size:
-                    rr.log(
-                        "policy_input/obstacle_points",
-                        rr.Points3D(obstacle_points, colors=[180, 90, 20]),
-                    )
-            scene_mask = ~np.asarray(entry["robot_mask"], dtype=bool)[valid]
-            if obstacle_mask is not None:
-                scene_mask &= ~np.asarray(obstacle_mask, dtype=bool)[valid]
-            scene_points = points[scene_mask]
-            if scene_points.size:
-                rr.log(
-                    "policy_input/scene_points",
-                    rr.Points3D(scene_points, colors=[160, 160, 160]),
-                )
-            goal_points = semantics["points"][semantics["goal_mask"]]
-            if goal_points.size:
-                rr.log(
-                    "policy_input/goal_marker_points",
-                    rr.Points3D(goal_points, colors=[0, 255, 0]),
-                )
-        target = np.asarray(entry["target_position"], dtype=np.float32).reshape(1, 3)
-        if np.all(np.isfinite(target)):
-            rr.log("world/goal", rr.Points3D(target, colors=[0, 255, 0]))
-        tcp = np.asarray(entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3].reshape(1, 3)
-        if np.all(np.isfinite(tcp)):
-            rr.log("world/tcp", rr.Points3D(tcp, colors=[255, 220, 0]))
-            executed = np.stack(
-                [
-                    np.asarray(previous["tcp_pose"], dtype=np.float32).reshape(-1)[:3]
-                    for previous in timeline[: step_idx + 1]
-                ],
-                axis=0,
-            )
-            if executed.shape[0] >= 2:
-                rr.log(
-                    "world/executed_tcp_path",
-                    rr.LineStrips3D([executed], colors=[255, 220, 0]),
-                )
-            clearance = _rerun_tcp_clearance(tcp.reshape(3), constraints or [])
-            if clearance is not None:
-                rr.log("metrics/min_clearance_m", rr.Scalar(clearance))
-                rr.log(
-                    "metrics/constraint_violation",
-                    rr.Scalar(1.0 if clearance < 0.0 else 0.0),
-                )
-    for replan in replans or []:
-        rr.set_time_sequence("step", int(replan["step"]))
-        replan_index = int(replan["replan_index"])
-        for candidate in replan.get("candidates", []):
-            candidate_index = int(candidate["index"])
-            path_points = np.asarray(candidate["eef_path"], dtype=np.float32)
-            color = [40, 200, 80] if candidate.get("feasible") else [220, 60, 40]
-            rr.log(
-                f"planning/replan_{replan_index:03d}/candidates/{candidate_index:03d}",
-                rr.LineStrips3D([path_points], colors=color),
-            )
-            rr.log(
-                f"planning/replan_{replan_index:03d}/scores/{candidate_index:03d}",
-                rr.Scalar(float(candidate.get("score", 0.0))),
-            )
-        selected_path = replan.get("selected_eef_path")
-        if selected_path is not None:
-            rr.log(
-                f"planning/replan_{replan_index:03d}/selected",
-                rr.LineStrips3D(
-                    [np.asarray(selected_path, dtype=np.float32)],
-                    colors=[255, 0, 255],
-                    radii=0.004,
-                ),
-            )
-    rr.disconnect()
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "pg3d.policy_pointcloud_bundle.v1",
+                "rerun_writer_version": "0.35.0",
+                "constraint_visuals": constraint_visuals,
+                "replans": _jsonable(replans or []),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    exporter_python = _rerun35_exporter_python()
+    exporter = Path(__file__).with_name("export_policy_pointcloud_rerun35.py")
+    subprocess.run(
+        [
+            str(exporter_python),
+            str(exporter),
+            "--bundle",
+            str(bundle_path),
+            "--metadata",
+            str(metadata_path),
+            "--output",
+            str(path),
+        ],
+        check=True,
+    )
+
+
+def _rerun35_exporter_python() -> Path:
+    configured = os.environ.get("PG3D_RERUN35_PYTHON")
+    candidate = (
+        Path(configured)
+        if configured
+        else Path(__file__).resolve().parents[1] / ".venv-rerun35" / "bin" / "python"
+    )
+    if not candidate.is_file():
+        raise RuntimeError(
+            "Rerun 0.35 export requires an isolated exporter environment. "
+            "Create .venv-rerun35 as documented in docs/runbooks/commands.md or set "
+            "PG3D_RERUN35_PYTHON to its Python executable."
+        )
+    return candidate
 
 
 def _policy_point_cloud_semantics(
@@ -836,9 +804,7 @@ def _policy_point_cloud_semantics(
         )
     valid = np.asarray(entry["point_valid_mask"], dtype=bool).copy()
     robot = np.asarray(entry["robot_mask"], dtype=bool).copy()
-    obstacle = np.asarray(
-        entry.get("obstacle_mask", np.zeros_like(valid)), dtype=bool
-    ).copy()
+    obstacle = np.asarray(entry.get("obstacle_mask", np.zeros_like(valid)), dtype=bool).copy()
     goal = np.zeros_like(valid)
     if goal_marker_points:
         marker_count = min(goal_marker_points, goal.size)
@@ -851,9 +817,15 @@ def _policy_point_cloud_semantics(
     colors[robot] = [0, 128, 255]
     colors[obstacle] = [180, 90, 20]
     colors[goal] = [0, 255, 0]
+    scene = valid & ~robot & ~obstacle & ~goal
     return {
         "all_points": point_cloud,
         "all_colors": colors,
+        "all_valid_mask": valid,
+        "all_robot_mask": robot,
+        "all_obstacle_mask": obstacle,
+        "all_scene_mask": scene,
+        "all_goal_mask": goal,
         "points": point_cloud[valid],
         "colors": colors[valid],
         "robot_mask": robot[valid],

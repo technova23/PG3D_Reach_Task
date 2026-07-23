@@ -1,4 +1,5 @@
 .venv/
+.venv-rerun35/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

@@ -1,0 +1,94 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "episode_000:base",
+      "files": {
+        "constraint": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/box/constraints/episode_000.json",
+          "sha256": "556fa0121be35f34c9205329eac7078cef08688ab34978a79a99a63aaff173cb",
+          "size_bytes": 470
+        },
+        "policy_pointcloud_bundle": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/box/rerun/base/episode_000.policy_input.npz",
+          "sha256": "3958b3163ecea901990e89b57489c975eaa4ade22183ed33df1afe0cbf237c62",
+          "size_bytes": 227719
+        },
+        "policy_pointcloud_metadata": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/box/rerun/base/episode_000.policy_input.json",
+          "sha256": "b4256b081f953c380129d46c71e09f9e9c85ddcb9df0b7fe0960e3c12d9a338f",
+          "size_bytes": 5313
+        },
+        "rerun": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/box/rerun/base/episode_000.rrd",
+          "sha256": "259e13ed956041f82ee8d330f7be96ae6e36cc05e7cafd206657d3a85a2156db",
+          "size_bytes": 615152
+        },
+        "video": {
+          "path": "artifacts/e2-simulator-visuals-rerun35/box/videos/base/episode_000.mp4",
+          "sha256": "0247e9951990e93f8f958a060a929b714b3ce10257a7f0c26065ac8b49351607",
+          "size_bytes": 113580
+        }
+      },
+      "metrics": {
+        "episode": 0,
+        "method": "base",
+        "path": "artifacts/e2-simulator-visuals-rerun35/box/metrics.jsonl",
+        "row_index": 0
+      },
+      "obstacle": {
+        "collision_geometry": [
+          {
+            "center": [
+              -0.10075885057449341,
+              -0.06924144923686981,
+              0.4230938255786896
+            ],
+            "half_extents": [
+              0.03999999910593033,
+              0.05999999865889549,
+              0.07999999821186066
+            ],
+            "type": "box",
+            "yaw": 0.6108652381980153
+          }
+        ],
+        "family": "box",
+        "id": "box:episode_000",
+        "pose": {
+          "center": [
+            -0.10075885057449341,
+            -0.06924144923686981,
+            0.4230938255786896
+          ],
+          "yaw": 0.6108652381980153
+        }
+      },
+      "paired_identity": {
+        "constraint_id": "85de0ddb3676cd2da2ae3197f7a94af92dd3bca98a5fb4d3203438986daebc2a",
+        "dataset_episode_index": 0,
+        "policy_seed": 916202559,
+        "simulator_seed": 48572821
+      },
+      "validation": {
+        "rerun": {
+          "opened": true
+        },
+        "video": {
+          "decoded": true,
+          "frame_count": 41,
+          "height": 512,
+          "width": 512
+        }
+      }
+    }
+  ],
+  "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
+  "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
+  "git": {
+    "commit": "abdff865d1ba1c8fec894eeea956536a7d532815",
+    "dirty": true
+  },
+  "rerun_writer_version": "0.35.0",
+  "run_id": "/scratch2/skills/puru/pg3d/artifacts/e2-simulator-visuals-rerun35/box",
+  "schema_version": "pg3d.artifact_manifest.v1"
+}

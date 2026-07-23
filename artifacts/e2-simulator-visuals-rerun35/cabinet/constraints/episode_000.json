@@ -1,0 +1,156 @@
+[
+  {
+    "margin": 0.0,
+    "name": "direct_path_avoid_region/cabinet_left_side",
+    "region": {
+      "center": [
+        -0.1701025813817978,
+        -0.08707115799188614,
+        0.41744694113731384
+      ],
+      "half_extents": [
+        0.004999999888241291,
+        0.07999999821186066,
+        0.20000000298023224
+      ],
+      "type": "box",
+      "yaw": 0.17453292519943295
+    },
+    "target": "eef",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  },
+  {
+    "margin": 0.0,
+    "name": "direct_path_avoid_region/cabinet_right_side",
+    "region": {
+      "center": [
+        -0.022381410002708435,
+        -0.061023928225040436,
+        0.41744694113731384
+      ],
+      "half_extents": [
+        0.004999999888241291,
+        0.07999999821186066,
+        0.20000000298023224
+      ],
+      "type": "box",
+      "yaw": 0.17453292519943295
+    },
+    "target": "eef",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  },
+  {
+    "margin": 0.0,
+    "name": "direct_path_avoid_region/cabinet_top",
+    "region": {
+      "center": [
+        -0.09624199569225311,
+        -0.07404754310846329,
+        0.6124469041824341
+      ],
+      "half_extents": [
+        0.07999999821186066,
+        0.07999999821186066,
+        0.004999999888241291
+      ],
+      "type": "box",
+      "yaw": 0.17453292519943295
+    },
+    "target": "eef",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  },
+  {
+    "margin": 0.0,
+    "name": "direct_path_avoid_region/cabinet_bottom",
+    "region": {
+      "center": [
+        -0.09624199569225311,
+        -0.07404754310846329,
+        0.22244694828987122
+      ],
+      "half_extents": [
+        0.07999999821186066,
+        0.07999999821186066,
+        0.004999999888241291
+      ],
+      "type": "box",
+      "yaw": 0.17453292519943295
+    },
+    "target": "eef",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  },
+  {
+    "margin": 0.0,
+    "name": "direct_path_avoid_region/cabinet_back",
+    "region": {
+      "center": [
+        -0.10926561057567596,
+        -0.00018695741891860962,
+        0.41744694113731384
+      ],
+      "half_extents": [
+        0.07999999821186066,
+        0.004999999888241291,
+        0.20000000298023224
+      ],
+      "type": "box",
+      "yaw": 0.17453292519943295
+    },
+    "target": "eef",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  },
+  {
+    "margin": 0.0,
+    "name": "direct_path_avoid_region/cabinet_shelf",
+    "region": {
+      "center": [
+        -0.09624199569225311,
+        -0.07404754310846329,
+        0.41744694113731384
+      ],
+      "half_extents": [
+        0.07500000298023224,
+        0.07500000298023224,
+        0.004999999888241291
+      ],
+      "type": "box",
+      "yaw": 0.17453292519943295
+    },
+    "target": "eef",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  },
+  {
+    "margin": 0.0,
+    "name": "direct_path_avoid_region/cabinet_open_door",
+    "region": {
+      "center": [
+        -0.1463746726512909,
+        -0.09286344051361084,
+        0.41744694113731384
+      ],
+      "half_extents": [
+        0.07999999821186066,
+        0.004999999888241291,
+        0.1899999976158142
+      ],
+      "type": "box",
+      "yaw": 1.3962634015954636
+    },
+    "target": "eef",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  }
+]

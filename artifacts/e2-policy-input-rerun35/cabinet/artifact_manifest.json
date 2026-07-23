@@ -1,0 +1,169 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "episode_000:base",
+      "files": {
+        "constraint": {
+          "path": "artifacts/e2-policy-input-rerun35/cabinet/constraints/episode_000.json",
+          "sha256": "a7a7f132888b943ffb90180c31e6d17687c0a2a0a7b5170f07db5d7dcabcfc59",
+          "size_bytes": 3408
+        },
+        "policy_pointcloud_bundle": {
+          "path": "artifacts/e2-policy-input-rerun35/cabinet/rerun/base/episode_000.policy_input.npz",
+          "sha256": "5e813f53b2417b692d9495a21a09d2386b01deea7f376be5bf461ddc0dd0d790",
+          "size_bytes": 13979
+        },
+        "policy_pointcloud_metadata": {
+          "path": "artifacts/e2-policy-input-rerun35/cabinet/rerun/base/episode_000.policy_input.json",
+          "sha256": "4bb3253c28381bd39acc403e829564d113da1d5b1fb8f7f46e6d833480a4cba2",
+          "size_bytes": 12621
+        },
+        "rerun": {
+          "path": "artifacts/e2-policy-input-rerun35/cabinet/rerun/base/episode_000.rrd",
+          "sha256": "9d439a8264ef69f12c87584d1497ae55222b2f3c1f93bfacaaa90ea4450f6926",
+          "size_bytes": 84059
+        },
+        "video": null
+      },
+      "metrics": {
+        "episode": 0,
+        "method": "base",
+        "path": "artifacts/e2-policy-input-rerun35/cabinet/metrics.jsonl",
+        "row_index": 0
+      },
+      "obstacle": {
+        "collision_geometry": [
+          {
+            "center": [
+              -0.1701025813817978,
+              -0.08707115799188614,
+              0.41744694113731384
+            ],
+            "half_extents": [
+              0.004999999888241291,
+              0.07999999821186066,
+              0.20000000298023224
+            ],
+            "type": "box",
+            "yaw": 0.17453292519943295
+          },
+          {
+            "center": [
+              -0.022381410002708435,
+              -0.061023928225040436,
+              0.41744694113731384
+            ],
+            "half_extents": [
+              0.004999999888241291,
+              0.07999999821186066,
+              0.20000000298023224
+            ],
+            "type": "box",
+            "yaw": 0.17453292519943295
+          },
+          {
+            "center": [
+              -0.09624199569225311,
+              -0.07404754310846329,
+              0.6124469041824341
+            ],
+            "half_extents": [
+              0.07999999821186066,
+              0.07999999821186066,
+              0.004999999888241291
+            ],
+            "type": "box",
+            "yaw": 0.17453292519943295
+          },
+          {
+            "center": [
+              -0.09624199569225311,
+              -0.07404754310846329,
+              0.22244694828987122
+            ],
+            "half_extents": [
+              0.07999999821186066,
+              0.07999999821186066,
+              0.004999999888241291
+            ],
+            "type": "box",
+            "yaw": 0.17453292519943295
+          },
+          {
+            "center": [
+              -0.10926561057567596,
+              -0.00018695741891860962,
+              0.41744694113731384
+            ],
+            "half_extents": [
+              0.07999999821186066,
+              0.004999999888241291,
+              0.20000000298023224
+            ],
+            "type": "box",
+            "yaw": 0.17453292519943295
+          },
+          {
+            "center": [
+              -0.09624199569225311,
+              -0.07404754310846329,
+              0.41744694113731384
+            ],
+            "half_extents": [
+              0.07500000298023224,
+              0.07500000298023224,
+              0.004999999888241291
+            ],
+            "type": "box",
+            "yaw": 0.17453292519943295
+          },
+          {
+            "center": [
+              -0.1463746726512909,
+              -0.09286344051361084,
+              0.41744694113731384
+            ],
+            "half_extents": [
+              0.07999999821186066,
+              0.004999999888241291,
+              0.1899999976158142
+            ],
+            "type": "box",
+            "yaw": 1.3962634015954636
+          }
+        ],
+        "family": "cabinet",
+        "id": "cabinet:episode_000",
+        "pose": {
+          "center": [
+            -0.09624199569225311,
+            -0.07404754310846329,
+            0.41744694113731384
+          ],
+          "yaw": 0.17453292519943295
+        }
+      },
+      "paired_identity": {
+        "constraint_id": "9b6c42c559106e6dad06e5dac26098f8b500e9f6d70529124899b1d5ba6a9c39",
+        "dataset_episode_index": 0,
+        "policy_seed": 916202559,
+        "simulator_seed": 48572821
+      },
+      "validation": {
+        "rerun": {
+          "opened": true
+        },
+        "video": null
+      }
+    }
+  ],
+  "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
+  "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
+  "git": {
+    "commit": "abdff865d1ba1c8fec894eeea956536a7d532815",
+    "dirty": true
+  },
+  "rerun_writer_version": "0.35.0",
+  "run_id": "/scratch2/skills/puru/pg3d/artifacts/e2-policy-input-rerun35/cabinet",
+  "schema_version": "pg3d.artifact_manifest.v1"
+}

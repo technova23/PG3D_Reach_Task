@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from pg3d.constraints import AvoidRegion, SphereRegion
@@ -17,6 +19,7 @@ from scripts.rollout_dp3_reach_policy import (
     obs_window_to_torch,
     policy_action_to_sim_action,
     rollout_spec_video_stem,
+    save_rerun_timeline,
     select_mixed_rollout_specs,
     select_random_dataset_rollout_specs,
     select_rollout_specs,
@@ -155,9 +158,7 @@ def test_select_mixed_rollout_specs_seeded_is_diverse_and_deterministic() -> Non
     assert len(set(seeded_dataset_idx)) == 3
     # Same seed reproduces; the next checkpoint (seed+1) resamples a new subset.
     assert [s.seed for s in seeded] == [s.seed for s in seeded_again]
-    assert [s.dataset_episode_index for s in seeded] != [
-        s.dataset_episode_index for s in next_step
-    ]
+    assert [s.dataset_episode_index for s in seeded] != [s.dataset_episode_index for s in next_step]
 
 
 def test_select_random_dataset_rollout_specs_is_deterministic_and_clamped() -> None:
@@ -256,6 +257,53 @@ def test_rerun_tcp_clearance_uses_constraint_margin() -> None:
     assert np.isclose(
         _rerun_tcp_clearance(np.asarray([0.15, 0.0, 0.0]), [constraint]),
         0.03,
+    )
+
+
+def test_rerun35_export_retains_exact_policy_tensor_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = _entry(1.0)
+    entry["robot_mask"][0] = True
+    entry["obstacle_mask"] = np.asarray([False, True, False, False])
+    entry["point_valid_mask"][-1] = False
+    output = tmp_path / "episode_000.rrd"
+    fake_python = tmp_path / "python"
+    fake_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "scripts.rollout_dp3_reach_policy._rerun35_exporter_python",
+        lambda: fake_python,
+    )
+
+    def fake_run(command: list[str], *, check: bool) -> None:
+        assert check is True
+        Path(command[command.index("--output") + 1]).write_bytes(b"rrd35")
+
+    monkeypatch.setattr("scripts.rollout_dp3_reach_policy.subprocess.run", fake_run)
+
+    save_rerun_timeline(
+        output,
+        [entry],
+        goal_marker_points=2,
+        goal_marker_radius=0.015,
+    )
+
+    with np.load(output.with_suffix(".policy_input.npz"), allow_pickle=False) as bundle:
+        semantics = _policy_point_cloud_semantics(
+            entry,
+            goal_marker_points=2,
+            goal_marker_radius=0.015,
+        )
+        np.testing.assert_array_equal(bundle["point_cloud"][0], semantics["all_points"])
+        np.testing.assert_array_equal(bundle["valid_mask"][0], semantics["all_valid_mask"])
+        np.testing.assert_array_equal(bundle["obstacle_mask"][0], semantics["all_obstacle_mask"])
+        np.testing.assert_array_equal(bundle["scene_mask"][0], semantics["all_scene_mask"])
+        assert bundle["point_cloud"].shape == (1, 4, 3)
+    assert output.read_bytes() == b"rrd35"
+    assert '"rerun_writer_version": "0.35.0"' in output.with_suffix(".policy_input.json").read_text(
+        encoding="utf-8"
     )
 
 

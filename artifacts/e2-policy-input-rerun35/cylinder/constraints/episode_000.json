@@ -1,0 +1,20 @@
+[
+  {
+    "margin": 0.0,
+    "name": "direct_path_avoid_region",
+    "region": {
+      "center": [
+        -0.10075885057449341,
+        -0.06924144923686981,
+        0.4230938255786896
+      ],
+      "half_length": 0.11999999731779099,
+      "radius": 0.054999999701976776,
+      "type": "cylinder"
+    },
+    "target": "eef",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  }
+]

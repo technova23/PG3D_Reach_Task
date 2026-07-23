@@ -5,7 +5,6 @@ import hashlib
 import json
 import math
 import os
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -102,6 +101,7 @@ from scripts.eval_reach_checkpoint_unique_seeds import (
 from scripts.rollout_dp3_reach_policy import (
     ActionMode,
     RolloutSpec,
+    _rerun35_exporter_python,
     append_obs_window,
     crop_config_from_metadata,
     make_initial_obs_window,
@@ -189,9 +189,7 @@ class ComputeOperationCounts:
         if trajectory.ndim < 2:
             raise ValueError("ITPS trajectory must have batch and horizon dimensions")
         self.differentiable_fk_calls += 1
-        self.differentiable_fk_pose_evaluations += int(
-            trajectory.shape[0] * trajectory.shape[1]
-        )
+        self.differentiable_fk_pose_evaluations += int(trajectory.shape[0] * trajectory.shape[1])
 
     def begin_action_selection(self, device: torch.device) -> int | None:
         """Reset PyTorch CUDA peak stats and return the current allocation."""
@@ -229,29 +227,17 @@ class ComputeOperationCounts:
         return {
             "denoiser_forward_calls": int(self.denoiser_forward_calls),
             "denoiser_evaluations": int(self.denoiser_evaluations),
-            "denoiser_forward_calls_per_replan": _per_replan(
-                self.denoiser_forward_calls, replans
-            ),
-            "denoiser_evaluations_per_replan": _per_replan(
-                self.denoiser_evaluations, replans
-            ),
+            "denoiser_forward_calls_per_replan": _per_replan(self.denoiser_forward_calls, replans),
+            "denoiser_evaluations_per_replan": _per_replan(self.denoiser_evaluations, replans),
             "differentiable_fk_calls": int(self.differentiable_fk_calls),
-            "differentiable_fk_pose_evaluations": int(
-                self.differentiable_fk_pose_evaluations
-            ),
-            "end_effector_position_queries": int(
-                self.end_effector_position_queries
-            ),
-            "end_effector_position_only_queries": int(
-                self.end_effector_position_only_queries
-            ),
+            "differentiable_fk_pose_evaluations": int(self.differentiable_fk_pose_evaluations),
+            "end_effector_position_queries": int(self.end_effector_position_queries),
+            "end_effector_position_only_queries": int(self.end_effector_position_only_queries),
             "eef_geometry_queries": int(self.eef_geometry_queries),
             "robot_point_cloud_queries": int(self.robot_point_cloud_queries),
             "robot_point_cloud_renders": int(self.robot_point_cloud_renders),
             "geometry_evaluations": int(geometry_evaluations),
-            "geometry_evaluations_per_replan": _per_replan(
-                geometry_evaluations, replans
-            ),
+            "geometry_evaluations_per_replan": _per_replan(geometry_evaluations, replans),
             "peak_gpu_memory_bytes": self.peak_gpu_memory_bytes,
             "peak_gpu_memory_delta_bytes": self.peak_gpu_memory_delta_bytes,
         }
@@ -288,6 +274,8 @@ def _first_tensor_batch_size(value: Any) -> int | None:
 
 def _per_replan(value: int, replans: int) -> float | None:
     return float(value) / float(replans) if replans > 0 else None
+
+
 # Z range used to extrude the height-agnostic avoid_projection footprint for the
 # overlay video. Display-only; the constraint itself penalizes XY at any height.
 _PROJECTION_OVERLAY_Z_RANGE = (0.0, 0.5)
@@ -448,9 +436,7 @@ def main(argv: list[str] | None = None) -> int:
     dataset_episode_seeds = [
         int(episode["seed"]) for episode in metadata.get("episodes", []) if "seed" in episode
     ]
-    zarr_root = (
-        zarr.open_group(str(args.dataset), mode="r") if args.source == "dataset" else None
-    )
+    zarr_root = zarr.open_group(str(args.dataset), mode="r") if args.source == "dataset" else None
     episode_indices = _episode_indices_from_args(
         args,
         dataset_episode_seeds=dataset_episode_seeds,
@@ -557,9 +543,7 @@ def main(argv: list[str] | None = None) -> int:
                     zarr_context=zarr_context,
                 )
                 constraint_path = (
-                    args.output_dir
-                    / "constraints"
-                    / f"episode_{spec.output_index:03d}.json"
+                    args.output_dir / "constraints" / f"episode_{spec.output_index:03d}.json"
                 )
                 with timer.time("json_write", artifact="constraint"):
                     save_episode_constraints(constraint_path, constraints)
@@ -634,8 +618,7 @@ def main(argv: list[str] | None = None) -> int:
                             ),
                             "artifact_manifest_path": (
                                 str(artifact_manifest_path)
-                                if row.get("video") is not None
-                                or row.get("rerun") is not None
+                                if row.get("video") is not None or row.get("rerun") is not None
                                 else None
                             ),
                         }
@@ -1122,9 +1105,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.avoid_box_half_extents is None:
             args.avoid_box_half_extents = list(_CARTON_HALF_EXTENTS)
     if args.embody_obstacle and args.avoid_shape not in ("box", "cuboid", "cylinder"):
-        raise ValueError(
-            "--embody-obstacle currently requires a box or cylinder avoid shape"
-        )
+        raise ValueError("--embody-obstacle currently requires a box or cylinder avoid shape")
     if (
         args.embody_obstacle
         and args.obstacle_family != "cylinder"
@@ -1373,9 +1354,7 @@ def run_eval_episode(
                 post_success_steps=post_success_steps,
                 first_success_step=first_success_step,
             )
-            provider_counts_before = (
-                provider.counter_snapshot() if provider is not None else {}
-            )
+            provider_counts_before = provider.counter_snapshot() if provider is not None else {}
             memory_baseline = compute_counts.begin_action_selection(policy.device)
             try:
                 with timer.time(
@@ -1618,13 +1597,19 @@ def run_eval_episode(
         replan_start_action_indices=replan_start_action_indices,
     )
     row.update(compute_counts.to_metric_row(replans=replans))
+    if rerun_path is not None:
+        row.update(
+            {
+                "rerun_writer_version": "0.35.0",
+                "policy_pointcloud_bundle": str(rerun_path.with_suffix(".policy_input.npz")),
+                "policy_pointcloud_metadata": str(rerun_path.with_suffix(".policy_input.json")),
+            }
+        )
     if embody_obstacle:
         goal_marker_points = int(getattr(policy, "goal_marker_points", 0))
         obstacle_reset = _embodied_obstacle_reset_options(constraints)
         raw_counts = [int(entry.get("obstacle_points_raw", 0)) for entry in timeline]
-        cropped_counts = [
-            int(entry.get("obstacle_points_cropped", 0)) for entry in timeline
-        ]
+        cropped_counts = [int(entry.get("obstacle_points_cropped", 0)) for entry in timeline]
         policy_counts = [
             _policy_obstacle_point_count(entry, goal_marker_points=goal_marker_points)
             for entry in timeline
@@ -1681,11 +1666,7 @@ def _episode_step_limit(
     """Keep the nominal task horizon fixed while allowing a complete hold window."""
     if max_task_steps <= 0 or post_success_steps < 0:
         raise ValueError("invalid task or post-success step limit")
-    return (
-        max_task_steps
-        if first_success_step is None
-        else max_task_steps + post_success_steps
-    )
+    return max_task_steps if first_success_step is None else max_task_steps + post_success_steps
 
 
 def _select_decision(
@@ -1750,11 +1731,7 @@ def _select_decision(
         scene=scene,
         policy_input=obs_window,
     )
-    if (
-        geometry_mode == "exact"
-        and planning_horizon_chunks == 1
-        and directional_sign == 0
-    ):
+    if geometry_mode == "exact" and planning_horizon_chunks == 1 and directional_sign == 0:
         controller_cls = RejectionController if method == "rejection" else RerankingController
         with timer.time("candidate_scoring", method=method, geometry_mode=geometry_mode):
             result = controller_cls(
@@ -2247,9 +2224,7 @@ def _rerun_replan_record(
             metadata={"replan_index": replan_index, "artifact": "rerun"},
             timer=timer,
         )
-        selected_path = np.concatenate(
-            [current_tcp.reshape(1, 3), rollout.eef_path], axis=0
-        )
+        selected_path = np.concatenate([current_tcp.reshape(1, 3), rollout.eef_path], axis=0)
         selected_index = None
     return {
         "step": int(step),
@@ -2342,9 +2317,7 @@ def _clear_region_from_robot(
             if norm < 1e-6:
                 direction = np.array([0.0, 0.0, 1.0], dtype=np.float32)
                 norm = 1.0
-            center = (
-                center + direction / norm * ((clearance - min_sd) + 1e-3)
-            ).astype(np.float32)
+            center = (center + direction / norm * ((clearance - min_sd) + 1e-3)).astype(np.float32)
         return CylinderRegion(
             center=center,
             radius=region.radius,
@@ -2354,9 +2327,7 @@ def _clear_region_from_robot(
     center = region.center.astype(np.float32).copy()
     half_extents = region.half_extents.astype(np.float32)
     for _ in range(max_iter):
-        candidate = BoxRegion(
-            center=center, half_extents=half_extents, yaw=region.yaw
-        )
+        candidate = BoxRegion(center=center, half_extents=half_extents, yaw=region.yaw)
         signed = candidate.signed_distance(pts)
         min_sd = float(np.min(signed))
         if min_sd >= clearance:
@@ -2385,9 +2356,7 @@ def _finalize_constraints(
 ) -> list[AvoidRegion]:
     """Apply the guidance target and robot-clearance-aware placement to placed regions."""
     enable_clearance = (
-        bool(args.robot_clearance_placement)
-        and robot_points is not None
-        and len(robot_points) > 0
+        bool(args.robot_clearance_placement) and robot_points is not None and len(robot_points) > 0
     )
     finalized: list[AvoidRegion] = []
     for constraint in constraints:
@@ -2398,9 +2367,7 @@ def _finalize_constraints(
                 half_extents=region.half_extents,
                 yaw=np.deg2rad(float(args.obstacle_yaw_deg)),
             )
-        if enable_clearance and isinstance(
-            region, (SphereRegion, BoxRegion, CylinderRegion)
-        ):
+        if enable_clearance and isinstance(region, (SphereRegion, BoxRegion, CylinderRegion)):
             region = _clear_region_from_robot(
                 region,
                 robot_points,
@@ -2788,9 +2755,7 @@ def _widest_trajectory_constraints(
     for i, frac in enumerate(fractions):
         center = _point_at_arc_fraction(widest_path, fraction=frac).astype(np.float32)
         radius = max(float(args.avoid_min_radius), float(args.avoid_radius))
-        name = (
-            f"widest_trajectory_avoid_region_{i}" if multi else "widest_trajectory_avoid_region"
-        )
+        name = f"widest_trajectory_avoid_region_{i}" if multi else "widest_trajectory_avoid_region"
         print(
             f"widest-trajectory constraint [{i}]: "
             f"episode={spec.output_index} frac={frac:.2f} "
@@ -3145,7 +3110,7 @@ def _plot_candidate_paths(
         for xc, yc in zip(xs[:-1], ys[:-1], strict=True):
             ax3d.plot([xc, xc], [yc, yc], [z_lo, z_hi], color="crimson", alpha=0.3, linewidth=0.8)
         ax3d.scatter(cx, cy, 0.5 * (z_lo + z_hi), color="crimson", s=60, zorder=10)
-        constraint_legend_label = f"projection {2*hx:.3f}×{2*hy:.3f}m"
+        constraint_legend_label = f"projection {2 * hx:.3f}×{2 * hy:.3f}m"
     else:
         # Draw sphere wireframe.
         u = np.linspace(0, 2 * np.pi, 30)
@@ -3200,15 +3165,23 @@ def _plot_candidate_paths(
         hx, hy = float(projection_half_extents[0]), float(projection_half_extents[1])
         rect = mpatches.Rectangle(
             (float(center[0]) - hx, float(center[1]) - hy),
-            2 * hx, 2 * hy,
-            linewidth=1.5, edgecolor="crimson", facecolor="crimson", alpha=0.15,
-            label=f"projection {2*hx:.3f}×{2*hy:.3f}m",
+            2 * hx,
+            2 * hy,
+            linewidth=1.5,
+            edgecolor="crimson",
+            facecolor="crimson",
+            alpha=0.15,
+            label=f"projection {2 * hx:.3f}×{2 * hy:.3f}m",
         )
         ax2d.add_patch(rect)
         ax2d.scatter(center[0], center[1], color="crimson", s=60, zorder=10)
     else:
         circle = plt.Circle(
-            (center[0], center[1]), radius, color="crimson", fill=False, linewidth=1.5,
+            (center[0], center[1]),
+            radius,
+            color="crimson",
+            fill=False,
+            linewidth=1.5,
             label=f"sphere r={radius:.3f}m",
         )
         ax2d.add_patch(circle)
@@ -3346,10 +3319,7 @@ def _repeat_obs_window_to_torch(
         goal_marker_points=goal_marker_points,
         goal_marker_radius=goal_marker_radius,
     )
-    return {
-        key: value.repeat((k, *([1] * (value.ndim - 1))))
-        for key, value in batch.items()
-    }
+    return {key: value.repeat((k, *([1] * (value.ndim - 1)))) for key, value in batch.items()}
 
 
 def _obs_windows_to_torch(
@@ -3384,10 +3354,7 @@ def _obs_windows_to_torch(
         axis=0,
     )
     goal_xyz = np.stack(
-        [
-            np.stack([entry["target_position"] for entry in window], axis=0)
-            for window in windows
-        ],
+        [np.stack([entry["target_position"] for entry in window], axis=0) for window in windows],
         axis=0,
     )
     ee_position = np.stack(
@@ -3500,17 +3467,11 @@ def _embodied_obstacle_reset_options(
             "pg3d_obstacle_center": cabinet_shelf.region.center.astype(float).tolist(),
             "pg3d_obstacle_yaw": float(cabinet_shelf.region.yaw),
         }
-    if len(constraints) != 1 or not isinstance(
-        constraints[0].region, (BoxRegion, CylinderRegion)
-    ):
+    if len(constraints) != 1 or not isinstance(constraints[0].region, (BoxRegion, CylinderRegion)):
         raise ValueError(
             "embodied obstacle evaluation requires exactly one box or cylinder constraint"
         )
-    yaw = (
-        float(constraints[0].region.yaw)
-        if isinstance(constraints[0].region, BoxRegion)
-        else 0.0
-    )
+    yaw = float(constraints[0].region.yaw) if isinstance(constraints[0].region, BoxRegion) else 0.0
     return {
         "pg3d_obstacle_center": constraints[0].region.center.astype(float).tolist(),
         "pg3d_obstacle_yaw": yaw,
@@ -3531,9 +3492,7 @@ def _validate_embodied_obstacle_geometry(
         root_yaw = float(reset_options["pg3d_obstacle_yaw"])
         expected_regions = []
         for component in CABINET_COMPONENTS:
-            center, yaw = transform_box_component(
-                component, center=root_center, yaw=root_yaw
-            )
+            center, yaw = transform_box_component(component, center=root_center, yaw=root_yaw)
             expected_regions.append(
                 BoxRegion(
                     center=center,
@@ -3545,9 +3504,7 @@ def _validate_embodied_obstacle_geometry(
         if len(actual_regions) != len(expected_regions) or any(
             not isinstance(actual, BoxRegion)
             or not np.allclose(actual.center, expected.center, atol=1e-7, rtol=0.0)
-            or not np.allclose(
-                actual.half_extents, expected.half_extents, atol=1e-7, rtol=0.0
-            )
+            or not np.allclose(actual.half_extents, expected.half_extents, atol=1e-7, rtol=0.0)
             or not np.isclose(actual.yaw, expected.yaw, atol=1e-7, rtol=0.0)
             for actual, expected in zip(actual_regions, expected_regions, strict=False)
         ):
@@ -3794,13 +3751,21 @@ def _write_artifact_manifest(
         files = {
             "video": _artifact_file_record(Path(str(video))) if video is not None else None,
             "rerun": _artifact_file_record(Path(str(rerun))) if rerun is not None else None,
+            "policy_pointcloud_bundle": (
+                _artifact_file_record(Path(str(row["policy_pointcloud_bundle"])))
+                if row.get("policy_pointcloud_bundle") is not None
+                else None
+            ),
+            "policy_pointcloud_metadata": (
+                _artifact_file_record(Path(str(row["policy_pointcloud_metadata"])))
+                if row.get("policy_pointcloud_metadata") is not None
+                else None
+            ),
             "constraint": _artifact_file_record(constraint_path),
         }
         artifacts.append(
             {
-                "artifact_id": (
-                    f"episode_{int(row['episode']):03d}:{str(row['method'])}"
-                ),
+                "artifact_id": (f"episode_{int(row['episode']):03d}:{str(row['method'])}"),
                 "metrics": {
                     "path": str(path.parent / "metrics.jsonl"),
                     "row_index": row_index,
@@ -3831,6 +3796,7 @@ def _write_artifact_manifest(
             "commit": git_info.get("commit"),
             "dirty": bool(git_info.get("dirty")),
         },
+        "rerun_writer_version": "0.35.0",
         "artifacts": artifacts,
     }
     validate_artifact_manifest(manifest, rows=rows, inspect_content=True)
@@ -3883,9 +3849,7 @@ def validate_artifact_manifest(
         paired = artifact["paired_identity"]
         for key in ("simulator_seed", "policy_seed", "constraint_id"):
             if paired[key] != row[key]:
-                raise ValueError(
-                    f"artifact identity {key} disagrees with metrics row {row_index}"
-                )
+                raise ValueError(f"artifact identity {key} disagrees with metrics row {row_index}")
         files = artifact["files"]
         if files.get("video") is not None and files.get("rerun") is None:
             raise ValueError(f"artifact {artifact['artifact_id']} has video without Rerun")
@@ -3946,13 +3910,11 @@ def _decode_video_artifact(path: Path) -> dict[str, int | bool]:
 
 
 def _open_rerun_artifact(path: Path) -> dict[str, bool]:
-    """Parse an RRD with Rerun's own CLI so unreadable recordings fail closed."""
-    sibling_cli = Path(sys.executable).with_name("rerun")
-    rerun_cli = str(sibling_cli) if sibling_cli.is_file() else shutil.which("rerun")
-    if rerun_cli is None:
-        raise ValueError("cannot validate RRD: the rerun CLI is unavailable")
+    """Parse an RRD with the isolated Rerun 0.35 exporter environment."""
+    exporter_python = _rerun35_exporter_python()
+    exporter = Path(__file__).with_name("export_policy_pointcloud_rerun35.py")
     result = subprocess.run(
-        [rerun_cli, "rrd", "print", str(path)],
+        [str(exporter_python), str(exporter), "--validate", str(path)],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -4090,9 +4052,7 @@ def _log_wandb_episode(
     try:
         metrics = {
             f"episode/{row['method']}/reach_success": float(row["reach_success"]),
-            f"episode/{row['method']}/constraint_satisfied": float(
-                row["constraint_satisfied"]
-            ),
+            f"episode/{row['method']}/constraint_satisfied": float(row["constraint_satisfied"]),
             f"episode/{row['method']}/combined_success": float(row["combined_success"]),
             f"episode/{row['method']}/final_target_distance": row["final_target_distance"],
             f"episode/{row['method']}/min_clearance": row["min_clearance"],
