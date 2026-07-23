@@ -55,8 +55,11 @@ primitives provide matched constraint geometry to reranking and ITPS. Point-clou
 inference is deferred to a later perception ablation. The protocol also makes paired MP4 videos
 and Rerun `.rrd` point-cloud timelines required outputs for a deterministic representative
 episode subset; plots alone do not complete an experiment. The current evaluator covers the
-pilot metrics but still needs stable-success, violation-duration/integral, path-efficiency,
-physical-unit motion-quality, and compute-operation fields before the definitive comparison.
+pilot metrics and now logs stable-hold success, TCP violation duration/integral/events,
+TCP/joint path length, physical-time acceleration/jerk, maximum joint velocity, and robust
+continuous summaries. It still needs time-indexed whole-robot violations, executed-action
+replan discontinuity, paired statistical utilities, and compute-operation fields before the
+definitive comparison.
 
 ## Current phase
 

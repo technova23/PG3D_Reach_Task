@@ -17,9 +17,12 @@ from pg3d.eval import (
     TimingRecorder,
     candidate_feasibility_fraction,
     concatenate_rollouts,
+    constraint_clearance_series,
+    constraint_violation_metrics,
     direct_path_avoid_region,
     episode_metric_row,
     load_episode_constraints,
+    max_joint_velocity,
     min_constraint_clearance,
     nominal_path_avoid_region,
     path_satisfies_constraints,
@@ -28,8 +31,11 @@ from pg3d.eval import (
     scene_context_for_constraints,
     select_artifact_episode_indices,
     should_emit_episode_artifact,
+    stable_goal_reached,
     success_rate_ci_rows,
     summarize_metrics,
+    trajectory_derivative_mse,
+    trajectory_path_length,
     validate_planning_horizons,
     wilson_interval,
 )
@@ -229,6 +235,98 @@ def test_episode_metric_row_computes_clearance_and_combined_success() -> None:
     assert row["candidate_feasibility_fraction"] == pytest.approx(0.5)
 
 
+def test_stable_goal_requires_complete_post_success_hold() -> None:
+    distances = [0.5, 0.02, 0.01, 0.02]
+
+    assert stable_goal_reached(
+        distances,
+        first_success_step=1,
+        goal_threshold=0.025,
+        hold_steps=2,
+    )
+    assert not stable_goal_reached(
+        distances[:3],
+        first_success_step=1,
+        goal_threshold=0.025,
+        hold_steps=2,
+    )
+    assert not stable_goal_reached(
+        [0.5, 0.02, 0.03, 0.01],
+        first_success_step=1,
+        goal_threshold=0.025,
+        hold_steps=2,
+    )
+
+
+def test_clearance_series_and_violation_metrics_preserve_events() -> None:
+    constraint = direct_path_avoid_region(
+        start_tcp=[0.0, 0.0, 0.0],
+        target_position=[1.0, 0.0, 0.0],
+        config=AvoidOverlayConfig(radius=0.1, tolerance=0.0),
+    )
+    path = np.asarray(
+        [
+            [0.0, 0.2, 0.0],
+            [0.5, 0.05, 0.0],
+            [0.5, 0.2, 0.0],
+            [0.5, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    clearances = constraint_clearance_series(path, [constraint])
+    metrics = constraint_violation_metrics(path, [constraint], dt=0.1)
+
+    np.testing.assert_allclose(clearances, [0.4385165, -0.05, 0.1, -0.1], atol=1e-6)
+    assert metrics["max_violation_depth"] == pytest.approx(0.1)
+    assert metrics["violation_steps"] == 2
+    assert metrics["violation_fraction"] == pytest.approx(0.5)
+    assert metrics["integrated_violation"] == pytest.approx(0.015)
+    assert metrics["violation_event_count"] == 2
+
+
+def test_physical_trajectory_metrics_use_control_dt() -> None:
+    trajectory = np.asarray([[0.0], [0.1], [0.3], [0.6]], dtype=np.float32)
+
+    assert trajectory_path_length(trajectory) == pytest.approx(0.6)
+    assert trajectory_derivative_mse(trajectory, order=2, dt=0.1) == pytest.approx(100.0)
+    assert trajectory_derivative_mse(trajectory, order=3, dt=0.1) == pytest.approx(0.0, abs=1e-3)
+    assert max_joint_velocity(trajectory, dt=0.1) == pytest.approx(3.0)
+
+
+def test_episode_metric_row_reports_stable_physical_metrics() -> None:
+    path = EpisodePath()
+    for idx, distance in enumerate([0.5, 0.02, 0.01, 0.015]):
+        path.append(
+            tcp_position=[0.1 * idx, 0.0, 0.0],
+            q=[0.1 * idx, 0.0],
+            target_distance=distance,
+        )
+
+    row = episode_metric_row(
+        method="base",
+        episode=0,
+        seed=0,
+        path=path,
+        constraints=[],
+        reach_success=True,
+        first_success_step=1,
+        steps=3,
+        replans=1,
+        candidate_feasibility_fraction=None,
+        goal_threshold=0.025,
+        hold_steps=2,
+        control_dt=0.1,
+    )
+
+    assert row["stable_goal_reached"] is True
+    assert row["stable_combined_success"] is True
+    assert row["tcp_path_length"] == pytest.approx(0.3)
+    assert row["joint_path_length"] == pytest.approx(0.3)
+    assert row["max_joint_velocity"] == pytest.approx(1.0)
+    assert row["violation_steps_tcp"] == 0
+
+
 def test_constraint_satisfaction_fails_for_path_inside_sphere() -> None:
     constraint = direct_path_avoid_region(
         start_tcp=[0.0, 0.0, 0.0],
@@ -306,6 +404,9 @@ def test_success_rate_ci_rows_accepts_full_summary() -> None:
                 "combined_success_rate": 0.2,
                 "combined_success_wilson_low": 0.05,
                 "combined_success_wilson_high": 0.45,
+                "stable_combined_success_rate": 0.1,
+                "stable_combined_success_wilson_low": 0.01,
+                "stable_combined_success_wilson_high": 0.3,
             }
         }
     }
@@ -316,6 +417,7 @@ def test_success_rate_ci_rows_accepts_full_summary() -> None:
         "reach_success",
         "constraint_satisfied",
         "combined_success",
+        "stable_combined_success",
     ]
     assert rows[0]["method"] == "base"
     assert rows[0]["err_low"] == pytest.approx(0.15)

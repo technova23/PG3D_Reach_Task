@@ -29,6 +29,7 @@ SUCCESS_RATE_METRICS: tuple[tuple[str, str], ...] = (
     ("reach_success", "Reach"),
     ("constraint_satisfied", "Constraint"),
     ("combined_success", "Combined"),
+    ("stable_combined_success", "Stable combined"),
 )
 
 
@@ -304,16 +305,174 @@ def min_constraint_clearance(
     return min(clearances) if clearances else None
 
 
+def constraint_clearance_series(
+    tcp_positions: Any,
+    constraints: list[AvoidRegion],
+) -> np.ndarray:
+    """Return minimum signed clearance at every path sample after constraint margins."""
+    path = np.asarray(tcp_positions, dtype=np.float32)
+    if path.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+    if path.ndim != 2 or path.shape[1] != 3:
+        raise ValueError(f"tcp_positions must have shape [T, 3], got {path.shape}")
+    if not np.all(np.isfinite(path)):
+        raise ValueError("tcp_positions must be finite")
+    if not constraints:
+        return np.full((path.shape[0],), np.inf, dtype=np.float32)
+    per_constraint = [
+        np.asarray(constraint.region.signed_distance(path), dtype=np.float32)
+        - np.float32(constraint.margin)
+        for constraint in constraints
+    ]
+    return np.min(np.stack(per_constraint, axis=0), axis=0).astype(
+        np.float32, copy=False
+    )
+
+
 def path_satisfies_constraints(
     tcp_positions: Any,
     constraints: list[AvoidRegion],
 ) -> bool:
     """Return whether an executed TCP path stays outside all avoid regions."""
-    clearance = min_constraint_clearance(tcp_positions, constraints)
-    if clearance is None:
+    path = np.asarray(tcp_positions, dtype=np.float32)
+    if path.size == 0 or not constraints:
         return True
-    tolerance = max((float(constraint.tolerance) for constraint in constraints), default=1e-6)
-    return clearance >= -tolerance
+    if path.ndim != 2 or path.shape[1] != 3:
+        raise ValueError(f"tcp_positions must have shape [T, 3], got {path.shape}")
+    return all(
+        float(
+            np.min(
+                np.asarray(constraint.region.signed_distance(path), dtype=np.float32)
+                - np.float32(constraint.margin)
+            )
+        )
+        >= -float(constraint.tolerance)
+        for constraint in constraints
+    )
+
+
+def constraint_violation_metrics(
+    tcp_positions: Any,
+    constraints: list[AvoidRegion],
+    *,
+    dt: float,
+) -> dict[str, float | int]:
+    """Summarize executed TCP constraint violations in physical units."""
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be a positive finite value")
+    clearances = constraint_clearance_series(tcp_positions, constraints)
+    if clearances.size == 0 or not constraints:
+        return {
+            "max_violation_depth": 0.0,
+            "violation_steps": 0,
+            "violation_fraction": 0.0,
+            "integrated_violation": 0.0,
+            "violation_event_count": 0,
+        }
+    adjusted_clearances = np.min(
+        np.stack(
+            [
+                np.asarray(constraint.region.signed_distance(tcp_positions), dtype=np.float32)
+                - np.float32(constraint.margin)
+                + np.float32(constraint.tolerance)
+                for constraint in constraints
+            ],
+            axis=0,
+        ),
+        axis=0,
+    )
+    depths = np.maximum(0.0, -adjusted_clearances)
+    violating = depths > 0.0
+    starts = violating & ~np.concatenate(
+        [np.zeros((1,), dtype=bool), violating[:-1]]
+    )
+    return {
+        "max_violation_depth": float(np.max(depths)),
+        "violation_steps": int(np.count_nonzero(violating)),
+        "violation_fraction": float(np.mean(violating)),
+        "integrated_violation": float(np.sum(depths) * float(dt)),
+        "violation_event_count": int(np.count_nonzero(starts)),
+    }
+
+
+def trajectory_path_length(points: Any) -> float:
+    """Return Euclidean path length for a [T, D] trajectory."""
+    trajectory = np.asarray(points, dtype=np.float32)
+    if trajectory.size == 0:
+        return 0.0
+    if trajectory.ndim != 2:
+        raise ValueError(f"trajectory must have shape [T, D], got {trajectory.shape}")
+    if not np.all(np.isfinite(trajectory)):
+        raise ValueError("trajectory must be finite")
+    if trajectory.shape[0] < 2:
+        return 0.0
+    return float(np.sum(np.linalg.norm(np.diff(trajectory, axis=0), axis=1)))
+
+
+def trajectory_derivative_mse(points: Any, *, order: int, dt: float) -> float:
+    """Return mean squared derivative norm for a trajectory in physical time."""
+    trajectory = np.asarray(points, dtype=np.float32)
+    if trajectory.size == 0:
+        return 0.0
+    if trajectory.ndim != 2:
+        raise ValueError(f"trajectory must have shape [T, D], got {trajectory.shape}")
+    if not np.all(np.isfinite(trajectory)):
+        raise ValueError("trajectory must be finite")
+    if order <= 0:
+        raise ValueError("order must be positive")
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be a positive finite value")
+    if trajectory.shape[0] <= order:
+        return 0.0
+    derivative = np.diff(trajectory, n=order, axis=0) / np.float32(dt**order)
+    return mean_squared_norm(derivative)
+
+
+def max_joint_velocity(q: Any, *, dt: float) -> float:
+    """Return maximum absolute finite-difference joint velocity."""
+    trajectory = np.asarray(q, dtype=np.float32)
+    if trajectory.size == 0:
+        return 0.0
+    if trajectory.ndim != 2:
+        raise ValueError(f"q must have shape [T, D], got {trajectory.shape}")
+    if not np.all(np.isfinite(trajectory)):
+        raise ValueError("q must be finite")
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be a positive finite value")
+    if trajectory.shape[0] < 2:
+        return 0.0
+    return float(np.max(np.abs(np.diff(trajectory, axis=0) / np.float32(dt))))
+
+
+def stable_goal_reached(
+    target_distances: Any,
+    *,
+    first_success_step: int | None,
+    goal_threshold: float,
+    hold_steps: int,
+) -> bool:
+    """Return whether the goal remains reached for the full post-success hold window."""
+    if not np.isfinite(goal_threshold) or goal_threshold < 0.0:
+        raise ValueError("goal_threshold must be a non-negative finite value")
+    if hold_steps < 0:
+        raise ValueError("hold_steps must be non-negative")
+    if first_success_step is None:
+        return False
+    distances = np.asarray(target_distances, dtype=np.float32).reshape(-1)
+    if first_success_step < 0 or first_success_step >= distances.size:
+        raise ValueError("first_success_step must index target_distances")
+    if hold_steps == 0:
+        return bool(
+            np.isfinite(distances[first_success_step])
+            and distances[first_success_step] <= goal_threshold
+        )
+    start = first_success_step + 1
+    hold = distances[start : start + hold_steps]
+    return bool(
+        hold.size == hold_steps
+        and np.all(np.isfinite(hold))
+        and np.all(hold <= goal_threshold)
+    )
 
 
 def q_trajectory_smoothness(q: Any, *, order: int = 2) -> float:
@@ -346,6 +505,9 @@ def episode_metric_row(
     video: str | None = None,
     rerun: str | None = None,
     robot_clearance_points: Any | None = None,
+    goal_threshold: float | None = None,
+    hold_steps: int = 0,
+    control_dt: float = 1.0,
 ) -> dict[str, Any]:
     """Build the stable episode-level constrained-reach metric row.
 
@@ -356,8 +518,15 @@ def episode_metric_row(
     """
     distances = np.asarray(path.target_distances, dtype=np.float32)
     finite_distances = distances[np.isfinite(distances)]
+    if not np.isfinite(control_dt) or control_dt <= 0.0:
+        raise ValueError("control_dt must be a positive finite value")
     tcp_min_clearance = min_constraint_clearance(path.tcp_array, constraints)
     tcp_satisfied = path_satisfies_constraints(path.tcp_array, constraints)
+    tcp_violation = constraint_violation_metrics(
+        path.tcp_array,
+        constraints,
+        dt=control_dt,
+    )
     if robot_clearance_points is not None:
         min_clearance = min_constraint_clearance(robot_clearance_points, constraints)
         constraint_satisfied = path_satisfies_constraints(robot_clearance_points, constraints)
@@ -366,6 +535,21 @@ def episode_metric_row(
         min_clearance = tcp_min_clearance
         constraint_satisfied = tcp_satisfied
         constraint_target = "eef"
+    stable_reach = (
+        stable_goal_reached(
+            distances,
+            first_success_step=first_success_step,
+            goal_threshold=float(goal_threshold),
+            hold_steps=hold_steps,
+        )
+        if goal_threshold is not None
+        else bool(reach_success and hold_steps == 0)
+    )
+    max_violation_depth = (
+        max(0.0, -float(min_clearance))
+        if min_clearance is not None and np.isfinite(float(min_clearance))
+        else 0.0
+    )
     return {
         "method": method,
         "episode": int(episode),
@@ -373,11 +557,16 @@ def episode_metric_row(
         "steps": int(steps),
         "replans": int(replans),
         "reach_success": bool(reach_success),
+        "stable_goal_reached": stable_reach,
         "constraint_satisfied": bool(constraint_satisfied),
         "constraint_target": constraint_target,
         "constraint_satisfied_tcp": bool(tcp_satisfied),
         "combined_success": bool(reach_success and constraint_satisfied),
+        "stable_combined_success": bool(stable_reach and constraint_satisfied),
         "first_success_step": first_success_step,
+        "goal_threshold": float(goal_threshold) if goal_threshold is not None else None,
+        "hold_steps": int(hold_steps),
+        "control_dt": float(control_dt),
         "final_target_distance": (
             float(finite_distances[-1]) if finite_distances.size else None
         ),
@@ -386,6 +575,27 @@ def episode_metric_row(
         ),
         "min_clearance": min_clearance,
         "min_clearance_tcp": tcp_min_clearance,
+        "max_violation_depth": max_violation_depth,
+        "max_violation_depth_tcp": tcp_violation["max_violation_depth"],
+        "violation_steps_tcp": tcp_violation["violation_steps"],
+        "violation_fraction_tcp": tcp_violation["violation_fraction"],
+        "integrated_violation_tcp": tcp_violation["integrated_violation"],
+        "violation_event_count_tcp": tcp_violation["violation_event_count"],
+        "tcp_path_length": trajectory_path_length(path.tcp_array),
+        "joint_path_length": trajectory_path_length(path.q_array),
+        "tcp_acceleration_mse": trajectory_derivative_mse(
+            path.tcp_array, order=2, dt=control_dt
+        ),
+        "tcp_jerk_mse": trajectory_derivative_mse(
+            path.tcp_array, order=3, dt=control_dt
+        ),
+        "joint_acceleration_mse": trajectory_derivative_mse(
+            path.q_array, order=2, dt=control_dt
+        ),
+        "joint_jerk_mse": trajectory_derivative_mse(
+            path.q_array, order=3, dt=control_dt
+        ),
+        "max_joint_velocity": max_joint_velocity(path.q_array, dt=control_dt),
         "smoothness": q_trajectory_smoothness(path.q_array, order=2),
         "candidate_feasibility_fraction": candidate_feasibility_fraction,
         "fallback_count": int(fallback_count),
@@ -423,6 +633,8 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "constraint_satisfied",
             "constraint_satisfied_tcp",
             "combined_success",
+            "stable_goal_reached",
+            "stable_combined_success",
         ]:
             if not any(key in row for row in method_rows):
                 continue
@@ -436,6 +648,19 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "min_target_distance",
             "min_clearance",
             "min_clearance_tcp",
+            "max_violation_depth",
+            "max_violation_depth_tcp",
+            "violation_steps_tcp",
+            "violation_fraction_tcp",
+            "integrated_violation_tcp",
+            "violation_event_count_tcp",
+            "tcp_path_length",
+            "joint_path_length",
+            "tcp_acceleration_mse",
+            "tcp_jerk_mse",
+            "joint_acceleration_mse",
+            "joint_jerk_mse",
+            "max_joint_velocity",
             "smoothness",
             "candidate_feasibility_fraction",
         ]:
@@ -609,6 +834,7 @@ def progress_series(rows: list[dict[str, Any]]) -> dict[str, dict[str, list[floa
             "reach_success_rate": [],
             "constraint_satisfied_rate": [],
             "combined_success_rate": [],
+            "stable_combined_success_rate": [],
             "final_target_distance": [],
             "min_clearance": [],
             "candidate_feasibility_fraction": [],
@@ -617,14 +843,17 @@ def progress_series(rows: list[dict[str, Any]]) -> dict[str, dict[str, list[floa
         reach = 0
         constraint = 0
         combined = 0
+        stable_combined = 0
         for idx, row in enumerate(ordered, start=1):
             reach += int(bool(row["reach_success"]))
             constraint += int(bool(row["constraint_satisfied"]))
             combined += int(bool(row["combined_success"]))
+            stable_combined += int(bool(row.get("stable_combined_success", False)))
             method_series["episode"].append(float(row["episode"]))
             method_series["reach_success_rate"].append(reach / idx)
             method_series["constraint_satisfied_rate"].append(constraint / idx)
             method_series["combined_success_rate"].append(combined / idx)
+            method_series["stable_combined_success_rate"].append(stable_combined / idx)
             method_series["final_target_distance"].append(_optional_float(row))
             method_series["min_clearance"].append(_optional_float(row, key="min_clearance"))
             method_series["candidate_feasibility_fraction"].append(
@@ -642,11 +871,20 @@ def _mean_std(key: str, rows: list[dict[str, Any]]) -> dict[str, float | None]:
         if row.get(key) is not None and np.isfinite(float(row[key]))
     ]
     if not values:
-        return {f"{key}_mean": None, f"{key}_std": None}
+        return {
+            f"{key}_mean": None,
+            f"{key}_std": None,
+            f"{key}_median": None,
+            f"{key}_q1": None,
+            f"{key}_q3": None,
+        }
     array = np.asarray(values, dtype=np.float32)
     return {
         f"{key}_mean": float(np.mean(array)),
         f"{key}_std": float(np.std(array)),
+        f"{key}_median": float(np.median(array)),
+        f"{key}_q1": float(np.percentile(array, 25.0)),
+        f"{key}_q3": float(np.percentile(array, 75.0)),
     }
 
 

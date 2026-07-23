@@ -342,17 +342,18 @@ events in a trajectory/debug artifact rather than expanding the episode summary 
 
 ## 7. Current implementation coverage and gaps
 
-The evaluator already logs goal reached (as `reach_success`), constraint satisfaction,
-combined success, first-success step, final/minimum target distance, minimum clearance,
-TCP-only clearance, an unscaled joint smoothness value, steps, replans, candidate
-feasibility fraction, fallback count, and optional timing events.
+The evaluator now logs goal reached (as `reach_success`), stable goal and stable
+combined success over the configured post-success window, constraint satisfaction,
+first-success step, final/minimum target distance, minimum clearance, TCP violation
+depth/duration/fraction/integral/event count, TCP and joint path length, physical-time
+TCP/joint acceleration and jerk, maximum joint velocity, steps, replans, candidate
+feasibility fraction, fallback count, and optional timing events. Continuous summaries
+include mean, standard deviation, median, and quartiles.
 
 Before the paper-scale comparison, add:
 
-- stable goal and stable combined success,
-- per-step clearance for duration/integral/event metrics,
-- TCP and joint path length,
-- physical-unit acceleration/jerk and replan-boundary discontinuity,
+- time-indexed whole-robot violation metrics rather than only flattened robot clearance,
+- executed-action replan-boundary discontinuity,
 - clean action-selection latency summaries and operation counts,
 - peak GPU memory, and
 - paired statistical comparison utilities,

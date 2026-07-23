@@ -1213,7 +1213,27 @@ def run_eval_episode(
         fallback_count=fallback_count,
         video=str(video_path) if video_path is not None else None,
         rerun=str(rerun_path) if rerun_path is not None else None,
+        goal_threshold=goal_thresh,
+        hold_steps=post_success_steps,
+        control_dt=_env_control_dt(sim_env),
     )
+
+
+def _env_control_dt(env: Any) -> float:
+    """Return the simulator control timestep used for physical-time metrics."""
+    unwrapped = getattr(env, "unwrapped", env)
+    for owner in (unwrapped, env):
+        value = getattr(owner, "control_timestep", None)
+        if value is not None:
+            dt = float(value)
+            if np.isfinite(dt) and dt > 0.0:
+                return dt
+    control_freq = getattr(unwrapped, "control_freq", None)
+    if control_freq is not None:
+        frequency = float(control_freq)
+        if np.isfinite(frequency) and frequency > 0.0:
+            return 1.0 / frequency
+    raise RuntimeError("ManiSkill environment does not expose a valid control timestep")
 
 
 def _select_decision(
