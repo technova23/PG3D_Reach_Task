@@ -26,3 +26,9 @@ Open an RRD with the isolated viewer, for example:
 The simulator videos and point-cloud timelines are synchronized by control step.
 `policy_input/point_cloud` is the complete tensor sent to the policy; its semantic
 child entities are visualization-only subsets.
+
+The objects are tabletop-supported: their bottom is at `z=0` and their height is
+resolved before actor construction so the top reaches above the selected direct-path
+point. For this episode all tops are `z=0.4431` and the path point is `z=0.4231`.
+The cabinet is aligned by its back panel so its open interior does not create a
+false collision-free placement.

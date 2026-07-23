@@ -5,28 +5,28 @@
       "files": {
         "constraint": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cabinet/constraints/episode_000.json",
-          "sha256": "a7a7f132888b943ffb90180c31e6d17687c0a2a0a7b5170f07db5d7dcabcfc59",
-          "size_bytes": 3408
+          "sha256": "905bd262d1de6f71e1238712668f40dca69a04ddbc4ed97419034b5dae139a15",
+          "size_bytes": 3404
         },
         "policy_pointcloud_bundle": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cabinet/rerun/base/episode_000.policy_input.npz",
-          "sha256": "3ac430d4c6eb96ed72806d66af57dce644ffaa667db8063d805cff048c02867c",
-          "size_bytes": 185131
+          "sha256": "1ee1c9310e011791ac62e14d5cf758862a8573c03de902f9c79aa076f2556069",
+          "size_bytes": 235601
         },
         "policy_pointcloud_metadata": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cabinet/rerun/base/episode_000.policy_input.json",
-          "sha256": "dbdd920f7fd94110daeeea62fcd3fed1514ca29dd7b11373b1e73a626e742302",
-          "size_bytes": 15432
+          "sha256": "aea964f8af5e58967617d06fc395c61c1dc0fc549bbe0b0a09c0780c1928afe1",
+          "size_bytes": 14934
         },
         "rerun": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cabinet/rerun/base/episode_000.rrd",
-          "sha256": "456ae7145ae98b5c4b649a1fbb21d1723efa681971a2e0e8487eb348a7093f8f",
-          "size_bytes": 517425
+          "sha256": "5ad0a7aa85313f6f13e5b31baf08a70b1e223388c1740b3c0682a42fc0417e40",
+          "size_bytes": 646979
         },
         "video": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cabinet/videos/base/episode_000.mp4",
-          "sha256": "29bf176fb56cf2749917ed8c4970cf704197313169711430b245b83daa9ae2e2",
-          "size_bytes": 105479
+          "sha256": "15c50aef85933ce713f092eba9babe9e651cd64a794f5b24e6011c9ebcb66e24",
+          "size_bytes": 109408
         }
       },
       "metrics": {
@@ -39,98 +39,98 @@
         "collision_geometry": [
           {
             "center": [
-              -0.1701025813817978,
-              -0.08707115799188614,
-              0.41744694113731384
+              -0.16159582138061523,
+              -0.15612564980983734,
+              0.22154691815376282
             ],
             "half_extents": [
               0.004999999888241291,
               0.07999999821186066,
-              0.20000000298023224
+              0.22154691815376282
             ],
             "type": "box",
             "yaw": 0.17453292519943295
           },
           {
             "center": [
-              -0.022381410002708435,
-              -0.061023928225040436,
-              0.41744694113731384
+              -0.013874650001525879,
+              -0.13007842004299164,
+              0.22154691815376282
             ],
             "half_extents": [
               0.004999999888241291,
               0.07999999821186066,
-              0.20000000298023224
+              0.22154691815376282
             ],
             "type": "box",
             "yaw": 0.17453292519943295
           },
           {
             "center": [
-              -0.09624199569225311,
-              -0.07404754310846329,
-              0.6124469041824341
+              -0.08773523569107056,
+              -0.1431020349264145,
+              0.4375551640987396
             ],
             "half_extents": [
               0.07999999821186066,
               0.07999999821186066,
-              0.004999999888241291
+              0.005538673140108585
             ],
             "type": "box",
             "yaw": 0.17453292519943295
           },
           {
             "center": [
-              -0.09624199569225311,
-              -0.07404754310846329,
-              0.22244694828987122
+              -0.08773523569107056,
+              -0.1431020349264145,
+              0.005538672208786011
             ],
             "half_extents": [
               0.07999999821186066,
               0.07999999821186066,
-              0.004999999888241291
+              0.005538673140108585
             ],
             "type": "box",
             "yaw": 0.17453292519943295
           },
           {
             "center": [
-              -0.10926561057567596,
-              -0.00018695741891860962,
-              0.41744694113731384
+              -0.10075885057449341,
+              -0.06924144923686981,
+              0.22154691815376282
             ],
             "half_extents": [
               0.07999999821186066,
               0.004999999888241291,
-              0.20000000298023224
+              0.22154691815376282
             ],
             "type": "box",
             "yaw": 0.17453292519943295
           },
           {
             "center": [
-              -0.09624199569225311,
-              -0.07404754310846329,
-              0.41744694113731384
+              -0.08773523569107056,
+              -0.1431020349264145,
+              0.22154691815376282
             ],
             "half_extents": [
               0.07500000298023224,
               0.07500000298023224,
-              0.004999999888241291
+              0.005538673140108585
             ],
             "type": "box",
             "yaw": 0.17453292519943295
           },
           {
             "center": [
-              -0.1463746726512909,
-              -0.09286344051361084,
-              0.41744694113731384
+              -0.13786789774894714,
+              -0.16191793978214264,
+              0.22154691815376282
             ],
             "half_extents": [
               0.07999999821186066,
               0.004999999888241291,
-              0.1899999976158142
+              0.2104695737361908
             ],
             "type": "box",
             "yaw": 1.3962634015954636
@@ -139,16 +139,18 @@
         "family": "cabinet",
         "id": "cabinet:episode_000",
         "pose": {
+          "bottom_z": -9.313225746154785e-10,
           "center": [
-            -0.09624199569225311,
-            -0.07404754310846329,
-            0.41744694113731384
+            -0.08773523569107056,
+            -0.1431020349264145,
+            0.22154691815376282
           ],
+          "top_z": 0.44309383630752563,
           "yaw": 0.17453292519943295
         }
       },
       "paired_identity": {
-        "constraint_id": "9b6c42c559106e6dad06e5dac26098f8b500e9f6d70529124899b1d5ba6a9c39",
+        "constraint_id": "dc33d0f5abb4ef5d48857cbbdaa5f9084aacb370cafa201905e15355beab3b5f",
         "dataset_episode_index": 0,
         "policy_seed": 916202559,
         "simulator_seed": 48572821
@@ -169,7 +171,7 @@
   "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
   "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
   "git": {
-    "commit": "abdff865d1ba1c8fec894eeea956536a7d532815",
+    "commit": "cb0d8f356ef64317e82b52fdee7978554f626d8e",
     "dirty": true
   },
   "rerun_writer_version": "0.35.0",

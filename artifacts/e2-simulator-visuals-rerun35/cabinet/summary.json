@@ -24,15 +24,15 @@
   },
   "by_method": {
     "base": {
-      "action_discontinuity_max_mean": 0.04677813500165939,
-      "action_discontinuity_max_median": 0.04677813500165939,
-      "action_discontinuity_max_q1": 0.04677813500165939,
-      "action_discontinuity_max_q3": 0.04677813500165939,
+      "action_discontinuity_max_mean": 0.04561905190348625,
+      "action_discontinuity_max_median": 0.04561905190348625,
+      "action_discontinuity_max_q1": 0.04561905190348625,
+      "action_discontinuity_max_q3": 0.04561905190348625,
       "action_discontinuity_max_std": 0.0,
-      "action_discontinuity_mean_mean": 0.03369090333580971,
-      "action_discontinuity_mean_median": 0.03369090333580971,
-      "action_discontinuity_mean_q1": 0.03369090333580971,
-      "action_discontinuity_mean_q3": 0.03369090333580971,
+      "action_discontinuity_mean_mean": 0.03367772325873375,
+      "action_discontinuity_mean_median": 0.03367772325873375,
+      "action_discontinuity_mean_q1": 0.03367772325873375,
+      "action_discontinuity_mean_q3": 0.03367772325873375,
       "action_discontinuity_mean_std": 0.0,
       "action_selection_time_median_mean": null,
       "action_selection_time_median_median": null,
@@ -114,10 +114,10 @@
       "end_effector_position_queries_q3": 0.0,
       "end_effector_position_queries_std": 0.0,
       "episodes": 1,
-      "final_target_distance_mean": 0.5574671626091003,
-      "final_target_distance_median": 0.5574671626091003,
-      "final_target_distance_q1": 0.5574671626091003,
-      "final_target_distance_q3": 0.5574671626091003,
+      "final_target_distance_mean": 0.5592441558837891,
+      "final_target_distance_median": 0.5592441558837891,
+      "final_target_distance_q1": 0.5592441558837891,
+      "final_target_distance_q3": 0.5592441558837891,
       "final_target_distance_std": 0.0,
       "geometry_evaluations_mean": 0.0,
       "geometry_evaluations_median": 0.0,
@@ -139,25 +139,25 @@
       "integrated_violation_tcp_q1": 0.0,
       "integrated_violation_tcp_q3": 0.0,
       "integrated_violation_tcp_std": 0.0,
-      "joint_acceleration_mse_mean": 1.2539174556732178,
-      "joint_acceleration_mse_median": 1.2539174556732178,
-      "joint_acceleration_mse_q1": 1.2539174556732178,
-      "joint_acceleration_mse_q3": 1.2539174556732178,
+      "joint_acceleration_mse_mean": 1.1504786014556885,
+      "joint_acceleration_mse_median": 1.1504786014556885,
+      "joint_acceleration_mse_q1": 1.1504786014556885,
+      "joint_acceleration_mse_q3": 1.1504786014556885,
       "joint_acceleration_mse_std": 0.0,
-      "joint_jerk_mse_mean": 431.8251953125,
-      "joint_jerk_mse_median": 431.8251953125,
-      "joint_jerk_mse_q1": 431.8251953125,
-      "joint_jerk_mse_q3": 431.8251953125,
+      "joint_jerk_mse_mean": 337.4131774902344,
+      "joint_jerk_mse_median": 337.4131774902344,
+      "joint_jerk_mse_q1": 337.4131774902344,
+      "joint_jerk_mse_q3": 337.4131774902344,
       "joint_jerk_mse_std": 0.0,
-      "joint_path_length_mean": 1.279040813446045,
-      "joint_path_length_median": 1.279040813446045,
-      "joint_path_length_q1": 1.279040813446045,
-      "joint_path_length_q3": 1.279040813446045,
+      "joint_path_length_mean": 1.2786893844604492,
+      "joint_path_length_median": 1.2786893844604492,
+      "joint_path_length_q1": 1.2786893844604492,
+      "joint_path_length_q3": 1.2786893844604492,
       "joint_path_length_std": 0.0,
-      "max_joint_velocity_mean": 0.6004595756530762,
-      "max_joint_velocity_median": 0.6004595756530762,
-      "max_joint_velocity_q1": 0.6004595756530762,
-      "max_joint_velocity_q3": 0.6004595756530762,
+      "max_joint_velocity_mean": 0.6004023551940918,
+      "max_joint_velocity_median": 0.6004023551940918,
+      "max_joint_velocity_q1": 0.6004023551940918,
+      "max_joint_velocity_q3": 0.6004023551940918,
       "max_joint_velocity_std": 0.0,
       "max_violation_depth_mean": 0.0,
       "max_violation_depth_median": 0.0,
@@ -169,20 +169,20 @@
       "max_violation_depth_tcp_q1": 0.0,
       "max_violation_depth_tcp_q3": 0.0,
       "max_violation_depth_tcp_std": 0.0,
-      "min_clearance_mean": 0.08672026544809341,
-      "min_clearance_median": 0.08672026544809341,
-      "min_clearance_q1": 0.08672026544809341,
-      "min_clearance_q3": 0.08672026544809341,
+      "min_clearance_mean": 0.1343700885772705,
+      "min_clearance_median": 0.1343700885772705,
+      "min_clearance_q1": 0.1343700885772705,
+      "min_clearance_q3": 0.1343700885772705,
       "min_clearance_std": 0.0,
-      "min_clearance_tcp_mean": 0.08672026544809341,
-      "min_clearance_tcp_median": 0.08672026544809341,
-      "min_clearance_tcp_q1": 0.08672026544809341,
-      "min_clearance_tcp_q3": 0.08672026544809341,
+      "min_clearance_tcp_mean": 0.1343700885772705,
+      "min_clearance_tcp_median": 0.1343700885772705,
+      "min_clearance_tcp_q1": 0.1343700885772705,
+      "min_clearance_tcp_q3": 0.1343700885772705,
       "min_clearance_tcp_std": 0.0,
-      "min_target_distance_mean": 0.5574671626091003,
-      "min_target_distance_median": 0.5574671626091003,
-      "min_target_distance_q1": 0.5574671626091003,
-      "min_target_distance_q3": 0.5574671626091003,
+      "min_target_distance_mean": 0.5592441558837891,
+      "min_target_distance_median": 0.5592441558837891,
+      "min_target_distance_q1": 0.5592441558837891,
+      "min_target_distance_q3": 0.5592441558837891,
       "min_target_distance_std": 0.0,
       "peak_gpu_memory_bytes_mean": 758914048.0,
       "peak_gpu_memory_bytes_median": 758914048.0,
@@ -197,15 +197,15 @@
       "reach_success_rate": 0.0,
       "reach_success_wilson_high": 0.7934567085261071,
       "reach_success_wilson_low": 0.0,
-      "replan_boundary_discontinuity_max_mean": 0.04677813500165939,
-      "replan_boundary_discontinuity_max_median": 0.04677813500165939,
-      "replan_boundary_discontinuity_max_q1": 0.04677813500165939,
-      "replan_boundary_discontinuity_max_q3": 0.04677813500165939,
+      "replan_boundary_discontinuity_max_mean": 0.04561905190348625,
+      "replan_boundary_discontinuity_max_median": 0.04561905190348625,
+      "replan_boundary_discontinuity_max_q1": 0.04561905190348625,
+      "replan_boundary_discontinuity_max_q3": 0.04561905190348625,
       "replan_boundary_discontinuity_max_std": 0.0,
-      "replan_boundary_discontinuity_mean_mean": 0.03919854760169983,
-      "replan_boundary_discontinuity_mean_median": 0.03919854760169983,
-      "replan_boundary_discontinuity_mean_q1": 0.03919854760169983,
-      "replan_boundary_discontinuity_mean_q3": 0.03919854760169983,
+      "replan_boundary_discontinuity_mean_mean": 0.038323089480400085,
+      "replan_boundary_discontinuity_mean_median": 0.038323089480400085,
+      "replan_boundary_discontinuity_mean_q1": 0.038323089480400085,
+      "replan_boundary_discontinuity_mean_q3": 0.038323089480400085,
       "replan_boundary_discontinuity_mean_std": 0.0,
       "robot_point_cloud_queries_mean": 0.0,
       "robot_point_cloud_queries_median": 0.0,
@@ -217,10 +217,10 @@
       "robot_point_cloud_renders_q1": 0.0,
       "robot_point_cloud_renders_q3": 0.0,
       "robot_point_cloud_renders_std": 0.0,
-      "smoothness_mean": 7.836983058950864e-06,
-      "smoothness_median": 7.836983058950864e-06,
-      "smoothness_q1": 7.836983058950864e-06,
-      "smoothness_q3": 7.836983058950864e-06,
+      "smoothness_mean": 7.190491487563122e-06,
+      "smoothness_median": 7.190491487563122e-06,
+      "smoothness_q1": 7.190491487563122e-06,
+      "smoothness_q3": 7.190491487563122e-06,
       "smoothness_std": 0.0,
       "stable_combined_success_rate": 0.0,
       "stable_combined_success_wilson_high": 0.7934567085261071,
@@ -228,20 +228,20 @@
       "stable_goal_reached_rate": 0.0,
       "stable_goal_reached_wilson_high": 0.7934567085261071,
       "stable_goal_reached_wilson_low": 0.0,
-      "tcp_acceleration_mse_mean": 0.07584837824106216,
-      "tcp_acceleration_mse_median": 0.07584837824106216,
-      "tcp_acceleration_mse_q1": 0.07584837824106216,
-      "tcp_acceleration_mse_q3": 0.07584837824106216,
+      "tcp_acceleration_mse_mean": 0.04160671308636665,
+      "tcp_acceleration_mse_median": 0.04160671308636665,
+      "tcp_acceleration_mse_q1": 0.04160671308636665,
+      "tcp_acceleration_mse_q3": 0.04160671308636665,
       "tcp_acceleration_mse_std": 0.0,
-      "tcp_jerk_mse_mean": 31.69249153137207,
-      "tcp_jerk_mse_median": 31.69249153137207,
-      "tcp_jerk_mse_q1": 31.69249153137207,
-      "tcp_jerk_mse_q3": 31.69249153137207,
+      "tcp_jerk_mse_mean": 16.3082218170166,
+      "tcp_jerk_mse_median": 16.3082218170166,
+      "tcp_jerk_mse_q1": 16.3082218170166,
+      "tcp_jerk_mse_q3": 16.3082218170166,
       "tcp_jerk_mse_std": 0.0,
-      "tcp_path_length_mean": 0.14958038926124573,
-      "tcp_path_length_median": 0.14958038926124573,
-      "tcp_path_length_q1": 0.14958038926124573,
-      "tcp_path_length_q3": 0.14958038926124573,
+      "tcp_path_length_mean": 0.14409062266349792,
+      "tcp_path_length_median": 0.14409062266349792,
+      "tcp_path_length_q1": 0.14409062266349792,
+      "tcp_path_length_q3": 0.14409062266349792,
       "tcp_path_length_std": 0.0,
       "violation_event_count_mean": 0.0,
       "violation_event_count_median": 0.0,
@@ -286,9 +286,9 @@
   "constraint_overlay_video": true,
   "constraint_source": {
     "avoid_box_half_extents": [
-      0.08,
-      0.085,
-      0.2
+      0.07999999821186066,
+      0.08500000089406967,
+      0.22154691815376282
     ],
     "avoid_margin": 0.0,
     "avoid_min_radius": 0.025,
@@ -336,8 +336,8 @@
   },
   "episodes": [
     {
-      "action_discontinuity_max": 0.04677813500165939,
-      "action_discontinuity_mean": 0.03369090333580971,
+      "action_discontinuity_max": 0.04561905190348625,
+      "action_discontinuity_mean": 0.03367772325873375,
       "action_selection_time_median": null,
       "action_selection_time_p90": null,
       "action_selection_time_p95": null,
@@ -346,7 +346,7 @@
       "candidate_feasibility_fraction": null,
       "checkpoint_id": "/scratch2/skills/train_final_Arya/step_00100000.pt",
       "combined_success": false,
-      "constraint_id": "9b6c42c559106e6dad06e5dac26098f8b500e9f6d70529124899b1d5ba6a9c39",
+      "constraint_id": "dc33d0f5abb4ef5d48857cbbdaa5f9084aacb370cafa201905e15355beab3b5f",
       "constraint_path": "artifacts/e2-simulator-visuals-rerun35/cabinet/constraints/episode_000.json",
       "constraint_satisfied": true,
       "constraint_satisfied_tcp": true,
@@ -364,19 +364,19 @@
       "end_effector_position_queries": 0,
       "episode": 0,
       "fallback_count": 0,
-      "final_target_distance": 0.5574671626091003,
+      "final_target_distance": 0.5592441558837891,
       "first_success_step": null,
       "geometry_evaluations": 0,
       "geometry_evaluations_per_replan": 0.0,
-      "git_commit": "abdff865d1ba1c8fec894eeea956536a7d532815",
+      "git_commit": "cb0d8f356ef64317e82b52fdee7978554f626d8e",
       "goal_threshold": 0.025,
       "hold_steps": 0,
       "integrated_violation": 0.0,
       "integrated_violation_tcp": 0.0,
-      "joint_acceleration_mse": 1.2539174556732178,
-      "joint_jerk_mse": 431.8251953125,
-      "joint_path_length": 1.279040813446045,
-      "max_joint_velocity": 0.6004595756530762,
+      "joint_acceleration_mse": 1.1504786014556885,
+      "joint_jerk_mse": 337.4131774902344,
+      "joint_path_length": 1.2786893844604492,
+      "max_joint_velocity": 0.6004023551940918,
       "max_violation_depth": 0.0,
       "max_violation_depth_tcp": 0.0,
       "method": "base",
@@ -386,104 +386,104 @@
         "geometry_mode": "fast",
         "planning_horizon_chunks": 1
       },
-      "min_clearance": 0.08672026544809341,
-      "min_clearance_tcp": 0.08672026544809341,
-      "min_target_distance": 0.5574671626091003,
+      "min_clearance": 0.1343700885772705,
+      "min_clearance_tcp": 0.1343700885772705,
+      "min_target_distance": 0.5592441558837891,
       "obstacle_collision_geometry": [
         {
           "center": [
-            -0.1701025813817978,
-            -0.08707115799188614,
-            0.41744694113731384
+            -0.16159582138061523,
+            -0.15612564980983734,
+            0.22154691815376282
           ],
           "half_extents": [
             0.004999999888241291,
             0.07999999821186066,
-            0.20000000298023224
+            0.22154691815376282
           ],
           "type": "box",
           "yaw": 0.17453292519943295
         },
         {
           "center": [
-            -0.022381410002708435,
-            -0.061023928225040436,
-            0.41744694113731384
+            -0.013874650001525879,
+            -0.13007842004299164,
+            0.22154691815376282
           ],
           "half_extents": [
             0.004999999888241291,
             0.07999999821186066,
-            0.20000000298023224
+            0.22154691815376282
           ],
           "type": "box",
           "yaw": 0.17453292519943295
         },
         {
           "center": [
-            -0.09624199569225311,
-            -0.07404754310846329,
-            0.6124469041824341
+            -0.08773523569107056,
+            -0.1431020349264145,
+            0.4375551640987396
           ],
           "half_extents": [
             0.07999999821186066,
             0.07999999821186066,
-            0.004999999888241291
+            0.005538673140108585
           ],
           "type": "box",
           "yaw": 0.17453292519943295
         },
         {
           "center": [
-            -0.09624199569225311,
-            -0.07404754310846329,
-            0.22244694828987122
+            -0.08773523569107056,
+            -0.1431020349264145,
+            0.005538672208786011
           ],
           "half_extents": [
             0.07999999821186066,
             0.07999999821186066,
-            0.004999999888241291
+            0.005538673140108585
           ],
           "type": "box",
           "yaw": 0.17453292519943295
         },
         {
           "center": [
-            -0.10926561057567596,
-            -0.00018695741891860962,
-            0.41744694113731384
+            -0.10075885057449341,
+            -0.06924144923686981,
+            0.22154691815376282
           ],
           "half_extents": [
             0.07999999821186066,
             0.004999999888241291,
-            0.20000000298023224
+            0.22154691815376282
           ],
           "type": "box",
           "yaw": 0.17453292519943295
         },
         {
           "center": [
-            -0.09624199569225311,
-            -0.07404754310846329,
-            0.41744694113731384
+            -0.08773523569107056,
+            -0.1431020349264145,
+            0.22154691815376282
           ],
           "half_extents": [
             0.07500000298023224,
             0.07500000298023224,
-            0.004999999888241291
+            0.005538673140108585
           ],
           "type": "box",
           "yaw": 0.17453292519943295
         },
         {
           "center": [
-            -0.1463746726512909,
-            -0.09286344051361084,
-            0.41744694113731384
+            -0.13786789774894714,
+            -0.16191793978214264,
+            0.22154691815376282
           ],
           "half_extents": [
             0.07999999821186066,
             0.004999999888241291,
-            0.1899999976158142
+            0.2104695737361908
           ],
           "type": "box",
           "yaw": 1.3962634015954636
@@ -491,15 +491,17 @@
       ],
       "obstacle_family": "cabinet",
       "obstacle_id": "cabinet:episode_000",
-      "obstacle_points_cropped": 80,
+      "obstacle_points_cropped": 78,
       "obstacle_points_policy_input": 64,
-      "obstacle_points_raw": 768,
+      "obstacle_points_raw": 705,
       "obstacle_pose": {
+        "bottom_z": -9.313225746154785e-10,
         "center": [
-          -0.09624199569225311,
-          -0.07404754310846329,
-          0.41744694113731384
+          -0.08773523569107056,
+          -0.1431020349264145,
+          0.22154691815376282
         ],
+        "top_z": 0.44309383630752563,
         "yaw": 0.17453292519943295
       },
       "peak_gpu_memory_bytes": 758914048,
@@ -508,8 +510,8 @@
       "policy_pointcloud_metadata": "artifacts/e2-simulator-visuals-rerun35/cabinet/rerun/base/episode_000.policy_input.json",
       "policy_seed": 916202559,
       "reach_success": false,
-      "replan_boundary_discontinuity_max": 0.04677813500165939,
-      "replan_boundary_discontinuity_mean": 0.03919854760169983,
+      "replan_boundary_discontinuity_max": 0.04561905190348625,
+      "replan_boundary_discontinuity_mean": 0.038323089480400085,
       "replans": 5,
       "rerun": "artifacts/e2-simulator-visuals-rerun35/cabinet/rerun/base/episode_000.rrd",
       "rerun_writer_version": "0.35.0",
@@ -518,14 +520,14 @@
       "run_id": "/scratch2/skills/puru/pg3d/artifacts/e2-simulator-visuals-rerun35/cabinet",
       "seed": 48572821,
       "simulator_seed": 48572821,
-      "smoothness": 7.836983058950864e-06,
+      "smoothness": 7.190491487563122e-06,
       "source": "dataset",
       "stable_combined_success": false,
       "stable_goal_reached": false,
       "steps": 40,
-      "tcp_acceleration_mse": 0.07584837824106216,
-      "tcp_jerk_mse": 31.69249153137207,
-      "tcp_path_length": 0.14958038926124573,
+      "tcp_acceleration_mse": 0.04160671308636665,
+      "tcp_jerk_mse": 16.3082218170166,
+      "tcp_path_length": 0.14409062266349792,
       "video": "artifacts/e2-simulator-visuals-rerun35/cabinet/videos/base/episode_000.mp4",
       "violation_event_count": 0,
       "violation_event_count_tcp": 0,

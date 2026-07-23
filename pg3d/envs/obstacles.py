@@ -44,6 +44,31 @@ CABINET_COMPONENTS: tuple[BoxObstacleComponent, ...] = (
 )
 
 
+def scaled_cabinet_components(half_height: float) -> tuple[BoxObstacleComponent, ...]:
+    """Scale the cabinet vertically while preserving its tabletop-supported shape."""
+    if not np.isfinite(half_height) or half_height <= 0.0:
+        raise ValueError("cabinet half-height must be positive and finite")
+    reference_half_height = 0.20
+    scale = float(half_height) / reference_half_height
+    return tuple(
+        BoxObstacleComponent(
+            name=component.name,
+            half_extents=(
+                component.half_extents[0],
+                component.half_extents[1],
+                component.half_extents[2] * scale,
+            ),
+            local_center=(
+                component.local_center[0],
+                component.local_center[1],
+                component.local_center[2] * scale,
+            ),
+            yaw_offset=component.yaw_offset,
+        )
+        for component in CABINET_COMPONENTS
+    )
+
+
 def transform_box_component(
     component: BoxObstacleComponent,
     *,

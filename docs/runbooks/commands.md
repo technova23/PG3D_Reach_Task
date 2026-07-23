@@ -854,6 +854,17 @@ Set `--obstacle-yaw-deg 0` for the axis-aligned case. The 35-degree variant abov
 serializes the yaw in `BoxRegion`; the control actor, NumPy/Torch signed-distance
 implementations, and Rerun wireframe consume the same value.
 
+Embodied obstacles are grounded on the ManiSkill tabletop (`z=0`) by default. For
+dataset-backed direct-path placement, the evaluator resolves actor height before
+PhysX construction so the top reaches the selected path point plus
+`--obstacle-path-height-margin` (default 2 cm). This changes vertical half-extent,
+not vertical translation: the bottom remains supported. Override the support plane
+with `--obstacle-support-plane-z`, provide an explicit `--obstacle-top-z`, or use
+`--no-ground-embodied-obstacle` only for a deliberate floating-object ablation.
+Grounded placement is not subsequently moved by start-robot clearance. For the open
+cabinet, the path is aligned through the back panel rather than through its
+intentionally collision-free interior.
+
 For the predeclared tall-carton family, omit custom half-extents and use:
 
 ```bash

@@ -5,23 +5,23 @@
       "files": {
         "constraint": {
           "path": "artifacts/e2-policy-input-rerun35/box/constraints/episode_000.json",
-          "sha256": "556fa0121be35f34c9205329eac7078cef08688ab34978a79a99a63aaff173cb",
-          "size_bytes": 470
+          "sha256": "865724e84bc0b26cf166b084b74470c28faeb27f8d658c6550cfe941fefa6ccd",
+          "size_bytes": 471
         },
         "policy_pointcloud_bundle": {
           "path": "artifacts/e2-policy-input-rerun35/box/rerun/base/episode_000.policy_input.npz",
-          "sha256": "4264c47999954338b4ce53864e0370961fdabbf55d4da3ddbb6ba07e50aed187",
-          "size_bytes": 15344
+          "sha256": "b0bd5f46f9e5f6cb60e8d9c41f64a155f15a7f82b17c17ae796b317a3bc30b28",
+          "size_bytes": 15493
         },
         "policy_pointcloud_metadata": {
           "path": "artifacts/e2-policy-input-rerun35/box/rerun/base/episode_000.policy_input.json",
-          "sha256": "102e75f73e6aeb0e4c3e9e3c93c79c6261b8049f8e2b8f67c1fa45e61b8525dc",
-          "size_bytes": 2509
+          "sha256": "5995a3f7991b2dd8ee9aaa38dcb7fbada9c51c2cd2c07c48aef7a87df8f53bab",
+          "size_bytes": 2332
         },
         "rerun": {
           "path": "artifacts/e2-policy-input-rerun35/box/rerun/base/episode_000.rrd",
-          "sha256": "1aaa74a0885c5e57f5d14104ca2b4d69c091773cb0416980af7f30a17afce74b",
-          "size_bytes": 73141
+          "sha256": "3070b5c222938b060d168da051919d923ead54165ab3772bb662a87a4426f713",
+          "size_bytes": 73390
         },
         "video": null
       },
@@ -37,12 +37,12 @@
             "center": [
               -0.10075885057449341,
               -0.06924144923686981,
-              0.4230938255786896
+              0.22154691815376282
             ],
             "half_extents": [
               0.03999999910593033,
               0.05999999865889549,
-              0.07999999821186066
+              0.22154691815376282
             ],
             "type": "box",
             "yaw": 0.6108652381980153
@@ -51,16 +51,18 @@
         "family": "box",
         "id": "box:episode_000",
         "pose": {
+          "bottom_z": 0.0,
           "center": [
             -0.10075885057449341,
             -0.06924144923686981,
-            0.4230938255786896
+            0.22154691815376282
           ],
+          "top_z": 0.44309383630752563,
           "yaw": 0.6108652381980153
         }
       },
       "paired_identity": {
-        "constraint_id": "85de0ddb3676cd2da2ae3197f7a94af92dd3bca98a5fb4d3203438986daebc2a",
+        "constraint_id": "9fe7910570f4501e218368c84f210bca18d2aab1bba2432778c7593b02539ba8",
         "dataset_episode_index": 0,
         "policy_seed": 916202559,
         "simulator_seed": 48572821
@@ -76,7 +78,7 @@
   "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
   "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
   "git": {
-    "commit": "abdff865d1ba1c8fec894eeea956536a7d532815",
+    "commit": "cb0d8f356ef64317e82b52fdee7978554f626d8e",
     "dirty": true
   },
   "rerun_writer_version": "0.35.0",

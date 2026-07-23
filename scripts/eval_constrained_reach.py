@@ -49,7 +49,11 @@ from pg3d.envs.maniskill_adapter.dataset import (
     git_commit_info,
     load_reach_metadata,
 )
-from pg3d.envs.obstacles import CABINET_COMPONENTS, transform_box_component
+from pg3d.envs.obstacles import (
+    CABINET_COMPONENTS,
+    scaled_cabinet_components,
+    transform_box_component,
+)
 from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.eval import (
     AvoidOverlayConfig,
@@ -450,6 +454,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not specs:
         raise RuntimeError("no constrained-reach episodes selected")
+    _resolve_grounded_embodied_obstacle_height(
+        args,
+        specs=specs,
+        zarr_root=zarr_root,
+    )
     if args.unique_dataset_seeds:
         print(
             "unique dataset seed selection: "
@@ -1028,6 +1037,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Explicit --avoid-box-half-extents overrides box/carton only."
         ),
     )
+    parser.add_argument(
+        "--ground-embodied-obstacle",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep embodied box/carton/cylinder/cabinet actors supported by a plane.",
+    )
+    parser.add_argument(
+        "--obstacle-support-plane-z",
+        type=float,
+        default=0.0,
+        help="World Z of the support plane used for grounded embodied obstacles.",
+    )
+    parser.add_argument(
+        "--obstacle-path-height-margin",
+        type=float,
+        default=0.02,
+        help="Extra obstacle height above the selected direct-path point.",
+    )
+    parser.add_argument(
+        "--obstacle-top-z",
+        type=float,
+        default=None,
+        help=(
+            "Explicit world-Z top for a grounded obstacle. If omitted for dataset "
+            "direct-path placement, height is resolved from the selected path point."
+        ),
+    )
     parser.add_argument("--gripper-open", type=float, default=0.04)
     parser.add_argument(
         "--match-current-robot-points",
@@ -1120,6 +1156,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--obstacle-point-quota must be non-negative")
     if not np.isfinite(args.obstacle_yaw_deg):
         raise ValueError("--obstacle-yaw-deg must be finite")
+    if not np.isfinite(args.obstacle_support_plane_z):
+        raise ValueError("--obstacle-support-plane-z must be finite")
+    if args.obstacle_path_height_margin < 0.0:
+        raise ValueError("--obstacle-path-height-margin must be non-negative")
+    if args.obstacle_top_z is not None and (
+        not np.isfinite(args.obstacle_top_z) or args.obstacle_top_z <= args.obstacle_support_plane_z
+    ):
+        raise ValueError("--obstacle-top-z must be finite and above the support plane")
     if args.episode_indices is not None and args.episode_indices_file is not None:
         raise ValueError("--episode-indices and --episode-indices-file are mutually exclusive")
     if args.episode_indices_file is not None and args.source != "dataset":
@@ -1306,6 +1350,7 @@ def run_eval_episode(
         output_dir / "debug" / method / f"episode_{spec.output_index:03d}_actions.jsonl"
     )
     raw_action_log.parent.mkdir(parents=True, exist_ok=True)
+    raw_action_log.write_text("", encoding="utf-8")
     if video:
         video_env = _maybe_create_overlay_video_env(
             video_env_factory=video_env_factory,
@@ -1621,6 +1666,8 @@ def run_eval_episode(
                 "obstacle_pose": {
                     "center": obstacle_reset["pg3d_obstacle_center"],
                     "yaw": obstacle_reset["pg3d_obstacle_yaw"],
+                    "bottom_z": _constraint_bottom_z(constraints),
+                    "top_z": _constraint_top_z(constraints),
                 },
                 "obstacle_collision_geometry": [
                     constraint.region.to_json() for constraint in constraints
@@ -2260,6 +2307,7 @@ def _clear_region_from_robot(
     *,
     clearance: float,
     name: str,
+    preserve_center_z: bool = False,
     max_iter: int = 64,
 ) -> SphereRegion | BoxRegion | CylinderRegion:
     """Shrink/translate an avoid region so it does not intersect the robot point cloud.
@@ -2313,9 +2361,11 @@ def _clear_region_from_robot(
                 return candidate
             nearest = pts[int(np.argmin(signed))]
             direction = center - nearest
+            if preserve_center_z:
+                direction[2] = 0.0
             norm = float(np.linalg.norm(direction))
             if norm < 1e-6:
-                direction = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+                direction = np.array([1.0, 0.0, 0.0], dtype=np.float32)
                 norm = 1.0
             center = (center + direction / norm * ((clearance - min_sd) + 1e-3)).astype(np.float32)
         return CylinderRegion(
@@ -2334,9 +2384,11 @@ def _clear_region_from_robot(
             return candidate
         nearest = pts[int(np.argmin(signed))]
         direction = center - nearest
+        if preserve_center_z:
+            direction[2] = 0.0
         norm = float(np.linalg.norm(direction))
         if norm < 1e-6:
-            direction = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            direction = np.array([1.0, 0.0, 0.0], dtype=np.float32)
             norm = 1.0
         step = (clearance - min_sd) + 1e-3
         center = (center + direction / norm * step).astype(np.float32)
@@ -2346,6 +2398,45 @@ def _clear_region_from_robot(
         file=sys.stderr,
     )
     return BoxRegion(center=center, half_extents=half_extents, yaw=region.yaw)
+
+
+def _ground_embodied_region(
+    region: SphereRegion | BoxRegion | CylinderRegion,
+    *,
+    support_plane_z: float,
+) -> SphereRegion | BoxRegion | CylinderRegion:
+    """Place a region's bottom face on the configured support plane."""
+    center = region.center.astype(np.float32).copy()
+    if isinstance(region, BoxRegion):
+        center[2] = float(support_plane_z) + float(region.half_extents[2])
+        return BoxRegion(center=center, half_extents=region.half_extents, yaw=region.yaw)
+    if isinstance(region, CylinderRegion):
+        center[2] = float(support_plane_z) + float(region.half_length)
+        return CylinderRegion(
+            center=center,
+            radius=region.radius,
+            half_length=region.half_length,
+        )
+    center[2] = float(support_plane_z) + float(region.radius)
+    return SphereRegion(center=center, radius=region.radius)
+
+
+def _align_cabinet_back_panel_to_path(region: BoxRegion) -> BoxRegion:
+    """Shift the cabinet root so its back panel, not open interior, crosses the path."""
+    back = next(component for component in CABINET_COMPONENTS if component.name == "back")
+    local = np.asarray(back.local_center[:2], dtype=np.float32)
+    cos_yaw = float(np.cos(region.yaw))
+    sin_yaw = float(np.sin(region.yaw))
+    world_offset = np.asarray(
+        [
+            cos_yaw * local[0] - sin_yaw * local[1],
+            sin_yaw * local[0] + cos_yaw * local[1],
+        ],
+        dtype=np.float32,
+    )
+    center = region.center.astype(np.float32).copy()
+    center[:2] -= world_offset
+    return BoxRegion(center=center, half_extents=region.half_extents, yaw=region.yaw)
 
 
 def _finalize_constraints(
@@ -2367,13 +2458,26 @@ def _finalize_constraints(
                 half_extents=region.half_extents,
                 yaw=np.deg2rad(float(args.obstacle_yaw_deg)),
             )
-        if enable_clearance and isinstance(region, (SphereRegion, BoxRegion, CylinderRegion)):
+            if args.embody_obstacle and args.obstacle_family == "cabinet":
+                region = _align_cabinet_back_panel_to_path(region)
+        grounded = bool(args.embody_obstacle and args.ground_embodied_obstacle)
+        if grounded and isinstance(region, (SphereRegion, BoxRegion, CylinderRegion)):
+            region = _ground_embodied_region(
+                region,
+                support_plane_z=float(args.obstacle_support_plane_z),
+            )
+        if (
+            enable_clearance
+            and not grounded
+            and isinstance(region, (SphereRegion, BoxRegion, CylinderRegion))
+        ):
             region = _clear_region_from_robot(
                 region,
                 robot_points,
                 args,
                 clearance=float(args.robot_clearance_placement_margin),
                 name=constraint.name,
+                preserve_center_z=grounded,
             )
         finalized.append(replace(constraint, region=region, target=args.constraint_target))
     if args.embody_obstacle and args.obstacle_family == "cabinet":
@@ -2381,6 +2485,7 @@ def _finalize_constraints(
             raise ValueError("cabinet family requires one root BoxRegion before expansion")
         root = finalized[0]
         root_region = root.region
+        components = scaled_cabinet_components(float(root_region.half_extents[2]))
         return [
             replace(
                 root,
@@ -2391,7 +2496,7 @@ def _finalize_constraints(
                     yaw=component_yaw,
                 ),
             )
-            for component in CABINET_COMPONENTS
+            for component in components
             for component_center, component_yaw in [
                 transform_box_component(
                     component,
@@ -3450,6 +3555,48 @@ def _embodied_obstacle_half_extents(
     return tuple(float(value) for value in values)
 
 
+def _resolve_grounded_embodied_obstacle_height(
+    args: argparse.Namespace,
+    *,
+    specs: list[RolloutSpec],
+    zarr_root: Any | None,
+) -> None:
+    """Resolve actor height before ManiSkill constructs its collision geometry."""
+    if (
+        not args.embody_obstacle
+        or not args.ground_embodied_obstacle
+        or args.constraints_dir is not None
+    ):
+        return
+    top_z = args.obstacle_top_z
+    if top_z is None:
+        if args.constraint_placement != "direct_path" or zarr_root is None:
+            raise ValueError(
+                "automatic grounded obstacle height requires dataset direct_path "
+                "placement; provide --obstacle-top-z for this configuration"
+            )
+        fractions = [float(value) for value in args.avoid_path_fractions]
+        path_heights: list[float] = []
+        for spec in specs:
+            if spec.dataset_episode_index is None:
+                raise ValueError("dataset obstacle-height resolution requires episode indices")
+            context = _zarr_episode_context(zarr_root, spec.dataset_episode_index)
+            start_z = float(np.asarray(context["tcp_pose"]).reshape(-1)[2])
+            target_z = float(np.asarray(context["target_position"]).reshape(3)[2])
+            path_heights.extend(start_z + fraction * (target_z - start_z) for fraction in fractions)
+        top_z = max(path_heights) + float(args.obstacle_path_height_margin)
+    support_z = float(args.obstacle_support_plane_z)
+    required_half_height = 0.5 * (float(top_z) - support_z)
+    dimensions = (
+        np.asarray(args.avoid_box_half_extents, dtype=np.float32).copy()
+        if args.avoid_box_half_extents is not None
+        else np.repeat(float(args.avoid_radius), 3).astype(np.float32)
+    )
+    dimensions[2] = max(float(dimensions[2]), required_half_height)
+    args.avoid_box_half_extents = dimensions.astype(float).tolist()
+    args.resolved_obstacle_top_z = support_z + 2.0 * float(dimensions[2])
+
+
 def _embodied_obstacle_reset_options(
     constraints: list[AvoidRegion],
 ) -> dict[str, list[float] | float]:
@@ -3478,6 +3625,36 @@ def _embodied_obstacle_reset_options(
     }
 
 
+def _constraint_bottom_z(constraints: list[AvoidRegion]) -> float:
+    return float(
+        min(
+            constraint.region.center[2]
+            - (
+                constraint.region.half_extents[2]
+                if isinstance(constraint.region, BoxRegion)
+                else constraint.region.half_length
+            )
+            for constraint in constraints
+            if isinstance(constraint.region, (BoxRegion, CylinderRegion))
+        )
+    )
+
+
+def _constraint_top_z(constraints: list[AvoidRegion]) -> float:
+    return float(
+        max(
+            constraint.region.center[2]
+            + (
+                constraint.region.half_extents[2]
+                if isinstance(constraint.region, BoxRegion)
+                else constraint.region.half_length
+            )
+            for constraint in constraints
+            if isinstance(constraint.region, (BoxRegion, CylinderRegion))
+        )
+    )
+
+
 def _validate_embodied_obstacle_geometry(
     env: Any,
     constraints: list[AvoidRegion],
@@ -3491,7 +3668,8 @@ def _validate_embodied_obstacle_geometry(
         root_center = np.asarray(reset_options["pg3d_obstacle_center"], dtype=np.float32)
         root_yaw = float(reset_options["pg3d_obstacle_yaw"])
         expected_regions = []
-        for component in CABINET_COMPONENTS:
+        configured_half_height = float(np.asarray(configured, dtype=np.float32)[2])
+        for component in scaled_cabinet_components(configured_half_height):
             center, yaw = transform_box_component(component, center=root_center, yaw=root_yaw)
             expected_regions.append(
                 BoxRegion(

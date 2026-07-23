@@ -127,12 +127,19 @@ A four-family exact-input suite now lives under
 `artifacts/e2-policy-input-rerun35`: rotated box, tall carton, vertical cylinder,
 and open cabinet. Every neutral bundle has two `[1024, 3]` tensors (reset and one
 executed step) from the same dataset episode and locked 100k checkpoint. Initial
-obstacle counts in the exact policy tensors are respectively 32, 50, 32, and 92;
+obstacle counts in the exact policy tensors are respectively 32, 32, 32, and 64;
 all four native 0.35 RRDs passed the isolated parser.
 A companion moving simulator suite under `artifacts/e2-simulator-visuals-rerun35`
 pairs each family with a 41-frame 512×512 MP4 at the true 20 Hz control rate and a
 synchronized `[41, 1024, 3]` exact-input bundle/native 0.35 RRD. All four videos
 decoded completely and all four RRDs passed the isolated parser.
+Generated embodied obstacles are now tabletop-supported by default. For
+dataset/direct-path placement, their collision height is resolved before simulator
+construction to cover the selected path Z plus a 2 cm margin while keeping the
+bottom at `z=0`; grounded placement is not shifted away afterward. Cabinets align
+the nominal path through the back panel instead of the open interior. The regenerated
+four-family suites span `z=0` to `z=0.4431` for the selected path point at
+`z=0.4231`; signed clearance there is negative for every family.
 Whole-robot safety is no longer flattened across time: enabling the metric retains one
 robot cloud per executed timestep and reports primary violation duration, fraction,
 integral, and event count. Executed joint targets now also report overall and

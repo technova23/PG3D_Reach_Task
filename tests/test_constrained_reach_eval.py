@@ -59,7 +59,9 @@ from scripts.eval_constrained_reach import (
     _artifact_file_record,
     _artifact_selection_summary,
     _build_multichunk_candidates,
+    _constraint_bottom_z,
     _constraint_source_summary,
+    _constraint_top_z,
     _constraints_for_episode,
     _effective_projection_half_extents,
     _embodied_obstacle_half_extents,
@@ -68,11 +70,13 @@ from scripts.eval_constrained_reach import (
     _episode_should_stop,
     _episode_step_limit,
     _finalize_constraints,
+    _ground_embodied_region,
     _local_path_points_xy,
     _obs_windows_to_torch,
     _point_at_arc_fraction_xy,
     _policy_obstacle_point_count,
     _read_episode_indices_file,
+    _resolve_grounded_embodied_obstacle_height,
     _seed_torch,
     _select_decision,
     _validate_embodied_obstacle_geometry,
@@ -1475,8 +1479,58 @@ def test_cabinet_family_expands_root_into_component_constraints(tmp_path: Path) 
             "open_door",
         )
     }
-    assert reset["pg3d_obstacle_center"] == pytest.approx([0.1, -0.2, 0.4])
+    back = next(constraint for constraint in constraints if constraint.name == "root/cabinet_back")
+    assert back.region.center[:2] == pytest.approx([0.1, -0.2])
+    assert reset["pg3d_obstacle_center"][2] == pytest.approx(0.2)
     assert reset["pg3d_obstacle_yaw"] == pytest.approx(np.deg2rad(15))
+    assert _constraint_bottom_z(constraints) == pytest.approx(0.0, abs=1e-7)
+    assert _constraint_top_z(constraints) == pytest.approx(0.4)
+
+
+def test_grounded_embodied_region_keeps_bottom_on_support_plane() -> None:
+    box = BoxRegion(center=[0.1, -0.2, 0.45], half_extents=[0.04, 0.06, 0.23])
+    grounded = _ground_embodied_region(box, support_plane_z=0.0)
+
+    assert isinstance(grounded, BoxRegion)
+    assert grounded.center == pytest.approx([0.1, -0.2, 0.23])
+    assert grounded.center[2] - grounded.half_extents[2] == pytest.approx(0.0)
+    assert grounded.center[2] + grounded.half_extents[2] == pytest.approx(0.46)
+
+
+def test_grounded_obstacle_height_covers_direct_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = parse_eval_args(
+        [
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint.pt"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--embody-obstacle",
+            "--obstacle-family",
+            "carton",
+        ]
+    )
+    monkeypatch.setattr(
+        "scripts.eval_constrained_reach._zarr_episode_context",
+        lambda _root, _index: {
+            "tcp_pose": np.asarray([0.0, 0.0, 0.6, 1.0, 0.0, 0.0, 0.0]),
+            "target_position": np.asarray([0.2, 0.1, 0.3]),
+        },
+    )
+
+    _resolve_grounded_embodied_obstacle_height(
+        args,
+        specs=[RolloutSpec(output_index=0, seed=1, source="dataset", dataset_episode_index=4)],
+        zarr_root=object(),
+    )
+
+    direct_path_z = 0.45
+    assert args.avoid_box_half_extents[2] == pytest.approx((direct_path_z + 0.02) / 2)
+    assert args.resolved_obstacle_top_z == pytest.approx(direct_path_z + 0.02)
 
 
 def test_policy_obstacle_count_excludes_goal_marker_slots() -> None:

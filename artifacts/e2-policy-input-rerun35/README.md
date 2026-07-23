@@ -7,9 +7,14 @@ step, so every neutral bundle has shape `[2, 1024, 3]`.
 | Family | Obstacle points in initial exact tensor | Quota |
 | --- | ---: | ---: |
 | rotated box | 32 | 32 |
-| tall carton | 50 | 32 |
+| tall carton | 32 | 32 |
 | vertical cylinder | 32 | 32 |
-| open cabinet | 92 | 64 |
+| open cabinet | 64 | 64 |
+
+All four actors are grounded on the tabletop at `z=0`. For this episode their
+resolved top is `z=0.4431`, covering the direct-path point at `z=0.4231`.
+The cabinet is translated so the path crosses its back panel rather than passing
+collision-free through the open interior.
 
 For each family, open:
 

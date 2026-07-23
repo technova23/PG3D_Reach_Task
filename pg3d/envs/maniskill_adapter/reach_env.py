@@ -14,7 +14,11 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.pose import Pose
 
 from pg3d.envs.maniskill_adapter.reach_config import REACH_TASK_SPECS, ReachGoalRegion
-from pg3d.envs.obstacles import CABINET_COMPONENTS, transform_box_component
+from pg3d.envs.obstacles import (
+    CABINET_COMPONENTS,
+    scaled_cabinet_components,
+    transform_box_component,
+)
 
 
 class PG3DReachEnv(BaseEnv):
@@ -88,12 +92,11 @@ class PG3DReachEnv(BaseEnv):
         )
         self.pg3d_obstacle = None
         self.pg3d_obstacle_actors: list[Any] = []
+        self.pg3d_cabinet_components = CABINET_COMPONENTS
         if self.pg3d_obstacle_half_extents is not None:
             half_extents = np.asarray(self.pg3d_obstacle_half_extents, dtype=np.float32)
             if half_extents.shape != (3,) or np.any(half_extents <= 0):
-                raise ValueError(
-                    "pg3d_obstacle_half_extents must contain three positive values"
-                )
+                raise ValueError("pg3d_obstacle_half_extents must contain three positive values")
             common = {
                 "scene": self.scene,
                 "name": "pg3d_obstacle",
@@ -102,7 +105,8 @@ class PG3DReachEnv(BaseEnv):
                 "initial_pose": sapien.Pose(p=[0.0, 0.0, -10.0]),
             }
             if self.pg3d_obstacle_family == "cabinet":
-                for component in CABINET_COMPONENTS:
+                self.pg3d_cabinet_components = scaled_cabinet_components(float(half_extents[2]))
+                for component in self.pg3d_cabinet_components:
                     actor = actors.build_box(
                         half_sizes=list(component.half_extents),
                         color=(
@@ -183,27 +187,33 @@ class PG3DReachEnv(BaseEnv):
             if self.pg3d_obstacle is not None:
                 obstacle_center = options.get("pg3d_obstacle_center")
                 if obstacle_center is None:
-                    obstacle_xyz = torch.tensor(
-                        [[0.0, 0.0, -10.0]], dtype=torch.float32
-                    ).expand(batch_size, -1)
+                    obstacle_xyz = torch.tensor([[0.0, 0.0, -10.0]], dtype=torch.float32).expand(
+                        batch_size, -1
+                    )
                 else:
-                    obstacle_xyz = torch.as_tensor(
-                        obstacle_center, dtype=torch.float32
-                    ).reshape(1, 3).expand(batch_size, -1)
+                    obstacle_xyz = (
+                        torch.as_tensor(obstacle_center, dtype=torch.float32)
+                        .reshape(1, 3)
+                        .expand(batch_size, -1)
+                    )
                 if self.pg3d_obstacle_family == "cabinet":
                     root_center = obstacle_xyz[0].detach().cpu().numpy()
                     root_yaw = float(options.get("pg3d_obstacle_yaw", 0.0))
                     for actor, component in zip(
-                        self.pg3d_obstacle_actors, CABINET_COMPONENTS, strict=True
+                        self.pg3d_obstacle_actors,
+                        self.pg3d_cabinet_components,
+                        strict=True,
                     ):
                         component_center, component_yaw = transform_box_component(
                             component,
                             center=root_center,
                             yaw=root_yaw,
                         )
-                        component_xyz = torch.as_tensor(
-                            component_center, dtype=torch.float32
-                        ).reshape(1, 3).expand(batch_size, -1)
+                        component_xyz = (
+                            torch.as_tensor(component_center, dtype=torch.float32)
+                            .reshape(1, 3)
+                            .expand(batch_size, -1)
+                        )
                         component_quat = torch.tensor(
                             [
                                 [
@@ -215,9 +225,7 @@ class PG3DReachEnv(BaseEnv):
                             ],
                             dtype=torch.float32,
                         ).expand(batch_size, -1)
-                        actor.set_pose(
-                            Pose.create_from_pq(component_xyz, component_quat)
-                        )
+                        actor.set_pose(Pose.create_from_pq(component_xyz, component_quat))
                     obstacle_quat = None
                 elif self.pg3d_obstacle_family == "cylinder":
                     # ManiSkill's primitive is X-axis aligned; rotate +X onto +Z
@@ -233,16 +241,14 @@ class PG3DReachEnv(BaseEnv):
                         dtype=torch.float32,
                     ).expand(batch_size, -1)
                 if obstacle_quat is not None:
-                    self.pg3d_obstacle.set_pose(
-                        Pose.create_from_pq(obstacle_xyz, obstacle_quat)
-                    )
+                    self.pg3d_obstacle.set_pose(Pose.create_from_pq(obstacle_xyz, obstacle_quat))
             if self.pg3d_collision_probe is not None:
-                probe_center = options.get(
-                    "pg3d_collision_probe_center", [0.0, 0.0, -10.0]
+                probe_center = options.get("pg3d_collision_probe_center", [0.0, 0.0, -10.0])
+                probe_xyz = (
+                    torch.as_tensor(probe_center, dtype=torch.float32)
+                    .reshape(1, 3)
+                    .expand(batch_size, -1)
                 )
-                probe_xyz = torch.as_tensor(
-                    probe_center, dtype=torch.float32
-                ).reshape(1, 3).expand(batch_size, -1)
                 self.pg3d_collision_probe.set_pose(Pose.create_from_pq(probe_xyz))
                 zero = torch.zeros((batch_size, 3), dtype=torch.float32)
                 self.pg3d_collision_probe.set_linear_velocity(zero)
