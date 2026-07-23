@@ -969,6 +969,10 @@ Every constrained-evaluation command using `--video --rerun` writes
 `artifact_manifest.json` in its output directory. The evaluator validates non-empty
 files, SHA-256 records, metrics-row selectors, paired seeds, and constraint
 fingerprints before completing. `--video` without `--rerun` is intentionally rejected.
+Each MP4 frame includes a burned-in method/episode/simulator-seed and final outcome
+banner. The same identity is stored in the neutral
+`episode_NNN.policy_input.json` sidecar and as `/recording/identity` in the native
+Rerun file; manifest validation fails if the sidecar and metrics row disagree.
 
 A quick manifest schema check is:
 

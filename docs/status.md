@@ -332,8 +332,9 @@ the full point-cloud tensor into memory.
   instances: stable combined success was base 5/8, rejection 5/8, reranking 8/8, and ITPS
   6/8. All 32 MP4/`.rrd` pairs validated. This is pilot evidence only; the 50 definitive
   test episodes remain untouched.
-- Before the definitive E3 run, burn method/episode/seed and outcome text into MP4 frames.
-  The current manifest binds those identities exactly, but the camera image itself is unlabeled.
+- Constrained-evaluation MP4s now burn method/episode/seed, obstacle family, outcome,
+  clearance, and contact state into every frame. The identical payload is embedded in
+  native Rerun recordings and verified against the metrics row by the artifact manifest.
 - Eval geometry mode defaults to `fast`; use `--geometry-mode exact` for one-episode reference
   comparisons when validating speedups.
 - Constrained reach validation should use a held-out solved validation Zarr with `--source dataset`

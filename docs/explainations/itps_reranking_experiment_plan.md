@@ -384,10 +384,12 @@ The run at `artifacts/e3-pilot-carton-comparison-v1` contains 32/32 validated
 MP4/`.rrd` pairs, 2,467 decoded 512x512 video frames, 22 graphs, and no episode
 errors. Every final DP3 tensor retained at least 32 ordinary-camera obstacle points.
 The camera videos visibly show the grounded carton, robot, and goal, while the RRDs
-contain the semantic point cloud and planning/execution overlays. Before the
-definitive run, add burned-in method/episode/seed and outcome text to the MP4 frames;
-the current identity is exact in the artifact manifest but not visible within the
-video image itself.
+contain the semantic point cloud and planning/execution overlays. Subsequent
+constrained-evaluation captures burn method, episode, simulator seed, obstacle family,
+goal/stable/safety outcomes, clearance, and contact state into every MP4 frame. The
+same full identity/outcome payload is stored under `/recording/identity` in the native
+Rerun 0.35 file and in its neutral metadata sidecar. Manifest validation rejects a
+missing label/identity flag or any RRD-sidecar/metrics identity mismatch.
 
 ### E4 — Constraint difficulty sweep
 

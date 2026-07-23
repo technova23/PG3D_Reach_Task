@@ -64,6 +64,13 @@ def export(bundle_path: Path, metadata_path: Path, output_path: Path) -> None:
             ),
             static=True,
         )
+        recording.log(
+            "recording/identity",
+            rr.TextDocument(
+                json.dumps(metadata.get("recording_identity", {}), sort_keys=True)
+            ),
+            static=True,
+        )
         for visual in metadata.get("constraint_visuals", []):
             recording.log(
                 f"world/constraints/{visual['name']}",

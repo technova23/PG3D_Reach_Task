@@ -56,6 +56,7 @@ from scripts.eval_constrained_reach import (
     ComputeOperationCounts,
     DP3ChunkPolicyAdapter,
     ITPSGuidanceConfig,
+    _annotate_episode_video_frames,
     _artifact_file_record,
     _artifact_selection_summary,
     _build_multichunk_candidates,
@@ -66,6 +67,7 @@ from scripts.eval_constrained_reach import (
     _effective_projection_half_extents,
     _embodied_obstacle_half_extents,
     _embodied_obstacle_reset_options,
+    _episode_artifact_identity,
     _episode_policy_seed,
     _episode_should_stop,
     _episode_step_limit,
@@ -929,6 +931,45 @@ def test_video_requires_corresponding_rerun_output(tmp_path: Path) -> None:
         )
 
 
+def test_episode_video_annotation_burns_identity_and_outcome() -> None:
+    frame = np.full((96, 320, 3), 220, dtype=np.uint8)
+    identity = _episode_artifact_identity(
+        row={
+            "method": "reranking",
+            "episode": 3,
+            "seed": 44,
+            "obstacle_id": "carton:episode_003",
+            "obstacle_family": "carton",
+            "reach_success": True,
+            "stable_goal_reached": True,
+            "constraint_satisfied": True,
+            "combined_success": True,
+            "stable_combined_success": True,
+            "physical_collision": False,
+            "termination_reason": "stable_success_hold_complete",
+            "min_clearance": 0.012,
+            "steps": 71,
+        },
+        base_identity={
+            "dataset_episode_index": 9,
+            "simulator_seed": 44,
+            "policy_seed": 55,
+            "constraint_id": "abc",
+        },
+    )
+
+    annotated = _annotate_episode_video_frames([frame], identity=identity)
+
+    assert len(annotated) == 1
+    assert annotated[0].shape == frame.shape
+    assert annotated[0].dtype == np.uint8
+    assert np.array_equal(frame, np.full_like(frame, 220))
+    assert not np.array_equal(annotated[0][:65], frame[:65])
+    np.testing.assert_array_equal(annotated[0][70:], frame[70:])
+    assert identity["method"] == "reranking"
+    assert identity["stable_combined_success"] is True
+
+
 def test_artifact_manifest_links_nonempty_files_to_metrics_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -943,14 +984,29 @@ def test_artifact_manifest_links_nonempty_files_to_metrics_row(
     )
     video = tmp_path / "videos" / "base" / "episode_000.mp4"
     rerun = tmp_path / "rerun" / "base" / "episode_000.rrd"
+    bundle = tmp_path / "rerun" / "base" / "episode_000.policy_input.npz"
+    metadata = tmp_path / "rerun" / "base" / "episode_000.policy_input.json"
     constraint = tmp_path / "constraints" / "episode_000.json"
     for path, content in (
         (video, b"mp4"),
         (rerun, b"rrd"),
+        (bundle, b"npz"),
         (constraint, b"[]"),
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
+    embedded_identity = {
+        "method": "base",
+        "episode": 0,
+        "simulator_seed": 11,
+        "policy_seed": 22,
+        "constraint_id": "abc",
+        "dataset_episode_index": 3,
+    }
+    metadata.write_text(
+        json.dumps({"recording_identity": embedded_identity}),
+        encoding="utf-8",
+    )
     row = {
         "episode": 0,
         "method": "base",
@@ -965,6 +1021,11 @@ def test_artifact_manifest_links_nonempty_files_to_metrics_row(
         "obstacle_family": "box",
         "obstacle_pose": {"center": [0.0, 0.0, 0.5], "yaw": 0.0},
         "obstacle_collision_geometry": [{"type": "box"}],
+        "policy_pointcloud_bundle": str(bundle),
+        "policy_pointcloud_metadata": str(metadata),
+        "video_labels_embedded": True,
+        "rerun_identity_embedded": True,
+        "embedded_artifact_identity": embedded_identity,
     }
     manifest_path = tmp_path / "artifact_manifest.json"
 
@@ -985,6 +1046,7 @@ def test_artifact_manifest_links_nonempty_files_to_metrics_row(
     assert artifact["paired_identity"]["constraint_id"] == "abc"
     assert artifact["files"]["video"] == _artifact_file_record(video)
     assert artifact["files"]["rerun"] == _artifact_file_record(rerun)
+    assert artifact["embedded_identity"] == embedded_identity
     assert artifact["validation"]["video"]["decoded"] is True
     assert artifact["validation"]["rerun"]["opened"] is True
 

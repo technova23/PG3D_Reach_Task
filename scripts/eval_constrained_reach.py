@@ -609,6 +609,17 @@ def main(argv: list[str] | None = None) -> int:
                         directional_sign=_steer_sign(args.steer),
                         directional_weight=args.steer_weight,
                         itps_config=itps_config,
+                        artifact_identity={
+                            "run_id": run_id,
+                            "git_commit": git_info["commit"],
+                            "checkpoint_id": str(checkpoint_path),
+                            "dataset": str(args.dataset),
+                            "source": spec.source,
+                            "dataset_episode_index": spec.dataset_episode_index,
+                            "simulator_seed": int(spec.seed),
+                            "policy_seed": policy_seed,
+                            "constraint_id": constraint_id,
+                        },
                     )
                     row.update(
                         {
@@ -1327,6 +1338,7 @@ def run_eval_episode(
     embody_obstacle: bool = False,
     obstacle_family: str = "box",
     terminate_on_obstacle_contact: bool = True,
+    artifact_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if embody_obstacle:
         _validate_embodied_obstacle_geometry(sim_env, constraints)
@@ -1612,25 +1624,16 @@ def run_eval_episode(
         if video_env is not None:
             _close_env(video_env)
 
-    video_path = None
-    if video:
-        video_path = output_dir / "videos" / method / f"episode_{spec.output_index:03d}.mp4"
-        with timer.time("video_write", method=method):
-            save_video(video_path, frames, fps=video_fps)
-    rerun_path = None
-    if rerun:
-        rerun_path = output_dir / "rerun" / method / f"episode_{spec.output_index:03d}.rrd"
-        with timer.time("rerun_write", method=method):
-            save_rerun_timeline(
-                rerun_path,
-                timeline,
-                constraints=constraints,
-                replans=rerun_replans,
-                goal_marker_points=int(getattr(policy, "goal_marker_points", 0)),
-                goal_marker_radius=float(
-                    getattr(policy, "goal_marker_radius", DEFAULT_GOAL_MARKER_RADIUS)
-                ),
-            )
+    video_path = (
+        output_dir / "videos" / method / f"episode_{spec.output_index:03d}.mp4"
+        if video
+        else None
+    )
+    rerun_path = (
+        output_dir / "rerun" / method / f"episode_{spec.output_index:03d}.rrd"
+        if rerun
+        else None
+    )
     control_dt = _env_control_dt(sim_env)
     robot_clearance_point_clouds: list[np.ndarray] | None = None
     if robot_clearance_metric and constraints and provider is not None:
@@ -1728,7 +1731,124 @@ def run_eval_episode(
                 "obstacle_points_policy_input": min(policy_counts, default=0),
             }
         )
+    embedded_identity = _episode_artifact_identity(
+        row=row,
+        base_identity=artifact_identity,
+    )
+    if video_path is not None:
+        annotated_frames = _annotate_episode_video_frames(
+            frames,
+            identity=embedded_identity,
+        )
+        with timer.time("video_write", method=method):
+            save_video(video_path, annotated_frames, fps=video_fps)
+        row["video_labels_embedded"] = True
+    if rerun_path is not None:
+        with timer.time("rerun_write", method=method):
+            save_rerun_timeline(
+                rerun_path,
+                timeline,
+                constraints=constraints,
+                replans=rerun_replans,
+                goal_marker_points=int(getattr(policy, "goal_marker_points", 0)),
+                goal_marker_radius=float(
+                    getattr(policy, "goal_marker_radius", DEFAULT_GOAL_MARKER_RADIUS)
+                ),
+                recording_identity=embedded_identity,
+            )
+        row["rerun_identity_embedded"] = True
+    if video_path is not None or rerun_path is not None:
+        row["embedded_artifact_identity"] = embedded_identity
     return row
+
+
+def _episode_artifact_identity(
+    *,
+    row: dict[str, Any],
+    base_identity: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the exact identity/outcome payload embedded in MP4 and RRD artifacts."""
+    identity = dict(_jsonable(base_identity or {}))
+    identity.update(
+        {
+            "method": str(row["method"]),
+            "episode": int(row["episode"]),
+            "simulator_seed": int(
+                identity.get("simulator_seed", row.get("seed", 0))
+            ),
+            "dataset_episode_index": identity.get("dataset_episode_index"),
+            "obstacle_id": row.get("obstacle_id"),
+            "obstacle_family": row.get("obstacle_family"),
+            "reach_success": bool(row["reach_success"]),
+            "stable_goal_reached": bool(row["stable_goal_reached"]),
+            "constraint_satisfied": bool(row["constraint_satisfied"]),
+            "combined_success": bool(row["combined_success"]),
+            "stable_combined_success": bool(row["stable_combined_success"]),
+            "physical_collision": bool(row.get("physical_collision", False)),
+            "termination_reason": row.get("termination_reason"),
+            "min_clearance_m": row.get("min_clearance"),
+            "steps": int(row["steps"]),
+        }
+    )
+    return identity
+
+
+def _annotate_episode_video_frames(
+    frames: list[np.ndarray],
+    *,
+    identity: dict[str, Any],
+) -> list[np.ndarray]:
+    """Burn method, paired identity, obstacle, and final outcome into every frame."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 15)
+    except OSError:
+        font = ImageFont.load_default()
+    method = str(identity.get("method", "unknown")).upper()
+    episode = int(identity.get("episode", 0))
+    simulator_seed = int(identity.get("simulator_seed", 0))
+    obstacle = str(identity.get("obstacle_family") or "none")
+    reach = "YES" if identity.get("reach_success") else "NO"
+    stable = "YES" if identity.get("stable_combined_success") else "NO"
+    safe = "YES" if identity.get("constraint_satisfied") else "NO"
+    collision = "YES" if identity.get("physical_collision") else "NO"
+    clearance = identity.get("min_clearance_m")
+    clearance_text = (
+        "n/a"
+        if clearance is None or not np.isfinite(float(clearance))
+        else f"{float(clearance):+.3f} m"
+    )
+    lines = [
+        f"{method} | EP {episode:03d} | SIM SEED {simulator_seed}",
+        f"OBSTACLE {obstacle} | GOAL {reach} | STABLE+SAFE {stable}",
+        f"SAFE {safe} | CLEARANCE {clearance_text} | CONTACT {collision}",
+    ]
+    annotated: list[np.ndarray] = []
+    for frame in frames:
+        array = np.asarray(frame)
+        if array.dtype != np.uint8 or array.ndim != 3 or array.shape[2] not in (3, 4):
+            raise ValueError(
+                "video annotation requires uint8 RGB/RGBA frames, "
+                f"got dtype={array.dtype} shape={array.shape}"
+            )
+        image = Image.fromarray(array).convert("RGBA")
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        line_height = 19
+        panel_height = 8 + line_height * len(lines)
+        draw.rectangle((0, 0, image.width, panel_height), fill=(0, 0, 0, 190))
+        for line_index, line in enumerate(lines):
+            draw.text(
+                (8, 4 + line_index * line_height),
+                line,
+                fill=(255, 255, 255, 255),
+                font=font,
+            )
+        annotated.append(
+            np.asarray(Image.alpha_composite(image, overlay).convert("RGB"))
+        )
+    return annotated
 
 
 def _env_control_dt(env: Any) -> float:
@@ -4066,6 +4186,7 @@ def _write_artifact_manifest(
                     "pose": row.get("obstacle_pose"),
                     "collision_geometry": row.get("obstacle_collision_geometry"),
                 },
+                "embedded_identity": row.get("embedded_artifact_identity"),
                 "files": files,
             }
         )
@@ -4135,6 +4256,52 @@ def validate_artifact_manifest(
         files = artifact["files"]
         if files.get("video") is not None and files.get("rerun") is None:
             raise ValueError(f"artifact {artifact['artifact_id']} has video without Rerun")
+        embedded_identity = artifact.get("embedded_identity")
+        if embedded_identity is None:
+            raise ValueError(
+                f"artifact {artifact['artifact_id']} is missing embedded identity"
+            )
+        if embedded_identity != row.get("embedded_artifact_identity"):
+            raise ValueError(
+                f"artifact {artifact['artifact_id']} embedded identity disagrees "
+                "with its metrics row"
+            )
+        expected_embedded = {
+            "method": str(row["method"]),
+            "episode": int(row["episode"]),
+            "simulator_seed": int(row["simulator_seed"]),
+            "policy_seed": int(row["policy_seed"]),
+            "constraint_id": str(row["constraint_id"]),
+            "dataset_episode_index": row.get("dataset_episode_index"),
+        }
+        for key, expected in expected_embedded.items():
+            if embedded_identity.get(key) != expected:
+                raise ValueError(
+                    f"artifact {artifact['artifact_id']} embedded {key} disagrees "
+                    "with its metrics row"
+                )
+        if files.get("video") is not None and row.get("video_labels_embedded") is not True:
+            raise ValueError(
+                f"artifact {artifact['artifact_id']} video has no embedded labels"
+            )
+        if files.get("rerun") is not None and row.get("rerun_identity_embedded") is not True:
+            raise ValueError(
+                f"artifact {artifact['artifact_id']} RRD has no embedded identity"
+            )
+        metadata_record = files.get("policy_pointcloud_metadata")
+        if files.get("rerun") is not None and metadata_record is None:
+            raise ValueError(
+                f"artifact {artifact['artifact_id']} has no RRD metadata sidecar"
+            )
+        if metadata_record is not None:
+            metadata = json.loads(
+                Path(str(metadata_record["path"])).read_text(encoding="utf-8")
+            )
+            if metadata.get("recording_identity") != embedded_identity:
+                raise ValueError(
+                    f"artifact {artifact['artifact_id']} RRD identity disagrees "
+                    "with its metrics row"
+                )
         for record in files.values():
             if record is None:
                 continue

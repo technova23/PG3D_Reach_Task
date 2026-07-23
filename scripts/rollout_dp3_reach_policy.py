@@ -693,6 +693,7 @@ def save_rerun_timeline(
     replans: list[dict[str, Any]] | None = None,
     goal_marker_points: int = 0,
     goal_marker_radius: float = DEFAULT_GOAL_MARKER_RADIUS,
+    recording_identity: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     bundle_path = path.with_suffix(".policy_input.npz")
@@ -748,6 +749,7 @@ def save_rerun_timeline(
             {
                 "schema_version": "pg3d.policy_pointcloud_bundle.v1",
                 "rerun_writer_version": "0.35.0",
+                "recording_identity": _jsonable(recording_identity or {}),
                 "constraint_visuals": constraint_visuals,
                 "replans": _jsonable(replans or []),
             },

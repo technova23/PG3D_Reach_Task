@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -288,6 +289,11 @@ def test_rerun35_export_retains_exact_policy_tensor_bundle(
         [entry],
         goal_marker_points=2,
         goal_marker_radius=0.015,
+        recording_identity={
+            "method": "reranking",
+            "episode": 0,
+            "simulator_seed": 123,
+        },
     )
 
     with np.load(output.with_suffix(".policy_input.npz"), allow_pickle=False) as bundle:
@@ -302,9 +308,15 @@ def test_rerun35_export_retains_exact_policy_tensor_bundle(
         np.testing.assert_array_equal(bundle["scene_mask"][0], semantics["all_scene_mask"])
         assert bundle["point_cloud"].shape == (1, 4, 3)
     assert output.read_bytes() == b"rrd35"
-    assert '"rerun_writer_version": "0.35.0"' in output.with_suffix(".policy_input.json").read_text(
-        encoding="utf-8"
+    metadata = json.loads(
+        output.with_suffix(".policy_input.json").read_text(encoding="utf-8")
     )
+    assert metadata["rerun_writer_version"] == "0.35.0"
+    assert metadata["recording_identity"] == {
+        "episode": 0,
+        "method": "reranking",
+        "simulator_seed": 123,
+    }
 
 
 def test_rollout_script_import_keeps_simulator_lazy() -> None:
