@@ -332,6 +332,10 @@ the full point-cloud tensor into memory.
   instances: stable combined success was base 5/8, rejection 5/8, reranking 8/8, and ITPS
   6/8. All 32 MP4/`.rrd` pairs validated. This is pilot evidence only; the 50 definitive
   test episodes remain untouched.
+- Full-distribution constraint generation no longer drops base failures:
+  `build_nominal_path_constraints.py --path-source dataset_demo` uses every selected
+  episode's stored successful TCP path and resolves one shared grounded actor height.
+  The original `policy_success` source remains the separately labelled mechanism subset.
 - Constrained-evaluation MP4s now burn method/episode/seed, obstacle family, outcome,
   clearance, and contact state into every frame. The identical payload is embedded in
   native Rerun recordings and verified against the metrics row by the artifact manifest.

@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import zarr
 
 from pg3d.envs.maniskill_adapter import register_pg3d_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import load_reach_metadata
@@ -44,22 +45,6 @@ from scripts.rollout_dp3_reach_policy import (
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    try:
-        import gymnasium as gym
-        import mani_skill.envs  # noqa: F401
-    except Exception as exc:
-        print(
-            f"Failed to import ManiSkill/Gymnasium: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        print(
-            "Install with: "
-            "uv sync --extra cu129 --extra maniskill --extra viz --group dev --group notebooks",
-            file=sys.stderr,
-        )
-        return 2
-
-    register_pg3d_reach_envs()
     metadata = load_reach_metadata(args.dataset)
     dataset_episode_seeds = [
         int(episode["seed"]) for episode in metadata.get("episodes", []) if "seed" in episode
@@ -78,49 +63,92 @@ def main(argv: list[str] | None = None) -> int:
     if not specs:
         raise RuntimeError("no dataset episodes selected")
 
-    device = select_device(args.device)
-    policy = load_reach_policy_from_checkpoint(
-        args.checkpoint,
-        device=device,
-        prefer_ema=args.checkpoint_model == "ema",
-    )
-    crop_config = crop_config_from_metadata(metadata)
-    action_mode = _action_mode(str(metadata.get("action_mode", "abs_joint")))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     constraints_dir = args.output_dir / "constraints"
     paths_dir = args.output_dir / "paths"
     constraints_dir.mkdir(parents=True, exist_ok=True)
     paths_dir.mkdir(parents=True, exist_ok=True)
 
-    env: Any | None = None
-    attempts: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    if args.path_source == "dataset_demo":
+        root = zarr.open_group(str(args.dataset), mode="r")
+        rows = [
+            _dataset_demo_episode(root, spec=spec)
+            for spec in specs
+        ]
+    else:
+        try:
+            import gymnasium as gym
+            import mani_skill.envs  # noqa: F401
+        except Exception as exc:
+            print(
+                f"Failed to import ManiSkill/Gymnasium: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "Install with: "
+                "uv sync --extra cu129 --extra maniskill --extra viz --group dev --group notebooks",
+                file=sys.stderr,
+            )
+            return 2
+        register_pg3d_reach_envs()
+        device = select_device(args.device)
+        policy = load_reach_policy_from_checkpoint(
+            args.checkpoint,
+            device=device,
+            prefer_ema=args.checkpoint_model == "ema",
+        )
+        crop_config = crop_config_from_metadata(metadata)
+        action_mode = _action_mode(str(metadata.get("action_mode", "abs_joint")))
+        env: Any | None = None
+        try:
+            env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata))
+            for spec in specs:
+                rows.append(
+                    _rollout_base_episode(
+                        env=env,
+                        policy=policy,
+                        spec=spec,
+                        action_mode=action_mode,
+                        crop_config=crop_config,
+                        device=device,
+                        max_steps=args.max_steps,
+                        replan_stride=(
+                            args.replan_stride
+                            if args.replan_stride is not None
+                            else int(policy.n_action_steps)
+                        ),
+                        post_success_steps=args.post_success_steps,
+                        gripper_open=args.gripper_open,
+                    )
+                )
+        except Exception as exc:
+            print(
+                f"Failed to collect nominal policy paths: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        finally:
+            if env is not None:
+                env.close()
+
+    attempts = [_attempt_summary(row) for row in rows]
+    eligible_rows = (
+        rows
+        if args.path_source == "dataset_demo"
+        else [row for row in rows if bool(row["success"])]
+    )
+    resolved_geometry = _resolve_shared_grounded_geometry(args, eligible_rows)
     selected: list[dict[str, Any]] = []
     try:
-        env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata))
-        for spec in specs:
-            row = _rollout_base_episode(
-                env=env,
-                policy=policy,
-                spec=spec,
-                action_mode=action_mode,
-                crop_config=crop_config,
-                device=device,
-                max_steps=args.max_steps,
-                replan_stride=(
-                    args.replan_stride
-                    if args.replan_stride is not None
-                    else int(policy.n_action_steps)
-                ),
-                post_success_steps=args.post_success_steps,
-                gripper_open=args.gripper_open,
-            )
-            attempts.append(_attempt_summary(row))
+        for row in rows:
+            spec = row["spec"]
             print(
                 f"attempt={spec.output_index} dataset_episode={spec.dataset_episode_index} "
-                f"seed={spec.seed} success={row['success']} "
+                f"seed={spec.seed} path_source={args.path_source} success={row['success']} "
                 f"final={_format_optional(row['final_distance'])} steps={row['steps']}"
             )
-            if not bool(row["success"]):
+            if args.path_source == "policy_success" and not bool(row["success"]):
                 continue
             selected_output_index = len(selected)
             tcp_path = _constraint_path(row)
@@ -133,13 +161,9 @@ def main(argv: list[str] | None = None) -> int:
                     weight=args.avoid_weight,
                     tolerance=args.avoid_tolerance,
                     shape=args.avoid_shape,
-                    box_half_extents=(
-                        tuple(float(value) for value in args.avoid_box_half_extents)
-                        if args.avoid_box_half_extents is not None
-                        else None
-                    ),
+                    box_half_extents=resolved_geometry["box_half_extents"],
                     yaw=np.deg2rad(float(args.obstacle_yaw_deg)),
-                    cylinder_half_length=args.avoid_cylinder_half_length,
+                    cylinder_half_length=resolved_geometry["cylinder_half_length"],
                     support_plane_z=args.support_plane_z,
                 ),
             )
@@ -163,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
                     "final_distance": row["final_distance"],
                     "min_distance": row["min_distance"],
                     "first_success_step": row["first_success_step"],
+                    "path_source": args.path_source,
                 }
             )
     except Exception as exc:
@@ -171,9 +196,6 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    finally:
-        if env is not None:
-            env.close()
 
     episode_indices_path = args.output_dir / "episode_indices.txt"
     episode_indices_path.write_text(
@@ -185,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         "checkpoint_model": args.checkpoint_model,
         "dataset": str(args.dataset),
         "source": "dataset",
+        "path_source": args.path_source,
         "env_id": metadata["env_id"],
         "env_kwargs": _env_kwargs(metadata),
         "attempted_episodes": len(attempts),
@@ -204,6 +227,11 @@ def main(argv: list[str] | None = None) -> int:
             "avoid_cylinder_half_length": args.avoid_cylinder_half_length,
             "obstacle_yaw_deg": args.obstacle_yaw_deg,
             "support_plane_z": args.support_plane_z,
+            "path_height_margin": args.path_height_margin,
+            "resolved_box_half_extents": resolved_geometry["box_half_extents"],
+            "resolved_cylinder_half_length": resolved_geometry[
+                "cylinder_half_length"
+            ],
         },
         "attempts": attempts,
         "selected": selected,
@@ -224,13 +252,25 @@ def main(argv: list[str] | None = None) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build small avoid-region constraints on successful nominal DP3 reach paths."
+        description=(
+            "Build fixed avoid-region constraints from successful nominal-policy "
+            "paths or stored dataset demonstration paths."
+        )
     )
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--checkpoint-model", choices=["ema", "raw"], default="ema")
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument(
+        "--path-source",
+        choices=["policy_success", "dataset_demo"],
+        default="policy_success",
+        help=(
+            "policy_success keeps only successful checkpoint rollouts; dataset_demo "
+            "uses every selected episode's stored TCP path for full-distribution eval."
+        ),
+    )
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--episode-indices", type=int, nargs="+", default=None)
     parser.add_argument("--episode-indices-file", type=Path, default=None)
@@ -259,6 +299,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Ground the obstacle on this world-z support plane while retaining the "
             "nominal path point's x/y position. ManiSkill's tabletop is z=0."
+        ),
+    )
+    parser.add_argument(
+        "--path-height-margin",
+        type=float,
+        default=0.02,
+        help=(
+            "For a grounded box/cylinder, extend one shared obstacle top this far "
+            "above the highest selected path anchor."
         ),
     )
     parser.add_argument("--min-successes", type=int, default=15)
@@ -301,6 +350,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--obstacle-yaw-deg must be finite")
     if args.support_plane_z is not None and not np.isfinite(args.support_plane_z):
         raise ValueError("--support-plane-z must be finite")
+    if not np.isfinite(args.path_height_margin) or args.path_height_margin < 0.0:
+        raise ValueError("--path-height-margin must be finite and non-negative")
     if args.min_successes < 0:
         raise ValueError("--min-successes must be non-negative")
     return args
@@ -325,6 +376,136 @@ def _read_episode_indices_file(path: Path) -> list[int]:
     if not indices:
         raise ValueError(f"{path} does not contain any episode indices")
     return indices
+
+
+def _dataset_demo_episode(root: Any, *, spec: RolloutSpec) -> dict[str, Any]:
+    """Load one complete stored demonstration path without consulting policy outcomes."""
+    if spec.dataset_episode_index is None:
+        raise ValueError("dataset_demo path source requires dataset episode indices")
+    episode_ends = np.asarray(root["meta"]["episode_ends"][:], dtype=np.int64)
+    episode_index = int(spec.dataset_episode_index)
+    if not 0 <= episode_index < episode_ends.size:
+        raise IndexError(
+            f"dataset episode index {episode_index} outside [0, {episode_ends.size})"
+        )
+    start = 0 if episode_index == 0 else int(episode_ends[episode_index - 1])
+    end = int(episode_ends[episode_index])
+    tcp = np.asarray(root["data"]["tcp_pose"][start:end, :3], dtype=np.float32)
+    target = np.asarray(root["data"]["target_position"][start:end], dtype=np.float32)
+    success = np.asarray(root["data"]["success"][start:end], dtype=bool).reshape(-1)
+    if tcp.ndim != 2 or tcp.shape[1] != 3 or tcp.shape[0] < 2:
+        raise ValueError(
+            f"dataset episode {episode_index} has invalid TCP path shape {tcp.shape}"
+        )
+    if target.shape != tcp.shape:
+        raise ValueError(
+            f"dataset episode {episode_index} target shape {target.shape} != {tcp.shape}"
+        )
+    if success.shape != (tcp.shape[0],):
+        raise ValueError(
+            f"dataset episode {episode_index} success shape {success.shape} "
+            f"!= {(tcp.shape[0],)}"
+        )
+    first_success_indices = np.flatnonzero(success)
+    first_success_step = (
+        int(first_success_indices[0]) if first_success_indices.size else None
+    )
+    distances = np.linalg.norm(tcp - target, axis=1)
+    return {
+        "spec": spec,
+        "output_index": spec.output_index,
+        "seed": spec.seed,
+        "source": spec.source,
+        "dataset_episode_index": spec.dataset_episode_index,
+        "steps": int(tcp.shape[0] - 1),
+        "success": first_success_step is not None,
+        "first_success_step": first_success_step,
+        "final_distance": float(distances[-1]),
+        "min_distance": float(np.min(distances)),
+        "target_position": target[0],
+        "tcp_positions": tcp,
+    }
+
+
+def _resolve_shared_grounded_geometry(
+    args: argparse.Namespace,
+    rows: list[dict[str, Any]],
+) -> dict[str, tuple[float, float, float] | float | None]:
+    """Resolve one actor height shared by every selected precomputed constraint."""
+    box_half_extents = (
+        tuple(float(value) for value in args.avoid_box_half_extents)
+        if args.avoid_box_half_extents is not None
+        else None
+    )
+    cylinder_half_length = (
+        float(args.avoid_cylinder_half_length)
+        if args.avoid_cylinder_half_length is not None
+        else None
+    )
+    if args.support_plane_z is None or args.avoid_shape == "sphere":
+        return {
+            "box_half_extents": box_half_extents,
+            "cylinder_half_length": cylinder_half_length,
+        }
+    if not rows:
+        raise ValueError("cannot resolve grounded geometry without selected paths")
+    anchor_heights = [
+        float(
+            _point_at_arc_fraction(
+                _constraint_path(row),
+                fraction=float(args.path_fraction),
+            )[2]
+        )
+        for row in rows
+    ]
+    required_half_height = 0.5 * (
+        max(anchor_heights)
+        + float(args.path_height_margin)
+        - float(args.support_plane_z)
+    )
+    if required_half_height <= 0.0:
+        raise ValueError("resolved grounded obstacle height must be positive")
+    if args.avoid_shape in ("box", "cuboid"):
+        dimensions = np.asarray(
+            box_half_extents
+            if box_half_extents is not None
+            else (args.avoid_radius, args.avoid_radius, args.avoid_radius),
+            dtype=np.float32,
+        )
+        dimensions[2] = max(float(dimensions[2]), required_half_height)
+        box_half_extents = tuple(float(value) for value in dimensions)
+    elif args.avoid_shape == "cylinder":
+        cylinder_half_length = max(
+            float(cylinder_half_length or args.avoid_radius),
+            required_half_height,
+        )
+    return {
+        "box_half_extents": box_half_extents,
+        "cylinder_half_length": cylinder_half_length,
+    }
+
+
+def _point_at_arc_fraction(points: Any, *, fraction: float) -> np.ndarray:
+    path = np.asarray(points, dtype=np.float32)
+    if path.ndim != 2 or path.shape[1] != 3 or path.shape[0] == 0:
+        raise ValueError(f"path must have shape [T, 3], got {path.shape}")
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("path fraction must be in [0, 1]")
+    if path.shape[0] == 1:
+        return path[0].copy()
+    segment_lengths = np.linalg.norm(np.diff(path, axis=0), axis=1)
+    total = float(np.sum(segment_lengths))
+    if total <= 1e-8:
+        return path[0].copy()
+    target = fraction * total
+    cumulative = np.concatenate(
+        [np.zeros((1,), dtype=np.float32), np.cumsum(segment_lengths)]
+    )
+    upper = min(int(np.searchsorted(cumulative, target, side="right")), path.shape[0] - 1)
+    lower = max(0, upper - 1)
+    span = float(cumulative[upper] - cumulative[lower])
+    alpha = 0.0 if span <= 1e-8 else (target - float(cumulative[lower])) / span
+    return (path[lower] + alpha * (path[upper] - path[lower])).astype(np.float32)
 
 
 def _rollout_base_episode(
@@ -418,6 +599,7 @@ def _rollout_base_episode(
         if was_training:
             policy.train()
     return {
+        "spec": spec,
         "output_index": spec.output_index,
         "seed": spec.seed,
         "source": spec.source,

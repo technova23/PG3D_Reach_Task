@@ -338,6 +338,21 @@ constraint-quality, task-quality, motion-quality, and compute metrics. Run both:
 - the full held-out distribution, and
 - the explicitly labelled nominal-base-success subset.
 
+The fixed path sources are now operationally distinct. The full-distribution run uses
+`--path-source dataset_demo`: every held-out episode receives an obstacle at the
+midpoint of its stored successful demonstration TCP path, so base-policy failures are
+not dropped. The mechanism-focused subset uses `--path-source policy_success` and
+retains only successful obstacle-free checkpoint rollouts. Both builders run before
+the compared methods, serialize the exact constraints, and preserve the locked
+episode order.
+
+Grounded precomputed actors require one geometry shared across the run. The builder
+therefore resolves the common half-height from the highest selected path anchor plus
+a fixed 2 cm top margin, writes it to the manifest, and uses it in every constraint.
+The evaluator must receive those resolved half-extents when constructing the actor.
+On the 10 pilot episodes, `dataset_demo` selected 10/10, resolved a `0.6423` m total
+height, and all ten demonstration paths intersected their box by 4.3--5.5 cm.
+
 The dataset episode split is locked before constrained evaluation:
 
 - unique-seed ranks 0--24 are checkpoint-selection only;

@@ -50,6 +50,10 @@ from pg3d.eval import (
 )
 from pg3d.world_model import ActionChunk, ImaginedRollout
 from scripts.build_nominal_path_constraints import (
+    _dataset_demo_episode,
+    _resolve_shared_grounded_geometry,
+)
+from scripts.build_nominal_path_constraints import (
     parse_args as parse_builder_args,
 )
 from scripts.eval_constrained_reach import (
@@ -1296,10 +1300,80 @@ def test_nominal_path_constraint_builder_defaults(tmp_path: Path) -> None:
     )
 
     assert args.episodes == 25
+    assert args.path_source == "policy_success"
     assert args.avoid_radius == pytest.approx(0.03)
     assert args.avoid_shape == "sphere"
     assert args.path_fraction == pytest.approx(0.5)
     assert args.min_successes == 15
+
+
+def test_dataset_demo_path_source_loads_complete_selected_episode() -> None:
+    root = {
+        "meta": {"episode_ends": np.asarray([3, 7], dtype=np.int64)},
+        "data": {
+            "tcp_pose": np.asarray(
+                [
+                    [0.0, 0.0, 0.2, 1, 0, 0, 0],
+                    [0.1, 0.0, 0.2, 1, 0, 0, 0],
+                    [0.2, 0.0, 0.2, 1, 0, 0, 0],
+                    [0.0, 0.0, 0.4, 1, 0, 0, 0],
+                    [0.1, 0.0, 0.4, 1, 0, 0, 0],
+                    [0.2, 0.0, 0.4, 1, 0, 0, 0],
+                    [0.3, 0.0, 0.4, 1, 0, 0, 0],
+                ],
+                dtype=np.float32,
+            ),
+            "target_position": np.asarray(
+                [[0.2, 0.0, 0.2]] * 3 + [[0.3, 0.0, 0.4]] * 4,
+                dtype=np.float32,
+            ),
+            "success": np.asarray(
+                [False, False, True, False, False, True, True],
+                dtype=bool,
+            ),
+        },
+    }
+    spec = RolloutSpec(
+        output_index=0,
+        seed=123,
+        source="dataset",
+        dataset_episode_index=1,
+    )
+
+    row = _dataset_demo_episode(root, spec=spec)
+
+    assert row["spec"] == spec
+    assert row["success"] is True
+    assert row["first_success_step"] == 2
+    assert row["tcp_positions"].shape == (4, 3)
+    np.testing.assert_allclose(row["tcp_positions"][0], [0.0, 0.0, 0.4])
+
+
+def test_shared_grounded_geometry_covers_highest_path_anchor() -> None:
+    args = SimpleNamespace(
+        avoid_box_half_extents=[0.055, 0.08, 0.16],
+        avoid_cylinder_half_length=None,
+        avoid_radius=0.03,
+        avoid_shape="box",
+        support_plane_z=0.0,
+        path_height_margin=0.02,
+        path_fraction=0.5,
+    )
+    rows = [
+        {
+            "tcp_positions": np.asarray(
+                [[0.0, 0.0, height], [0.2, 0.0, height]],
+                dtype=np.float32,
+            ),
+            "first_success_step": 1,
+        }
+        for height in (0.4, 0.6)
+    ]
+
+    resolved = _resolve_shared_grounded_geometry(args, rows)
+
+    assert resolved["box_half_extents"] == pytest.approx((0.055, 0.08, 0.31))
+    assert resolved["cylinder_half_length"] is None
 
 
 def test_nominal_path_constraint_builder_accepts_locked_box_protocol(

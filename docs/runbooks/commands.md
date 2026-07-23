@@ -813,6 +813,32 @@ uv run python scripts/eval_constrained_reach.py \
   --allow-failure
 ```
 
+For the full held-out distribution, generate one constraint for every locked episode
+from its stored successful demonstration path rather than filtering on base-policy
+success:
+
+```bash
+uv run python scripts/build_nominal_path_constraints.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --path-source dataset_demo \
+  --episode-indices-file configs/eval/e3_test_episode_indices.txt \
+  --output-dir artifacts/e3-test-demo-path-constraints \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.055 0.08 0.16 \
+  --obstacle-yaw-deg 20 \
+  --support-plane-z 0 \
+  --path-height-margin 0.02 \
+  --min-successes 50
+```
+
+Read `constraint_config.resolved_box_half_extents` from its `manifest.json` and pass
+those exact three values through the evaluator's `--avoid-box-half-extents` option.
+The shared resolved height is required because
+ManiSkill constructs one actor geometry for the run while each episode changes only
+its pose. `policy_success` remains the default builder source for the separately
+labelled nominal-base-success subset.
+
 With `--embody-obstacle`, this command terminates by default on the first raw PhysX
 contact between any robot link and an embodied-obstacle actor. The contact frame is
 saved, and the episode row records the collision step/body pairs and forces

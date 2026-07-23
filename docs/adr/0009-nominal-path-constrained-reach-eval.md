@@ -55,3 +55,18 @@ pose and geometry.
 This grounding rule is explicit rather than inferred from camera points. The 10 locked
 pilot episodes are used only for integration/tuning; the definitive 50-episode test
 partition remains untouched.
+
+The paper comparison reports two separately labelled populations:
+
+- `policy_success`: run the locked base checkpoint without obstacles and retain only
+  successful nominal paths. This isolates steering on episodes the policy can already
+  solve.
+- `dataset_demo`: use every selected episode's stored successful demonstration TCP
+  path, regardless of whether the base checkpoint would solve that episode. This is
+  the fixed-obstacle source for the full held-out distribution.
+
+For `dataset_demo`, one shared actor height is resolved before evaluation from the
+highest selected path anchor plus the predeclared top margin. Every serialized
+constraint uses those same half-extents, so the single ManiSkill actor constructed
+for the run exactly matches all episode constraints. Demonstration paths determine
+obstacle placement only; no compared method outcome is inspected.
