@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -52,6 +53,7 @@ from pg3d.eval import (
     TimingRecorder,
     candidate_feasibility_fraction,
     concatenate_rollouts,
+    constraint_fingerprint,
     direct_path_avoid_region,
     episode_metric_row,
     load_episode_constraints,
@@ -61,6 +63,7 @@ from pg3d.eval import (
     select_artifact_episode_indices,
     should_emit_episode_artifact,
     summarize_metrics,
+    validate_paired_episode_rows,
     validate_planning_horizons,
 )
 from pg3d.policies.dp3 import SimpleDP3
@@ -334,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     decisions_path = args.output_dir / "decisions.jsonl"
     timings_path = args.output_dir / "timings.jsonl"
     timing_written = 0
-    rng = np.random.default_rng(args.seed)
+    run_id = str(args.output_dir.resolve())
     try:
         sim_env = gym.make(
             str(metadata["env_id"]),
@@ -376,9 +379,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 with timer.time("json_write", artifact="constraint"):
                     save_episode_constraints(constraint_path, constraints)
+                constraint_id = constraint_fingerprint(constraints)
+                policy_seed = _episode_policy_seed(args.seed, spec.output_index)
                 write_video = args.video and spec.output_index in video_episode_indices
                 write_rerun = args.rerun and spec.output_index in rerun_episode_indices
                 for method in args.methods:
+                    _seed_torch(policy_seed)
+                    method_rng = np.random.default_rng(policy_seed)
                     row = run_eval_episode(
                         sim_env=sim_env,
                         ghost_env=ghost_env,
@@ -403,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
                         rerun=write_rerun,
                         video_fps=args.video_fps,
                         decisions_file=decisions_file,
-                        rng=rng,
+                        rng=method_rng,
                         timer=timer,
                         video_env_factory=_video_env_factory(
                             gym,
@@ -418,6 +425,18 @@ def main(argv: list[str] | None = None) -> int:
                         directional_sign=_steer_sign(args.steer),
                         directional_weight=args.steer_weight,
                         itps_config=itps_config,
+                    )
+                    row.update(
+                        {
+                            "run_id": run_id,
+                            "checkpoint_id": str(checkpoint_path),
+                            "source": spec.source,
+                            "dataset_episode_index": spec.dataset_episode_index,
+                            "simulator_seed": int(spec.seed),
+                            "policy_seed": policy_seed,
+                            "constraint_id": constraint_id,
+                            "constraint_path": str(constraint_path),
+                        }
                     )
                     rows.append(row)
                     with timer.time("json_write", artifact="metrics"):
@@ -460,7 +479,9 @@ def main(argv: list[str] | None = None) -> int:
         if ghost_env is not None:
             ghost_env.close()
 
+    validate_paired_episode_rows(rows, methods=list(args.methods))
     summary = {
+        "run_id": run_id,
         "checkpoint": str(checkpoint_path),
         "dataset": str(args.dataset),
         "source": args.source,
@@ -1022,6 +1043,7 @@ def run_eval_episode(
     candidate_feasible = 0
     candidate_total = 0
     fallback_count = 0
+    action_selection_times: list[float] = []
     terminated_or_truncated = False
     was_training = policy.training
     policy.eval()
@@ -1029,27 +1051,35 @@ def run_eval_episode(
         while steps < max_steps:
             if first_success_step is not None and observed_post_success_steps >= post_success_steps:
                 break
-            decision = _select_decision(
+            with timer.time(
+                "action_selection",
                 method=method,
-                adapter=adapter,
-                world_model=world_model,
-                provider=provider,
-                current_entry=sim_entry,
-                obs_window=obs_window,
-                scene=scene,
-                constraints=constraints,
-                crop_config=crop_config,
-                goal_thresh=goal_thresh,
-                planning_horizon_chunks=planning_horizon_chunks,
-                geometry_mode=geometry_mode,
-                k_schedule=k_schedule,
-                match_current_robot_points=match_current_robot_points,
-                rng=rng,
-                timer=timer,
-                directional_sign=directional_sign,
-                directional_weight=directional_weight,
-                itps_config=itps_config,
-            )
+                episode=spec.output_index,
+                replan=replans,
+            ):
+                decision = _select_decision(
+                    method=method,
+                    adapter=adapter,
+                    world_model=world_model,
+                    provider=provider,
+                    current_entry=sim_entry,
+                    obs_window=obs_window,
+                    scene=scene,
+                    constraints=constraints,
+                    crop_config=crop_config,
+                    goal_thresh=goal_thresh,
+                    planning_horizon_chunks=planning_horizon_chunks,
+                    geometry_mode=geometry_mode,
+                    k_schedule=k_schedule,
+                    match_current_robot_points=match_current_robot_points,
+                    rng=rng,
+                    timer=timer,
+                    directional_sign=directional_sign,
+                    directional_weight=directional_weight,
+                    itps_config=itps_config,
+                )
+            if timer.enabled:
+                action_selection_times.append(timer.events[-1].seconds)
             replans += 1
             if decision.result is not None:
                 candidate_feasible += decision.candidate_feasible
@@ -1216,6 +1246,7 @@ def run_eval_episode(
         goal_threshold=goal_thresh,
         hold_steps=post_success_steps,
         control_dt=_env_control_dt(sim_env),
+        action_selection_times=action_selection_times,
     )
 
 
@@ -3403,6 +3434,14 @@ def _seed_torch(seed: int) -> None:
     torch.manual_seed(int(seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(seed))
+
+
+def _episode_policy_seed(base_seed: int, episode_index: int) -> int:
+    """Derive an order-independent policy RNG seed shared by paired methods."""
+    if base_seed < 0 or episode_index < 0:
+        raise ValueError("base_seed and episode_index must be non-negative")
+    payload = f"pg3d-policy-seed:{base_seed}:{episode_index}".encode()
+    return int.from_bytes(hashlib.sha256(payload).digest()[:4], "little")
 
 
 class _null_timer:

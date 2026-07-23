@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
@@ -250,6 +251,16 @@ def save_episode_constraints(path: Path, constraints: list[AvoidRegion]) -> None
         json.dumps(jsonable(constraints_to_json(constraints)), indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def constraint_fingerprint(constraints: list[AvoidRegion]) -> str:
+    """Return a stable SHA-256 identifier for serialized constraint geometry."""
+    payload = json.dumps(
+        jsonable(constraints_to_json(constraints)),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def load_episode_constraints(path: Path) -> list[AvoidRegion]:
@@ -508,6 +519,7 @@ def episode_metric_row(
     goal_threshold: float | None = None,
     hold_steps: int = 0,
     control_dt: float = 1.0,
+    action_selection_times: list[float] | None = None,
 ) -> dict[str, Any]:
     """Build the stable episode-level constrained-reach metric row.
 
@@ -550,6 +562,9 @@ def episode_metric_row(
         if min_clearance is not None and np.isfinite(float(min_clearance))
         else 0.0
     )
+    selection_times = np.asarray(action_selection_times or [], dtype=np.float64)
+    if np.any(~np.isfinite(selection_times)) or np.any(selection_times < 0.0):
+        raise ValueError("action_selection_times must be finite and non-negative")
     return {
         "method": method,
         "episode": int(episode),
@@ -596,6 +611,18 @@ def episode_metric_row(
             path.q_array, order=3, dt=control_dt
         ),
         "max_joint_velocity": max_joint_velocity(path.q_array, dt=control_dt),
+        "action_selection_time_total": (
+            float(np.sum(selection_times)) if selection_times.size else None
+        ),
+        "action_selection_time_median": (
+            float(np.median(selection_times)) if selection_times.size else None
+        ),
+        "action_selection_time_p90": (
+            float(np.percentile(selection_times, 90.0)) if selection_times.size else None
+        ),
+        "action_selection_time_p95": (
+            float(np.percentile(selection_times, 95.0)) if selection_times.size else None
+        ),
         "smoothness": q_trajectory_smoothness(path.q_array, order=2),
         "candidate_feasibility_fraction": candidate_feasibility_fraction,
         "fallback_count": int(fallback_count),
@@ -661,12 +688,55 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "joint_acceleration_mse",
             "joint_jerk_mse",
             "max_joint_velocity",
+            "action_selection_time_total",
+            "action_selection_time_median",
+            "action_selection_time_p90",
+            "action_selection_time_p95",
             "smoothness",
             "candidate_feasibility_fraction",
         ]:
             method_summary.update(_mean_std(key, method_rows))
         summary[method] = method_summary
     return summary
+
+
+def validate_paired_episode_rows(
+    rows: list[dict[str, Any]],
+    *,
+    methods: list[str],
+) -> None:
+    """Validate complete method pairing and shared episode protocol identifiers."""
+    if not methods or len(set(methods)) != len(methods):
+        raise ValueError("methods must be non-empty and unique")
+    expected = set(methods)
+    by_episode: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_episode.setdefault(int(row["episode"]), []).append(row)
+    if not by_episode:
+        raise ValueError("paired evaluation produced no episode rows")
+    identity_keys = (
+        "simulator_seed",
+        "source",
+        "dataset_episode_index",
+        "policy_seed",
+        "constraint_id",
+        "checkpoint_id",
+    )
+    for episode, episode_rows in sorted(by_episode.items()):
+        observed = [str(row["method"]) for row in episode_rows]
+        if len(observed) != len(set(observed)):
+            raise ValueError(f"episode {episode} has duplicate method rows: {observed}")
+        if set(observed) != expected:
+            raise ValueError(
+                f"episode {episode} methods do not match protocol: "
+                f"expected={sorted(expected)} observed={sorted(observed)}"
+            )
+        for key in identity_keys:
+            values = {_identity_value(row.get(key)) for row in episode_rows}
+            if len(values) != 1:
+                raise ValueError(
+                    f"episode {episode} has mismatched {key} across methods: {values}"
+                )
 
 
 def success_rate_ci_rows(
@@ -932,3 +1002,7 @@ def _optional_float(row: dict[str, Any], *, key: str = "final_target_distance") 
     except (TypeError, ValueError):
         return float("nan")
     return numeric if np.isfinite(numeric) else float("nan")
+
+
+def _identity_value(value: Any) -> str:
+    return json.dumps(jsonable(value), sort_keys=True, separators=(",", ":"))

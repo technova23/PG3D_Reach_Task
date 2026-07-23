@@ -348,13 +348,17 @@ first-success step, final/minimum target distance, minimum clearance, TCP violat
 depth/duration/fraction/integral/event count, TCP and joint path length, physical-time
 TCP/joint acceleration and jerk, maximum joint velocity, steps, replans, candidate
 feasibility fraction, fallback count, and optional timing events. Continuous summaries
-include mean, standard deviation, median, and quartiles.
+include mean, standard deviation, median, and quartiles. Paired episode rows now carry
+the run, checkpoint, dataset/source episode, simulator seed, shared policy seed, and
+SHA-256 constraint identity; the evaluator rejects incomplete or mismatched method
+pairs. CUDA-synchronized action-selection timing records total, median, p90, and p95
+latency.
 
 Before the paper-scale comparison, add:
 
 - time-indexed whole-robot violation metrics rather than only flattened robot clearance,
 - executed-action replan-boundary discontinuity,
-- clean action-selection latency summaries and operation counts,
+- denoiser/FK/geometry operation counts,
 - peak GPU memory, and
 - paired statistical comparison utilities,
 - obstacle/goal-marker point categories in Rerun, and

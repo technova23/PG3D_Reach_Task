@@ -18,6 +18,7 @@ from pg3d.eval import (
     candidate_feasibility_fraction,
     concatenate_rollouts,
     constraint_clearance_series,
+    constraint_fingerprint,
     constraint_violation_metrics,
     direct_path_avoid_region,
     episode_metric_row,
@@ -36,6 +37,7 @@ from pg3d.eval import (
     summarize_metrics,
     trajectory_derivative_mse,
     trajectory_path_length,
+    validate_paired_episode_rows,
     validate_planning_horizons,
     wilson_interval,
 )
@@ -50,6 +52,7 @@ from scripts.eval_constrained_reach import (
     _constraint_source_summary,
     _constraints_for_episode,
     _effective_projection_half_extents,
+    _episode_policy_seed,
     _local_path_points_xy,
     _obs_windows_to_torch,
     _point_at_arc_fraction_xy,
@@ -203,6 +206,48 @@ def test_wilson_interval_bounds_known_center() -> None:
     assert 0.76 < high < 0.77
 
 
+def test_constraint_fingerprint_is_stable_across_json_round_trip(tmp_path: Path) -> None:
+    constraint = direct_path_avoid_region(
+        start_tcp=[0.0, 0.0, 0.0],
+        target_position=[1.0, 0.0, 0.0],
+    )
+    path = tmp_path / "constraint.json"
+    save_episode_constraints(path, [constraint])
+
+    assert constraint_fingerprint([constraint]) == constraint_fingerprint(
+        load_episode_constraints(path)
+    )
+
+
+def test_episode_policy_seed_is_order_independent_and_episode_specific() -> None:
+    assert _episode_policy_seed(7, 3) == _episode_policy_seed(7, 3)
+    assert _episode_policy_seed(7, 3) != _episode_policy_seed(7, 4)
+    with pytest.raises(ValueError, match="non-negative"):
+        _episode_policy_seed(-1, 0)
+
+
+def test_validate_paired_episode_rows_checks_shared_protocol_identity() -> None:
+    shared = {
+        "episode": 0,
+        "simulator_seed": 11,
+        "source": "dataset",
+        "dataset_episode_index": 4,
+        "policy_seed": 22,
+        "constraint_id": "constraint",
+        "checkpoint_id": "checkpoint",
+    }
+    rows = [
+        {**shared, "method": "base"},
+        {**shared, "method": "reranking"},
+        {**shared, "method": "itps"},
+    ]
+
+    validate_paired_episode_rows(rows, methods=["base", "reranking", "itps"])
+    rows[-1] = {**rows[-1], "constraint_id": "different"}
+    with pytest.raises(ValueError, match="mismatched constraint_id"):
+        validate_paired_episode_rows(rows, methods=["base", "reranking", "itps"])
+
+
 def test_episode_metric_row_computes_clearance_and_combined_success() -> None:
     constraint = direct_path_avoid_region(
         start_tcp=[0.0, 0.0, 0.0],
@@ -317,6 +362,7 @@ def test_episode_metric_row_reports_stable_physical_metrics() -> None:
         goal_threshold=0.025,
         hold_steps=2,
         control_dt=0.1,
+        action_selection_times=[0.1, 0.2, 0.3],
     )
 
     assert row["stable_goal_reached"] is True
@@ -325,6 +371,10 @@ def test_episode_metric_row_reports_stable_physical_metrics() -> None:
     assert row["joint_path_length"] == pytest.approx(0.3)
     assert row["max_joint_velocity"] == pytest.approx(1.0)
     assert row["violation_steps_tcp"] == 0
+    assert row["action_selection_time_total"] == pytest.approx(0.6)
+    assert row["action_selection_time_median"] == pytest.approx(0.2)
+    assert row["action_selection_time_p90"] == pytest.approx(0.28)
+    assert row["action_selection_time_p95"] == pytest.approx(0.29)
 
 
 def test_constraint_satisfaction_fails_for_path_inside_sphere() -> None:

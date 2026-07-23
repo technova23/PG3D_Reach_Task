@@ -8,6 +8,7 @@ from pg3d.eval.constrained_reach import (
     candidate_feasibility_fraction,
     concatenate_rollouts,
     constraint_clearance_series,
+    constraint_fingerprint,
     constraint_violation_metrics,
     direct_path_avoid_region,
     episode_metric_row,
@@ -27,6 +28,7 @@ from pg3d.eval.constrained_reach import (
     summarize_metrics,
     trajectory_derivative_mse,
     trajectory_path_length,
+    validate_paired_episode_rows,
     validate_planning_horizons,
     wilson_interval,
 )
@@ -40,6 +42,7 @@ __all__ = [
     "TimingRecorder",
     "candidate_feasibility_fraction",
     "concatenate_rollouts",
+    "constraint_fingerprint",
     "constraint_clearance_series",
     "constraint_violation_metrics",
     "direct_path_avoid_region",
@@ -61,5 +64,6 @@ __all__ = [
     "trajectory_derivative_mse",
     "trajectory_path_length",
     "validate_planning_horizons",
+    "validate_paired_episode_rows",
     "wilson_interval",
 ]

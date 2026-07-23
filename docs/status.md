@@ -59,7 +59,11 @@ pilot metrics and now logs stable-hold success, TCP violation duration/integral/
 TCP/joint path length, physical-time acceleration/jerk, maximum joint velocity, and robust
 continuous summaries. It still needs time-indexed whole-robot violations, executed-action
 replan discontinuity, paired statistical utilities, and compute-operation fields before the
-definitive comparison.
+definitive comparison. E0 protocol validation now also assigns an order-independent shared
+policy seed per episode, fingerprints serialized constraints, records source/checkpoint/run
+identities, rejects mismatched method pairs, and reports CUDA-synchronized end-to-end
+action-selection latency. A one-step live ManiSkill smoke passed for base, rejection,
+reranking, and ITPS on the same dataset episode and constraint.
 
 ## Current phase
 
