@@ -40,6 +40,9 @@ EEF-only baseline; differentiable whole-robot collision guidance and sketch inpu
 The active DP3 architecture now has one canonical module implementation at
 `pg3d/policies/dp3/modules.py`; two unreferenced legacy copies at the top of `pg3d/policies/`
 were removed before writing line-referenced diffusion-policy documentation.
+A code-anchored explanation of ordinary DP3 training and DDIM inference now lives at
+`docs/explainations/diffusion_policy.md`; its ITPS extension is intentionally reserved for a
+follow-up pass.
 
 ## Current phase
 
