@@ -37,7 +37,13 @@ def test_crop_point_cloud_preserves_aligned_masks_and_pads() -> None:
     )
     robot_mask = np.asarray([True, True, False, True, False, True])
 
-    cropped = crop_point_cloud(points, robot_mask=robot_mask, config=config)
+    obstacle_mask = np.asarray([False, False, True, False, True, False])
+    cropped = crop_point_cloud(
+        points,
+        robot_mask=robot_mask,
+        aligned_masks={"obstacle_mask": obstacle_mask},
+        config=config,
+    )
 
     np.testing.assert_allclose(
         cropped["point_cloud"],
@@ -53,6 +59,7 @@ def test_crop_point_cloud_preserves_aligned_masks_and_pads() -> None:
     )
     assert cropped["robot_mask"].tolist() == [True, False, True, False]
     assert cropped["point_valid_mask"].tolist() == [True, True, True, True]
+    assert cropped["obstacle_mask"].tolist() == [False, True, False, True]
 
 
 def test_crop_point_cloud_downsamples_deterministically() -> None:

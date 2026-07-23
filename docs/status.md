@@ -70,6 +70,12 @@ the 65k checkpoint. It reached 14/25 episodes and stably held 12/25, so it misse
 three-episode `K=1`, zero-guidance regression produced bit-identical base/rejection/reranking
 chunks and complete MP4/`.rrd` pairs for all four methods; ITPS appropriately remained different
 because its zero-energy path still uses DDPM/MCMC inference.
+E2 has its first end-to-end realistic-obstacle slice: an axis-aligned box is now a
+collidable actor in the control environment rather than a render-only overlay. Live
+camera segmentation tracks it through cropping and Rerun, and runtime validation
+requires actor half-extents to match the serialized constraint. The first GPU smoke
+retained 192 raw obstacle points but only 5 after cropping and in the final policy
+tensor, confirming that semantic-preserving obstacle sampling is needed before E3.
 
 ## Current phase
 
@@ -146,8 +152,8 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Implement and validate E2 realistic camera-visible obstacle actors and matched simulator-known
-   collision geometry; this engineering work does not depend on the nominal gate passing.
+3. Add a semantic-preserving obstacle sampling quota, then extend E2 from the validated
+   axis-aligned box to rotated box, carton, cabinet, and cylinder actor families.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 

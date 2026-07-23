@@ -12,13 +12,13 @@ import numpy as np
 import torch
 
 from pg3d.envs.maniskill_adapter import adapt_observation, register_pg3d_reach_envs
-from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import (
     DEFAULT_WORKSPACE_BOUNDS,
     PointCloudCropConfig,
     crop_point_cloud,
     load_reach_metadata,
 )
+from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.policies.dp3 import SimpleDP3
 from pg3d.policies.dp3.checkpoint import load_reach_policy_from_checkpoint
 from pg3d.policies.dp3.goal_markers import (
@@ -376,7 +376,11 @@ def crop_config_from_metadata(metadata: dict[str, Any]) -> PointCloudCropConfig:
     bounds = np.asarray(crop.get("bounds", DEFAULT_WORKSPACE_BOUNDS), dtype=np.float32)
     num_points = int(crop.get("num_points", 512))
     robot_point_fraction = float(crop.get("robot_point_fraction", 0.25))
-    return PointCloudCropConfig(bounds=bounds, num_points=num_points, robot_point_fraction=robot_point_fraction)
+    return PointCloudCropConfig(
+        bounds=bounds,
+        num_points=num_points,
+        robot_point_fraction=robot_point_fraction,
+    )
 
 
 def rollout_observation_entry(
@@ -390,6 +394,11 @@ def rollout_observation_entry(
     cropped = crop_point_cloud(
         adapted.point_cloud,
         robot_mask=adapted.robot_mask,
+        aligned_masks={
+            "obstacle_mask": adapted.object_masks["pg3d_obstacle"]
+        }
+        if "pg3d_obstacle" in adapted.object_masks
+        else None,
         config=crop_config,
     )
     target_position = (
@@ -402,7 +411,7 @@ def rollout_observation_entry(
         if adapted.robot_state.tcp_pose is None
         else adapted.robot_state.tcp_pose.astype(np.float32, copy=True)
     )
-    return {
+    entry = {
         "point_cloud": cropped["point_cloud"],
         "robot_mask": cropped["robot_mask"],
         "point_valid_mask": cropped["point_valid_mask"],
@@ -412,6 +421,13 @@ def rollout_observation_entry(
         "success": bool(adapted.sim_gt.success) if adapted.sim_gt is not None else False,
         "final_distance": _float_info(info, "tcp_to_goal_dist", default=float("nan")),
     }
+    if "obstacle_mask" in cropped:
+        entry["obstacle_mask"] = cropped["obstacle_mask"]
+        entry["obstacle_points_raw"] = int(
+            np.count_nonzero(adapted.object_masks["pg3d_obstacle"])
+        )
+        entry["obstacle_points_cropped"] = int(np.count_nonzero(cropped["obstacle_mask"]))
+    return entry
 
 
 def make_initial_obs_window(
@@ -710,6 +726,14 @@ def save_rerun_timeline(
             robot_points = points[np.asarray(entry["robot_mask"], dtype=bool)[valid]]
             if robot_points.size:
                 rr.log("world/robot_points", rr.Points3D(robot_points, colors=[0, 128, 255]))
+            obstacle_mask = entry.get("obstacle_mask")
+            if obstacle_mask is not None:
+                obstacle_points = points[np.asarray(obstacle_mask, dtype=bool)[valid]]
+                if obstacle_points.size:
+                    rr.log(
+                        "world/obstacle_points",
+                        rr.Points3D(obstacle_points, colors=[180, 90, 20]),
+                    )
         target = np.asarray(entry["target_position"], dtype=np.float32).reshape(1, 3)
         if np.all(np.isfinite(target)):
             rr.log("world/goal", rr.Points3D(target, colors=[0, 255, 0]))

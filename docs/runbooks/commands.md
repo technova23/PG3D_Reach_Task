@@ -720,6 +720,37 @@ and five matching Rerun files were written. The companion
 three episodes and all four methods; base, rejection, and reranking chunks were
 bit-identical for every seed at `K=1`.
 
+### E2 embodied-box smoke
+
+Create the generated box constraint as a collidable actor in the actual control
+environment and verify that its ordinary camera points survive into the policy tensor:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00065000.pt \
+  --methods base \
+  --source dataset \
+  --episode-indices 0 \
+  --device cuda \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.04 0.06 0.08 \
+  --embody-obstacle \
+  --max-steps 1 \
+  --post-success-steps 0 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --output-dir artifacts/e2-embodied-box-smoke \
+  --allow-failure
+```
+
+The episode metrics include `obstacle_points_raw`, `obstacle_points_cropped`, and
+`obstacle_points_policy_input`. A zero value at any stage fails the observation
+validation. The first smoke measured 192, 5, and 5 respectively and wrote a non-empty
+MP4/`.rrd` pair. Five retained points is too sparse for the primary comparison, so a
+semantic-preserving obstacle quota remains required.
+
 Longer multi-chunk planning smoke:
 
 ```bash

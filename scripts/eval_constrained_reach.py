@@ -345,7 +345,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         sim_env = gym.make(
             str(metadata["env_id"]),
-            **_env_kwargs(metadata, render_mode="rgb_array" if args.video else None),
+            **_env_kwargs(
+                metadata,
+                render_mode="rgb_array" if args.video else None,
+                obstacle_half_extents=_embodied_obstacle_half_extents(args),
+            ),
         )
         ghost_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
         adapter = DP3ChunkPolicyAdapter(
@@ -419,13 +423,18 @@ def main(argv: list[str] | None = None) -> int:
                         video_env_factory=_video_env_factory(
                             gym,
                             metadata=metadata,
-                            enabled=write_video and args.constraint_overlay_video,
+                            enabled=(
+                                write_video
+                                and args.constraint_overlay_video
+                                and not args.embody_obstacle
+                            ),
                         ),
                         constraint_overlay_alpha=args.constraint_overlay_alpha,
                         constraint_overlay_color=tuple(args.constraint_overlay_color),
                         robot_clearance_metric=args.robot_clearance_metric,
                         robot_clearance_stride=args.robot_clearance_stride,
                         zarr_context=zarr_context,
+                        embody_obstacle=args.embody_obstacle,
                         directional_sign=_steer_sign(args.steer),
                         directional_weight=args.steer_weight,
                         itps_config=itps_config,
@@ -793,6 +802,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "All methods receive an empty constraint program."
         ),
     )
+    parser.add_argument(
+        "--embody-obstacle",
+        action="store_true",
+        help=(
+            "Create the single box avoid region as a collidable actor in the control "
+            "environment so ordinary camera point clouds, rather than synthetic point "
+            "injection, expose it to the policy."
+        ),
+    )
     parser.add_argument("--gripper-open", type=float, default=0.04)
     parser.add_argument(
         "--match-current-robot-points",
@@ -854,6 +872,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--episodes must be positive")
     if args.no_constraints and args.constraints_dir is not None:
         raise ValueError("--no-constraints and --constraints-dir are mutually exclusive")
+    if args.embody_obstacle and args.avoid_shape not in ("box", "cuboid"):
+        raise ValueError("--embody-obstacle currently requires --avoid-shape box")
+    if args.embody_obstacle and args.constraints_dir is not None:
+        raise ValueError(
+            "--embody-obstacle does not yet support --constraints-dir because actor "
+            "dimensions must be known when the environment is created"
+        )
+    if args.embody_obstacle and len(args.avoid_path_fractions) != 1:
+        raise ValueError("--embody-obstacle currently supports exactly one avoid region")
     if args.episode_indices is not None and args.episode_indices_file is not None:
         raise ValueError("--episode-indices and --episode-indices-file are mutually exclusive")
     if args.episode_indices_file is not None and args.source != "dataset":
@@ -996,13 +1023,23 @@ def run_eval_episode(
     zarr_context: dict[str, Any] | None = None,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
+    embody_obstacle: bool = False,
 ) -> dict[str, Any]:
+    if embody_obstacle:
+        _validate_embodied_obstacle_geometry(sim_env, constraints)
+    obstacle_options = _embodied_obstacle_reset_options(constraints) if embody_obstacle else None
     if zarr_context is not None:
         sim_obs, sim_info = _reset_to_zarr_episode(
-            sim_env, rollout_seed=spec.seed, zarr_context=zarr_context
+            sim_env,
+            rollout_seed=spec.seed,
+            zarr_context=zarr_context,
+            reset_options=obstacle_options,
         )
     else:
-        sim_obs, sim_info = sim_env.reset(seed=spec.seed, options={"reconfigure": True})
+        reset_options = {"reconfigure": True}
+        if obstacle_options is not None:
+            reset_options.update(obstacle_options)
+        sim_obs, sim_info = sim_env.reset(seed=spec.seed, options=reset_options)
     video_env: Any | None = None
     with timer.time("observation_adapt_crop", source="reset"):
         sim_entry = rollout_observation_entry(
@@ -1011,7 +1048,7 @@ def run_eval_episode(
             env=sim_env,
             crop_config=crop_config,
         )
-    if zarr_context is not None:
+    if zarr_context is not None and not embody_obstacle:
         sim_entry = _apply_zarr_initial_entry(sim_entry, zarr_context)
     obs_window = make_initial_obs_window(sim_entry, n_obs_steps=int(policy.n_obs_steps))
     target = np.asarray(sim_entry["target_position"], dtype=np.float32).reshape(3)
@@ -1250,7 +1287,7 @@ def run_eval_episode(
                 file=sys.stderr,
             )
             robot_clearance_points = None
-    return episode_metric_row(
+    row = episode_metric_row(
         method=method,
         episode=spec.output_index,
         seed=spec.seed,
@@ -1273,6 +1310,24 @@ def run_eval_episode(
         control_dt=_env_control_dt(sim_env),
         action_selection_times=action_selection_times,
     )
+    if embody_obstacle:
+        goal_marker_points = int(getattr(policy, "goal_marker_points", 0))
+        raw_counts = [int(entry.get("obstacle_points_raw", 0)) for entry in timeline]
+        cropped_counts = [
+            int(entry.get("obstacle_points_cropped", 0)) for entry in timeline
+        ]
+        policy_counts = [
+            _policy_obstacle_point_count(entry, goal_marker_points=goal_marker_points)
+            for entry in timeline
+        ]
+        row.update(
+            {
+                "obstacle_points_raw": min(raw_counts, default=0),
+                "obstacle_points_cropped": min(cropped_counts, default=0),
+                "obstacle_points_policy_input": min(policy_counts, default=0),
+            }
+        )
+    return row
 
 
 def _env_control_dt(env: Any) -> float:
@@ -2913,7 +2968,12 @@ def _whole_robot_clearance_points(
     return np.concatenate(clouds, axis=0).astype(np.float32, copy=False)
 
 
-def _env_kwargs(metadata: dict[str, Any], *, render_mode: str | None) -> dict[str, Any]:
+def _env_kwargs(
+    metadata: dict[str, Any],
+    *,
+    render_mode: str | None,
+    obstacle_half_extents: tuple[float, float, float] | None = None,
+) -> dict[str, Any]:
     env_kwargs = dict(metadata["env_kwargs"])
     env_kwargs["obs_mode"] = "pointcloud"
     env_kwargs["num_envs"] = 1
@@ -2921,7 +2981,62 @@ def _env_kwargs(metadata: dict[str, Any], *, render_mode: str | None) -> dict[st
         env_kwargs.pop("render_mode", None)
     else:
         env_kwargs["render_mode"] = render_mode
+    if obstacle_half_extents is not None:
+        env_kwargs["pg3d_obstacle_half_extents"] = obstacle_half_extents
     return env_kwargs
+
+
+def _embodied_obstacle_half_extents(
+    args: argparse.Namespace,
+) -> tuple[float, float, float] | None:
+    if not args.embody_obstacle:
+        return None
+    values = (
+        np.asarray(args.avoid_box_half_extents, dtype=np.float32)
+        if args.avoid_box_half_extents is not None
+        else np.repeat(float(args.avoid_radius), 3).astype(np.float32)
+    )
+    return tuple(float(value) for value in values)
+
+
+def _embodied_obstacle_reset_options(
+    constraints: list[AvoidRegion],
+) -> dict[str, list[float]]:
+    if len(constraints) != 1 or not isinstance(constraints[0].region, BoxRegion):
+        raise ValueError(
+            "embodied obstacle evaluation currently requires exactly one box constraint"
+        )
+    return {"pg3d_obstacle_center": constraints[0].region.center.astype(float).tolist()}
+
+
+def _validate_embodied_obstacle_geometry(
+    env: Any,
+    constraints: list[AvoidRegion],
+) -> None:
+    _embodied_obstacle_reset_options(constraints)
+    configured = getattr(
+        getattr(env, "unwrapped", env), "pg3d_obstacle_half_extents", None
+    )
+    if configured is None:
+        raise ValueError("control environment has no configured pg3d obstacle actor")
+    expected = np.asarray(constraints[0].region.half_extents, dtype=np.float32)
+    actual = np.asarray(configured, dtype=np.float32)
+    if actual.shape != (3,) or not np.allclose(actual, expected, atol=1e-7, rtol=0.0):
+        raise ValueError(
+            "control actor and serialized constraint half-extents differ: "
+            f"actor={actual.tolist()} constraint={expected.tolist()}"
+        )
+
+
+def _policy_obstacle_point_count(
+    entry: Entry,
+    *,
+    goal_marker_points: int,
+) -> int:
+    mask = np.asarray(entry.get("obstacle_mask", []), dtype=bool).copy()
+    if goal_marker_points > 0 and mask.size:
+        mask[-min(goal_marker_points, mask.size) :] = False
+    return int(np.count_nonzero(mask))
 
 
 def _video_env_factory(

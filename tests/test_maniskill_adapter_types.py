@@ -168,6 +168,15 @@ def test_segmentation_context_from_env_uses_robot_and_task_actor_ids() -> None:
     assert context.object_ids["goal_site"] == frozenset({19})
 
 
+def test_segmentation_context_labels_embodied_obstacle() -> None:
+    fake_env = _FakeEnv()
+    fake_env.unwrapped.pg3d_obstacle = _FakeActor(29)
+
+    context = segmentation_context_from_env(fake_env)
+
+    assert context.object_ids["pg3d_obstacle"] == frozenset({29})
+
+
 class _FakeActor:
     def __init__(self, value: int) -> None:
         self.per_scene_id = np.asarray([value], dtype=np.int32)

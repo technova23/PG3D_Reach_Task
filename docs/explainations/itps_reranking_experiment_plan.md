@@ -258,6 +258,18 @@ Log obstacle points before cropping, after cropping/downsampling, and in the fin
 input. If small or occluded obstacles are systematically lost, add an obstacle-point
 sampling quota or semantic-preserving sampler before running the primary comparison.
 
+Current E2 implementation status (2026-07-23): the first axis-aligned box slice is
+live behind `--embody-obstacle`. The box is a collidable kinematic actor in the
+control environment, its reset pose and half-extents are checked against the serialized
+`BoxRegion`, and its camera segmentation survives as a non-robot obstacle mask through
+cropping and into Rerun. Dataset-seeded evaluation retains the newly rendered live
+camera cloud instead of restoring the obstacle-free dataset cloud. A one-step smoke
+observed 192 raw obstacle pixels/points and 5 points after fixed-count cropping; all 5
+remained in the final DP3 tensor after goal-marker insertion. Because five points is
+sparse evidence, E2 is not complete: add semantic-preserving obstacle sampling before
+the primary comparison, then implement rotated boxes, carton, cabinet, and cylinder
+families.
+
 ### E3 — Primary constrained-reach comparison
 
 Compare:

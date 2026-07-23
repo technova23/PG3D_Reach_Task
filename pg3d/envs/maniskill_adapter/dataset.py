@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -129,6 +130,7 @@ def crop_point_cloud(
     point_cloud: Array,
     *,
     robot_mask: Array | None = None,
+    aligned_masks: Mapping[str, Array] | None = None,
     config: PointCloudCropConfig | None = None,
 ) -> dict[str, Array]:
     """Crop, deterministically downsample, and pad a point cloud with aligned masks."""
@@ -145,6 +147,15 @@ def crop_point_cloud(
         raise ValueError(
             f"robot_mask must have shape {(points.shape[0],)}, got {source_robot_mask.shape}"
         )
+    source_aligned_masks = {
+        str(name): _as_array(mask, name=str(name), dtype=bool, ndim=1)
+        for name, mask in (aligned_masks or {}).items()
+    }
+    for name, mask in source_aligned_masks.items():
+        if mask.shape != (points.shape[0],):
+            raise ValueError(
+                f"{name} must have shape {(points.shape[0],)}, got {mask.shape}"
+            )
 
     in_bounds = np.all(
         (points >= config.bounds[:, 0]) & (points <= config.bounds[:, 1]),
@@ -166,16 +177,23 @@ def crop_point_cloud(
     out_points = np.zeros((config.num_points, 3), dtype=np.float32)
     out_robot_mask = np.zeros((config.num_points,), dtype=bool)
     out_valid_mask = np.zeros((config.num_points,), dtype=bool)
+    out_aligned_masks = {
+        name: np.zeros((config.num_points,), dtype=bool)
+        for name in source_aligned_masks
+    }
     count = min(cropped_indices.size, config.num_points)
     if count > 0:
         selected_indices = cropped_indices[:count]
         out_points[:count] = points[selected_indices]
         out_robot_mask[:count] = source_robot_mask[selected_indices]
         out_valid_mask[:count] = True
+        for name, mask in source_aligned_masks.items():
+            out_aligned_masks[name][:count] = mask[selected_indices]
     return {
         "point_cloud": out_points,
         "robot_mask": out_robot_mask,
         "point_valid_mask": out_valid_mask,
+        **out_aligned_masks,
     }
 
 
@@ -297,7 +315,9 @@ def write_reach_zarr(
         episodes = existing_episodes + episodes
     elif output_path.exists():
         if not overwrite:
-            raise FileExistsError(f"{output_path} already exists; pass overwrite=True or append=True")
+            raise FileExistsError(
+                f"{output_path} already exists; pass overwrite=True or append=True"
+            )
         shutil.rmtree(output_path)
 
     arrays = _stack_episodes(episodes)
@@ -343,7 +363,9 @@ def _load_zarr_episodes(dataset_path: Path | str) -> list[ReachEpisodeData]:
             for key in data_group.keys()
         }
         metadata_list = load_reach_metadata(dataset_path).get("episodes", [])
-        episode_metadata = metadata_list[len(episodes)] if len(episodes) < len(metadata_list) else {}
+        episode_metadata = (
+            metadata_list[len(episodes)] if len(episodes) < len(metadata_list) else {}
+        )
         episodes.append(
             ReachEpisodeData(
                 state=episode_data.get("state", np.zeros((0, 9))),
@@ -351,7 +373,9 @@ def _load_zarr_episodes(dataset_path: Path | str) -> list[ReachEpisodeData]:
                 sim_action=episode_data.get("sim_action", np.zeros((0, 9))),
                 point_cloud=episode_data.get("point_cloud", np.zeros((0, 1024, 3))),
                 robot_mask=episode_data.get("robot_mask", np.zeros((0, 1024), dtype=bool)),
-                point_valid_mask=episode_data.get("point_valid_mask", np.zeros((0, 1024), dtype=bool)),
+                point_valid_mask=episode_data.get(
+                    "point_valid_mask", np.zeros((0, 1024), dtype=bool)
+                ),
                 target_position=episode_data.get("target_position", np.zeros((0, 3))),
                 tcp_pose=episode_data.get("tcp_pose", np.zeros((0, 7))),
                 success=episode_data.get("success", np.zeros(0, dtype=bool)),

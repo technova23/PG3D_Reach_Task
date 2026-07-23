@@ -32,6 +32,7 @@ class PG3DReachEnv(BaseEnv):
         goal_thresh: float = 0.025,
         require_static: bool = False,
         robot_init_qpos_noise: float = 0.0,
+        pg3d_obstacle_half_extents: tuple[float, float, float] | None = None,
         **kwargs: Any,
     ) -> None:
         self.goal_center = goal_center
@@ -40,6 +41,7 @@ class PG3DReachEnv(BaseEnv):
         self.goal_thresh = goal_thresh
         self.require_static = require_static
         self.robot_init_qpos_noise = robot_init_qpos_noise
+        self.pg3d_obstacle_half_extents = pg3d_obstacle_half_extents
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     @property
@@ -79,6 +81,22 @@ class PG3DReachEnv(BaseEnv):
             add_collision=False,
             initial_pose=sapien.Pose(),
         )
+        self.pg3d_obstacle = None
+        if self.pg3d_obstacle_half_extents is not None:
+            half_extents = np.asarray(self.pg3d_obstacle_half_extents, dtype=np.float32)
+            if half_extents.shape != (3,) or np.any(half_extents <= 0):
+                raise ValueError(
+                    "pg3d_obstacle_half_extents must contain three positive values"
+                )
+            self.pg3d_obstacle = actors.build_box(
+                self.scene,
+                half_sizes=half_extents.tolist(),
+                color=[0.55, 0.32, 0.12, 1.0],
+                name="pg3d_obstacle",
+                body_type="kinematic",
+                add_collision=True,
+                initial_pose=sapien.Pose(p=[0.0, 0.0, -10.0]),
+            )
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict[str, Any]) -> None:
         with torch.device(self.device):
@@ -112,6 +130,17 @@ class PG3DReachEnv(BaseEnv):
                 goal_xyz = center + (torch.rand((batch_size, 3)) * 2.0 - 1.0) * half_extents
             self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
             self.start_site.set_pose(Pose.create_from_pq(self.agent.tcp_pose.p))
+            if self.pg3d_obstacle is not None:
+                obstacle_center = options.get("pg3d_obstacle_center")
+                if obstacle_center is None:
+                    obstacle_xyz = torch.tensor(
+                        [[0.0, 0.0, -10.0]], dtype=torch.float32
+                    ).expand(batch_size, -1)
+                else:
+                    obstacle_xyz = torch.as_tensor(
+                        obstacle_center, dtype=torch.float32
+                    ).reshape(1, 3).expand(batch_size, -1)
+                self.pg3d_obstacle.set_pose(Pose.create_from_pq(obstacle_xyz))
 
     def _get_obs_extra(self, info: dict[str, Any]) -> dict[str, Any]:
         return {

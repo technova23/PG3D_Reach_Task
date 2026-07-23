@@ -99,7 +99,7 @@ def segmentation_context_from_env(env: Any) -> SegmentationContext:
     unwrapped = getattr(env, "unwrapped", env)
     robot_ids = _ids_from_links(getattr(getattr(unwrapped, "agent", None), "robot", None))
     object_ids: dict[str, frozenset[int]] = {}
-    for name in ("cube", "goal_site"):
+    for name in ("cube", "goal_site", "pg3d_obstacle"):
         ids = _ids_from_actor(getattr(unwrapped, name, None))
         if ids:
             object_ids[name] = ids

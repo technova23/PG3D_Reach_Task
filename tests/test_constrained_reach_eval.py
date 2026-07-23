@@ -4,11 +4,13 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
+from pg3d.constraints import AvoidRegion, BoxRegion
 from pg3d.envs.maniskill_adapter.dataset import PointCloudCropConfig
 from pg3d.eval import (
     AvoidOverlayConfig,
@@ -52,14 +54,18 @@ from scripts.eval_constrained_reach import (
     _constraint_source_summary,
     _constraints_for_episode,
     _effective_projection_half_extents,
+    _embodied_obstacle_half_extents,
+    _embodied_obstacle_reset_options,
     _episode_policy_seed,
     _episode_should_stop,
     _episode_step_limit,
     _local_path_points_xy,
     _obs_windows_to_torch,
     _point_at_arc_fraction_xy,
+    _policy_obstacle_point_count,
     _read_episode_indices_file,
     _seed_torch,
+    _validate_embodied_obstacle_geometry,
 )
 from scripts.eval_constrained_reach import (
     parse_args as parse_eval_args,
@@ -853,6 +859,80 @@ def test_no_constraints_mode_returns_empty_program(tmp_path: Path) -> None:
 
     assert constraints == []
     assert _constraint_source_summary(args) == {"type": "none"}
+
+
+def test_embodied_box_uses_generated_constraint_geometry(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint.pt"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--avoid-shape",
+            "box",
+            "--avoid-box-half-extents",
+            "0.04",
+            "0.06",
+            "0.08",
+            "--embody-obstacle",
+        ]
+    )
+    constraint = AvoidRegion(
+        region=BoxRegion(center=[0.1, -0.2, 0.3], half_extents=[0.04, 0.06, 0.08])
+    )
+
+    assert _embodied_obstacle_half_extents(args) == pytest.approx((0.04, 0.06, 0.08))
+    reset_options = _embodied_obstacle_reset_options([constraint])
+    assert reset_options["pg3d_obstacle_center"] == pytest.approx([0.1, -0.2, 0.3])
+
+
+def test_embodied_obstacle_rejects_unsupported_geometry(tmp_path: Path) -> None:
+    common = [
+        "--dataset",
+        str(tmp_path / "dataset.zarr"),
+        "--checkpoint",
+        str(tmp_path / "checkpoint.pt"),
+        "--output-dir",
+        str(tmp_path / "output"),
+        "--embody-obstacle",
+    ]
+    with pytest.raises(ValueError, match="requires --avoid-shape box"):
+        parse_eval_args(common)
+    with pytest.raises(ValueError, match="exactly one avoid region"):
+        parse_eval_args(
+            [
+                *common,
+                "--avoid-shape",
+                "box",
+                "--avoid-path-fractions",
+                "0.3",
+                "0.7",
+            ]
+        )
+
+
+def test_policy_obstacle_count_excludes_goal_marker_slots() -> None:
+    entry = {
+        "obstacle_mask": np.asarray([True, False, True, True, True], dtype=bool)
+    }
+
+    assert _policy_obstacle_point_count(entry, goal_marker_points=2) == 2
+
+
+def test_embodied_actor_geometry_must_match_serialized_constraint() -> None:
+    constraint = AvoidRegion(
+        region=BoxRegion(center=[0.1, -0.2, 0.3], half_extents=[0.04, 0.06, 0.08])
+    )
+    env = SimpleNamespace(
+        unwrapped=SimpleNamespace(pg3d_obstacle_half_extents=(0.04, 0.06, 0.08))
+    )
+    _validate_embodied_obstacle_geometry(env, [constraint])
+
+    env.unwrapped.pg3d_obstacle_half_extents = (0.04, 0.06, 0.09)
+    with pytest.raises(ValueError, match="half-extents differ"):
+        _validate_embodied_obstacle_geometry(env, [constraint])
 
 
 def test_constrained_eval_batch_input_inserts_goal_marker_tail_points() -> None:

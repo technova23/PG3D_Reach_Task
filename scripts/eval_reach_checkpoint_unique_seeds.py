@@ -779,8 +779,12 @@ def _reset_to_zarr_episode(
     *,
     rollout_seed: int,
     zarr_context: dict[str, Any],
+    reset_options: dict[str, Any] | None = None,
 ) -> tuple[Any, Any]:
-    env.reset(seed=rollout_seed, options={"reconfigure": True})
+    options = {"reconfigure": True}
+    if reset_options is not None:
+        options.update(reset_options)
+    env.reset(seed=rollout_seed, options=options)
     unwrapped = env.unwrapped
     robot = unwrapped.agent.robot
     current_qpos = np.asarray(robot.get_qpos(), dtype=np.float32)
