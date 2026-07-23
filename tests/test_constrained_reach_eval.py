@@ -95,6 +95,16 @@ from scripts.eval_constrained_reach import (
     parse_args as parse_eval_args,
 )
 from scripts.rollout_dp3_reach_policy import RolloutSpec
+from scripts.run_e3_protocol import (
+    builder_command as e3_builder_command,
+)
+from scripts.run_e3_protocol import (
+    evaluation_command as e3_evaluation_command,
+)
+from scripts.run_e3_protocol import load_constraint_manifest as load_e3_constraint_manifest
+from scripts.run_e3_protocol import (
+    load_protocol as load_e3_protocol,
+)
 
 
 def test_robot_obstacle_contact_pairs_filters_non_robot_contacts() -> None:
@@ -1374,6 +1384,99 @@ def test_shared_grounded_geometry_covers_highest_path_anchor() -> None:
 
     assert resolved["box_half_extents"] == pytest.approx((0.055, 0.08, 0.31))
     assert resolved["cylinder_half_length"] is None
+
+
+def test_locked_e3_protocol_requires_all_labeled_video_rerun_pairs() -> None:
+    config = load_e3_protocol(Path("configs/eval/e3_protocol.json").resolve())
+
+    assert config["expected_test_episodes"] == 50
+    assert config["evaluation"]["methods"] == [
+        "base",
+        "rejection",
+        "reranking",
+        "itps",
+    ]
+    assert config["evaluation"]["max_steps"] == 150
+    assert config["evaluation"]["robot_clearance_metric"] is True
+    assert config["artifacts"]["selection"] == "all"
+    assert config["artifacts"]["require_mp4_rerun_pair_per_method_episode"] is True
+    assert config["artifacts"]["require_embedded_identity"] is True
+
+
+def test_locked_e3_commands_resolve_manifest_geometry(tmp_path: Path) -> None:
+    config = load_e3_protocol(Path("configs/eval/e3_protocol.json").resolve())
+    population = config["populations"]["full_distribution"]
+    constraints_output = tmp_path / "constraints"
+    evaluation_output = tmp_path / "evaluation"
+    manifest = {
+        "constraint_config": {
+            "resolved_box_half_extents": [0.055, 0.08, 0.321],
+        }
+    }
+
+    build = e3_builder_command(config, population, constraints_output)
+    evaluate = e3_evaluation_command(
+        config,
+        population,
+        constraints_output,
+        evaluation_output,
+        manifest,
+    )
+
+    assert build[build.index("--path-source") + 1] == "dataset_demo"
+    assert build[build.index("--min-successes") + 1] == "50"
+    geometry_index = evaluate.index("--avoid-box-half-extents")
+    assert evaluate[geometry_index + 1 : geometry_index + 4] == [
+        "0.055",
+        "0.08",
+        "0.321",
+    ]
+    assert "--robot-clearance-metric" in evaluate
+    assert "--terminate-on-obstacle-contact" in evaluate
+    assert evaluate[evaluate.index("--obstacle-support-plane-z") + 1] == "0.0"
+    assert "--video" in evaluate
+    assert "--rerun" in evaluate
+    assert evaluate[evaluate.index("--artifact-selection") + 1] == "all"
+
+
+def test_locked_e3_manifest_validation_checks_exact_episode_order(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "constraints"
+    (output / "constraints").mkdir(parents=True)
+    expected_indices = [399, 411]
+    manifest = {
+        "path_source": "dataset_demo",
+        "attempted_episodes": 2,
+        "selected_episodes": 2,
+        "attempts": [
+            {"dataset_episode_index": 399},
+            {"dataset_episode_index": 411},
+        ],
+        "selected": [
+            {"dataset_episode_index": 399},
+            {"dataset_episode_index": 411},
+        ],
+        "constraint_config": {
+            "resolved_box_half_extents": [0.055, 0.08, 0.321],
+        },
+    }
+    (output / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (output / "episode_indices.txt").write_text("399\n411\n", encoding="utf-8")
+    for index in range(2):
+        (output / "constraints" / f"episode_{index:03d}.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+
+    loaded = load_e3_constraint_manifest(
+        output,
+        expected_path_source="dataset_demo",
+        minimum_selected=2,
+        expected_episode_indices=expected_indices,
+    )
+
+    assert loaded == manifest
 
 
 def test_nominal_path_constraint_builder_accepts_locked_box_protocol(

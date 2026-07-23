@@ -162,6 +162,9 @@ obstacle ID, and constraint ID as the corresponding metrics row.
 
 - Use one deterministic artifact-selection manifest for paired method comparisons so
   base, rejection, reranking, and ITPS visualize the exact same episodes.
+- The definitive E3 comparison uses the stronger `selection=all` rule: every evaluated
+  method/episode row must have a labeled MP4 and matching native Rerun `.rrd`. This
+  avoids choosing qualitative examples after seeing the held-out outcomes.
 - Generate artifacts for a compact representative subset during large sweeps, not
   necessarily every sweep episode. Definitive E3 runs must include all predeclared
   qualitative categories above.
@@ -405,6 +408,14 @@ goal/stable/safety outcomes, clearance, and contact state into every MP4 frame. 
 same full identity/outcome payload is stored under `/recording/identity` in the native
 Rerun 0.35 file and in its neutral metadata sidecar. Manifest validation rejects a
 missing label/identity flag or any RRD-sidecar/metrics identity mismatch.
+
+The definitive settings are frozen in `configs/eval/e3_protocol.json` and executed
+through `scripts/run_e3_protocol.py`. The protocol locks the checkpoint, 50-episode
+test index file, both population definitions, obstacle recipe, horizon, paired seeds,
+method hyperparameters, whole-robot executed grading, physical-contact termination,
+and full MP4/Rerun artifact coverage. The launcher refuses nonempty output directories
+by default, reads the shared resolved obstacle geometry from the constraint manifest,
+and writes a hashed protocol snapshot beside each comparison.
 
 ### E4 — Constraint difficulty sweep
 

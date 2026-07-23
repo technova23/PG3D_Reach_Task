@@ -839,6 +839,39 @@ ManiSkill constructs one actor geometry for the run while each episode changes o
 its pose. `policy_success` remains the default builder source for the separately
 labelled nominal-base-success subset.
 
+For the definitive run, use the committed protocol launcher instead of transcribing
+the individual settings above. Dry-run both populations first:
+
+```bash
+uv run python scripts/run_e3_protocol.py \
+  --population full_distribution \
+  --phase all \
+  --dry-run
+
+uv run python scripts/run_e3_protocol.py \
+  --population nominal_base_success \
+  --phase all \
+  --dry-run
+```
+
+Then execute each population:
+
+```bash
+uv run python scripts/run_e3_protocol.py \
+  --population full_distribution \
+  --phase all
+
+uv run python scripts/run_e3_protocol.py \
+  --population nominal_base_success \
+  --phase all
+```
+
+`configs/eval/e3_protocol.json` is the frozen source of settings. The launcher refuses
+to overwrite a nonempty output directory unless `--allow-existing-output` is passed
+explicitly. For each comparison it saves `protocol_snapshot.json`, requests plots and
+profiling, and sets `artifact-selection=all`: every method/episode row must therefore
+have a labeled MP4 plus its corresponding native Rerun point-cloud timeline.
+
 With `--embody-obstacle`, this command terminates by default on the first raw PhysX
 contact between any robot link and an embodied-obstacle actor. The contact frame is
 saved, and the episode row records the collision step/body pairs and forces

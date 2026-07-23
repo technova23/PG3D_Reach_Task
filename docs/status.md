@@ -336,6 +336,10 @@ the full point-cloud tensor into memory.
   `build_nominal_path_constraints.py --path-source dataset_demo` uses every selected
   episode's stored successful TCP path and resolves one shared grounded actor height.
   The original `policy_success` source remains the separately labelled mechanism subset.
+- Definitive E3 settings are frozen in `configs/eval/e3_protocol.json`. The protocol
+  launcher covers both populations, resolves actor geometry from the builder manifest,
+  refuses accidental output overwrite, and requires a labeled MP4/native-Rerun pair
+  for every method/episode in addition to aggregate plots.
 - Constrained-evaluation MP4s now burn method/episode/seed, obstacle family, outcome,
   clearance, and contact state into every frame. The identical payload is embedded in
   native Rerun recordings and verified against the metrics row by the artifact manifest.

@@ -1,0 +1,80 @@
+{
+  "schema_version": "pg3d.e3_protocol.v1",
+  "protocol_id": "e3-grounded-carton-test-v1",
+  "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
+  "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
+  "checkpoint_model": "ema",
+  "episode_indices_file": "configs/eval/e3_test_episode_indices.txt",
+  "expected_test_episodes": 50,
+  "constraint_builder": {
+    "avoid_shape": "box",
+    "box_half_extents": [
+      0.055,
+      0.08,
+      0.16
+    ],
+    "obstacle_yaw_deg": 20.0,
+    "path_fraction": 0.5,
+    "path_height_margin": 0.02,
+    "support_plane_z": 0.0,
+    "max_steps": 150,
+    "post_success_steps": 16
+  },
+  "evaluation": {
+    "methods": [
+      "base",
+      "rejection",
+      "reranking",
+      "itps"
+    ],
+    "seed": 0,
+    "device": "cuda",
+    "max_steps": 150,
+    "post_success_steps": 16,
+    "planning_horizon_chunks": 1,
+    "execution_horizon_chunks": 1,
+    "geometry_mode": "fast",
+    "constraint_target": "eef",
+    "robot_clearance_metric": true,
+    "robot_clearance_stride": 1,
+    "k_schedule": [
+      16,
+      32,
+      64
+    ],
+    "policy_batch_size": 64,
+    "itps_guide_ratio": 60.0,
+    "itps_mcmc_steps": 4,
+    "itps_energy": "smooth",
+    "itps_barrier_temperature": 0.01,
+    "obstacle_family": "carton",
+    "obstacle_point_quota": 32,
+    "terminate_on_obstacle_contact": true,
+    "paired_bootstrap_samples": 10000,
+    "paired_bootstrap_seed": 0
+  },
+  "artifacts": {
+    "video": true,
+    "rerun": true,
+    "selection": "all",
+    "plots": true,
+    "profile": true,
+    "sync_cuda_timers": true,
+    "require_mp4_rerun_pair_per_method_episode": true,
+    "require_embedded_identity": true
+  },
+  "populations": {
+    "full_distribution": {
+      "path_source": "dataset_demo",
+      "minimum_selected_episodes": 50,
+      "constraints_output_dir": "artifacts/e3-test-full-distribution-constraints-v1",
+      "evaluation_output_dir": "artifacts/e3-test-full-distribution-comparison-v1"
+    },
+    "nominal_base_success": {
+      "path_source": "policy_success",
+      "minimum_selected_episodes": 1,
+      "constraints_output_dir": "artifacts/e3-test-nominal-base-success-constraints-v1",
+      "evaluation_output_dir": "artifacts/e3-test-nominal-base-success-comparison-v1"
+    }
+  }
+}
