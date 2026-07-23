@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-07-22
+Last updated: 2026-07-23
 
 ## Current objective
 
@@ -43,6 +43,20 @@ were removed before writing line-referenced diffusion-policy documentation.
 A code-anchored explanation of ordinary DP3 training and DDIM inference now lives at
 `docs/explainations/diffusion_policy.md`; its ITPS extension is intentionally reserved for a
 follow-up pass.
+The first paper-comparison protocol now lives at
+`docs/explainations/itps_reranking_experiment_plan.md`. It makes stable combined
+task-and-constraint success the primary paper outcome, retains ordinary combined success for
+interim pilots, defines
+task/safety/motion/compute diagnostics on executed ManiSkill trajectories, and lays out paired
+ITPS-versus-reranking experiments and statistical reporting. The plan now requires realistic,
+camera-visible simulator obstacle actors before the primary comparison: their observed surface
+points enter the ordinary policy point cloud, while their simulator-known pose and collision
+primitives provide matched constraint geometry to reranking and ITPS. Point-cloud-only boundary
+inference is deferred to a later perception ablation. The protocol also makes paired MP4 videos
+and Rerun `.rrd` point-cloud timelines required outputs for a deterministic representative
+episode subset; plots alone do not complete an experiment. The current evaluator covers the
+pilot metrics but still needs stable-success, violation-duration/integral, path-efficiency,
+physical-unit motion-quality, and compute-operation fields before the definitive comparison.
 
 ## Current phase
 
