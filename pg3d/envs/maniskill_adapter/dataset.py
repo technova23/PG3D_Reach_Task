@@ -30,6 +30,7 @@ class PointCloudCropConfig:
     bounds: Array = field(default_factory=lambda: DEFAULT_WORKSPACE_BOUNDS.copy())
     num_points: int = 1024
     robot_point_fraction: float = 0.25
+    obstacle_point_quota: int = 0
 
     def __post_init__(self) -> None:
         bounds = np.asarray(self.bounds, dtype=np.float32)
@@ -41,6 +42,8 @@ class PointCloudCropConfig:
             raise ValueError("num_points must be positive")
         if not 0.0 <= self.robot_point_fraction <= 1.0:
             raise ValueError("robot_point_fraction must be between 0 and 1")
+        if not 0 <= self.obstacle_point_quota <= self.num_points:
+            raise ValueError("obstacle_point_quota must be between 0 and num_points")
         object.__setattr__(self, "bounds", bounds)
 
     def to_json(self) -> dict[str, Any]:
@@ -48,6 +51,7 @@ class PointCloudCropConfig:
             "bounds": self.bounds.astype(float).tolist(),
             "num_points": int(self.num_points),
             "robot_point_fraction": float(self.robot_point_fraction),
+            "obstacle_point_quota": int(self.obstacle_point_quota),
         }
 
 
@@ -167,12 +171,23 @@ def crop_point_cloud(
         # them backfill leftover slots when robot points fall short of num_points.
         cropped_indices = cropped_indices[source_robot_mask[cropped_indices]]
     if cropped_indices.size > config.num_points:
-        cropped_indices = _downsample_with_robot_quota(
-            cropped_indices,
-            robot_mask=source_robot_mask,
-            num_points=config.num_points,
-            robot_point_fraction=config.robot_point_fraction,
-        )
+        obstacle_mask = source_aligned_masks.get("obstacle_mask")
+        if obstacle_mask is not None and config.obstacle_point_quota > 0:
+            cropped_indices = _downsample_with_robot_and_obstacle_quotas(
+                cropped_indices,
+                robot_mask=source_robot_mask,
+                obstacle_mask=obstacle_mask,
+                num_points=config.num_points,
+                robot_point_fraction=config.robot_point_fraction,
+                obstacle_point_quota=config.obstacle_point_quota,
+            )
+        else:
+            cropped_indices = _downsample_with_robot_quota(
+                cropped_indices,
+                robot_mask=source_robot_mask,
+                num_points=config.num_points,
+                robot_point_fraction=config.robot_point_fraction,
+            )
 
     out_points = np.zeros((config.num_points, 3), dtype=np.float32)
     out_robot_mask = np.zeros((config.num_points,), dtype=bool)
@@ -221,6 +236,45 @@ def _downsample_with_robot_quota(
         selected = np.concatenate(
             [selected, _linspace_select(remaining, num_points - selected.size)],
             axis=0,
+        )
+    return np.sort(selected.astype(np.int64, copy=False))
+
+
+def _downsample_with_robot_and_obstacle_quotas(
+    indices: Array,
+    *,
+    robot_mask: Array,
+    obstacle_mask: Array,
+    num_points: int,
+    robot_point_fraction: float,
+    obstacle_point_quota: int,
+) -> Array:
+    """Reserve visible obstacle points without changing the fixed tensor size."""
+    obstacle_indices = indices[obstacle_mask[indices]]
+    selected_obstacle = _linspace_select(
+        obstacle_indices, min(obstacle_point_quota, obstacle_indices.size)
+    )
+    remaining = np.setdiff1d(indices, selected_obstacle, assume_unique=True)
+    slots = num_points - selected_obstacle.size
+    target_robot_total = int(np.ceil(num_points * robot_point_fraction))
+    selected_robot_count = int(np.count_nonzero(robot_mask[selected_obstacle]))
+    target_robot = min(
+        int(np.count_nonzero(robot_mask[remaining])),
+        max(0, target_robot_total - selected_robot_count),
+        slots,
+    )
+    robot_indices = remaining[robot_mask[remaining]]
+    selected_robot = _linspace_select(robot_indices, target_robot)
+    remaining = np.setdiff1d(remaining, selected_robot, assume_unique=True)
+    scene_indices = remaining[~robot_mask[remaining]]
+    selected_scene = _linspace_select(scene_indices, slots - selected_robot.size)
+    selected = np.concatenate(
+        [selected_obstacle, selected_robot, selected_scene], axis=0
+    )
+    if selected.size < num_points:
+        remaining = np.setdiff1d(indices, selected, assume_unique=True)
+        selected = np.concatenate(
+            [selected, _linspace_select(remaining, num_points - selected.size)], axis=0
         )
     return np.sort(selected.astype(np.int64, copy=False))
 

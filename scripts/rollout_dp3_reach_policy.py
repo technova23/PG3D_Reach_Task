@@ -376,10 +376,12 @@ def crop_config_from_metadata(metadata: dict[str, Any]) -> PointCloudCropConfig:
     bounds = np.asarray(crop.get("bounds", DEFAULT_WORKSPACE_BOUNDS), dtype=np.float32)
     num_points = int(crop.get("num_points", 512))
     robot_point_fraction = float(crop.get("robot_point_fraction", 0.25))
+    obstacle_point_quota = int(crop.get("obstacle_point_quota", 0))
     return PointCloudCropConfig(
         bounds=bounds,
         num_points=num_points,
         robot_point_fraction=robot_point_fraction,
+        obstacle_point_quota=obstacle_point_quota,
     )
 
 

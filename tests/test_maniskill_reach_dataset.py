@@ -93,6 +93,29 @@ def test_crop_point_cloud_downsamples_with_robot_quota() -> None:
     assert cropped["point_valid_mask"].tolist() == [True] * 8
 
 
+def test_crop_point_cloud_reserves_obstacle_and_robot_quotas() -> None:
+    config = PointCloudCropConfig(
+        bounds=np.asarray([[-1, 2], [-1, 1], [0, 1]], dtype=np.float32),
+        num_points=8,
+        robot_point_fraction=0.25,
+        obstacle_point_quota=3,
+    )
+    points = np.asarray([[idx * 0.05, 0.0, 0.5] for idx in range(20)], dtype=np.float32)
+    robot_mask = np.asarray([True] * 4 + [False] * 16)
+    obstacle_mask = np.asarray([False] * 12 + [True] * 8)
+
+    cropped = crop_point_cloud(
+        points,
+        robot_mask=robot_mask,
+        aligned_masks={"obstacle_mask": obstacle_mask},
+        config=config,
+    )
+
+    assert int(cropped["robot_mask"].sum()) == 2
+    assert int(cropped["obstacle_mask"].sum()) >= 3
+    assert int(cropped["point_valid_mask"].sum()) == 8
+
+
 def test_action_label_conversion_supports_abs_and_delta() -> None:
     sim_action = np.asarray([1, 2, 3, 4, 5, 6, 7, 0.04], dtype=np.float32)
     state = np.asarray([0.5, 1, 1.5, 2, 2.5, 3, 3.5, 0.04, 0.04], dtype=np.float32)

@@ -736,6 +736,7 @@ uv run python scripts/eval_constrained_reach.py \
   --avoid-shape box \
   --avoid-box-half-extents 0.04 0.06 0.08 \
   --embody-obstacle \
+  --obstacle-point-quota 32 \
   --max-steps 1 \
   --post-success-steps 0 \
   --video \
@@ -747,9 +748,10 @@ uv run python scripts/eval_constrained_reach.py \
 
 The episode metrics include `obstacle_points_raw`, `obstacle_points_cropped`, and
 `obstacle_points_policy_input`. A zero value at any stage fails the observation
-validation. The first smoke measured 192, 5, and 5 respectively and wrote a non-empty
-MP4/`.rrd` pair. Five retained points is too sparse for the primary comparison, so a
-semantic-preserving obstacle quota remains required.
+validation. Without a quota, the first smoke measured 192, 5, and 5 respectively.
+With the 32-point minimum shown above, the repeated smoke measured 192, 36, and 36
+and wrote a non-empty MP4/`.rrd` pair. The quota is a minimum rather than an exact
+count because remaining ordinary-scene slots may also select obstacle pixels.
 
 Longer multi-chunk planning smoke:
 

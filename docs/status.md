@@ -75,7 +75,9 @@ collidable actor in the control environment rather than a render-only overlay. L
 camera segmentation tracks it through cropping and Rerun, and runtime validation
 requires actor half-extents to match the serialized constraint. The first GPU smoke
 retained 192 raw obstacle points but only 5 after cropping and in the final policy
-tensor, confirming that semantic-preserving obstacle sampling is needed before E3.
+tensor. A semantic-preserving minimum quota now coexists with the robot quota and
+fixed tensor size; a repeated smoke retained 36 cropped/final points with a requested
+minimum of 32.
 
 ## Current phase
 
@@ -152,8 +154,8 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Add a semantic-preserving obstacle sampling quota, then extend E2 from the validated
-   axis-aligned box to rotated box, carton, cabinet, and cylinder actor families.
+3. Extend E2 from the quota-validated axis-aligned box to rotated box, carton, cabinet,
+   and cylinder actor families.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 

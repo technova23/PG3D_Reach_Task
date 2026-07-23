@@ -273,6 +273,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     action_mode = _action_mode(str(metadata.get("action_mode", "abs_joint")))
     crop_config = crop_config_from_metadata(metadata)
+    if args.embody_obstacle:
+        crop_config = replace(
+            crop_config,
+            obstacle_point_quota=args.obstacle_point_quota,
+        )
     goal_thresh = (
         float(args.goal_thresh)
         if args.goal_thresh is not None
@@ -811,6 +816,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "injection, expose it to the policy."
         ),
     )
+    parser.add_argument(
+        "--obstacle-point-quota",
+        type=int,
+        default=32,
+        help=(
+            "Minimum camera-visible obstacle points reserved during fixed-count "
+            "downsampling in --embody-obstacle mode (default: 32)."
+        ),
+    )
     parser.add_argument("--gripper-open", type=float, default=0.04)
     parser.add_argument(
         "--match-current-robot-points",
@@ -881,6 +895,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.embody_obstacle and len(args.avoid_path_fractions) != 1:
         raise ValueError("--embody-obstacle currently supports exactly one avoid region")
+    if args.obstacle_point_quota < 0:
+        raise ValueError("--obstacle-point-quota must be non-negative")
     if args.episode_indices is not None and args.episode_indices_file is not None:
         raise ValueError("--episode-indices and --episode-indices-file are mutually exclusive")
     if args.episode_indices_file is not None and args.source != "dataset":

@@ -264,11 +264,12 @@ control environment, its reset pose and half-extents are checked against the ser
 `BoxRegion`, and its camera segmentation survives as a non-robot obstacle mask through
 cropping and into Rerun. Dataset-seeded evaluation retains the newly rendered live
 camera cloud instead of restoring the obstacle-free dataset cloud. A one-step smoke
-observed 192 raw obstacle pixels/points and 5 points after fixed-count cropping; all 5
-remained in the final DP3 tensor after goal-marker insertion. Because five points is
-sparse evidence, E2 is not complete: add semantic-preserving obstacle sampling before
-the primary comparison, then implement rotated boxes, carton, cabinet, and cylinder
-families.
+observed 192 raw obstacle pixels/points but only 5 points after the original
+fixed-count crop. A semantic obstacle quota was therefore added while preserving the
+existing robot quota and tensor size; the repeated smoke retained 36 obstacle points
+after cropping and all 36 in the final DP3 tensor after goal-marker insertion with a
+requested minimum of 32. E2 is not complete: implement rotated boxes, carton, cabinet,
+and cylinder families and validate each with the same count-and-artifact protocol.
 
 ### E3 — Primary constrained-reach comparison
 
