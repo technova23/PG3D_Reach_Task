@@ -778,7 +778,7 @@ uv run python scripts/build_nominal_path_constraints.py \
   --episode-indices-file configs/eval/e3_pilot_episode_indices.txt \
   --output-dir artifacts/e3-pilot-carton-constraints-v1 \
   --device cuda \
-  --max-steps 80 \
+  --max-steps 150 \
   --post-success-steps 16 \
   --avoid-shape box \
   --avoid-box-half-extents 0.055 0.08 0.16 \
@@ -804,7 +804,7 @@ uv run python scripts/eval_constrained_reach.py \
   --obstacle-family carton \
   --obstacle-yaw-deg 20 \
   --obstacle-point-quota 32 \
-  --max-steps 80 \
+  --max-steps 150 \
   --post-success-steps 16 \
   --video \
   --rerun \

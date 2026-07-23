@@ -348,6 +348,12 @@ The exact indices and simulator seeds are versioned in
 `configs/eval/e3_episode_split.json`, with CLI-ready pilot and test index files beside
 it. Checkpoint selection, pilot tuning, and final testing must remain disjoint.
 
+The constrained task horizon is 150 simulator steps. Once the goal is first reached,
+evaluation continues only for the fixed 16-step stable-success hold; an episode that
+never reaches receives all 150 task steps. This horizon was locked from pilot-side
+qualitative evidence before definitive-test evaluation: several grounded-obstacle
+rollouts first reached after step 80.
+
 E3 pilot integration now uses a fixed, physically supported realistic obstacle
 protocol: a collidable tall carton with half-extents `[0.055, 0.08, 0.16]` m, 20-degree
 yaw, and its bottom face on the ManiSkill tabletop (`z=0`). For each nominal-base-success

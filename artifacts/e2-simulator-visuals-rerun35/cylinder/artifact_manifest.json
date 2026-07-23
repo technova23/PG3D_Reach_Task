@@ -10,23 +10,23 @@
         },
         "policy_pointcloud_bundle": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/rerun/base/episode_000.policy_input.npz",
-          "sha256": "604c841024e0755ab332bf9d32f9fc0beccf655ec9331d94629b80c3a1ee08a9",
-          "size_bytes": 227681
+          "sha256": "8562702391a1eb2a1797dc1b919a5fea0058898edd6c85f32ffd6d26c5950ef9",
+          "size_bytes": 639880
         },
         "policy_pointcloud_metadata": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/rerun/base/episode_000.policy_input.json",
-          "sha256": "6290c29a7cccaa113f3d74440a130f7ecc92a06ef9064890217882a226d33cef",
-          "size_bytes": 11827
+          "sha256": "6e6d0eb4d22d35d4ac787dfa3d342a4fecca8f1dc6228b66271c31351a69dfcd",
+          "size_bytes": 18978
         },
         "rerun": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/rerun/base/episode_000.rrd",
-          "sha256": "453e7afaa5042e6423c8abc1e4c7aeef240d46f927b8fe8fa4881318a63bf994",
-          "size_bytes": 611024
+          "sha256": "f92bc759e6a0d144dcaaef609500c7022313da754cf3d57b01626a057cbf3fa5",
+          "size_bytes": 1642798
         },
         "video": {
           "path": "artifacts/e2-simulator-visuals-rerun35/cylinder/videos/base/episode_000.mp4",
-          "sha256": "f91c8318362e3463af0f6b0d5d1085e0fac4bc65467e6eb7014b8ab4bf06273c",
-          "size_bytes": 112325
+          "sha256": "0e42b1d85a1d711db22b702bf2585f48781f7f06249e1fd200797f09af16a72d",
+          "size_bytes": 188960
         }
       },
       "metrics": {
@@ -73,7 +73,7 @@
         },
         "video": {
           "decoded": true,
-          "frame_count": 41,
+          "frame_count": 114,
           "height": 512,
           "width": 512
         }
@@ -83,7 +83,7 @@
   "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
   "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
   "git": {
-    "commit": "cb0d8f356ef64317e82b52fdee7978554f626d8e",
+    "commit": "68a2a5b0591dfb8b79af82e1fc545c89f0d7fa1c",
     "dirty": true
   },
   "rerun_writer_version": "0.35.0",

@@ -3,19 +3,22 @@
 This suite shows each available realistic obstacle in the actual ManiSkill control
 environment and pairs it with the exact point-cloud tensor supplied to DP3.
 
-All captures use dataset episode `0`, simulator seed `48572821`, the locked 100k EMA
-checkpoint, and 40 executed control steps. Videos contain 41 frames (reset plus one
-frame per step), are 512×512, and play at the true 20 Hz control rate.
+All captures use dataset episode `0`, simulator seed `48572821`, and the locked 100k
+EMA checkpoint. The task horizon is 150 steps. A rollout stops after reaching the
+goal and completing the required 16-step stable hold; a failure records all 150
+steps. Videos contain the reset frame plus one frame per executed step, are 512×512,
+and play at the true 20 Hz control rate.
 
-| Family | Video | Exact point-cloud timeline |
-| --- | --- | --- |
-| rotated box | `box/videos/base/episode_000.mp4` | `box/rerun/base/episode_000.rrd` |
-| tall carton | `carton/videos/base/episode_000.mp4` | `carton/rerun/base/episode_000.rrd` |
-| vertical cylinder | `cylinder/videos/base/episode_000.mp4` | `cylinder/rerun/base/episode_000.rrd` |
-| open cabinet | `cabinet/videos/base/episode_000.mp4` | `cabinet/rerun/base/episode_000.rrd` |
+| Family | Outcome | Steps | Video | Exact point-cloud timeline |
+| --- | --- | ---: | --- | --- |
+| rotated box | stable success | 123 | `box/videos/base/episode_000.mp4` | `box/rerun/base/episode_000.rrd` |
+| tall carton | 150-step timeout | 150 | `carton/videos/base/episode_000.mp4` | `carton/rerun/base/episode_000.rrd` |
+| vertical cylinder | stable success | 113 | `cylinder/videos/base/episode_000.mp4` | `cylinder/rerun/base/episode_000.rrd` |
+| open cabinet | stable success | 115 | `cabinet/videos/base/episode_000.mp4` | `cabinet/rerun/base/episode_000.rrd` |
 
 Each Rerun directory also contains `episode_000.policy_input.npz` and
-`episode_000.policy_input.json`. The NPZ point-cloud shape is `[41, 1024, 3]`.
+`episode_000.policy_input.json`. The NPZ point-cloud shape is
+`[executed_steps + 1, 1024, 3]`.
 Open an RRD with the isolated viewer, for example:
 
 ```bash

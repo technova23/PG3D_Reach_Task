@@ -804,7 +804,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="smooth",
     )
     parser.add_argument("--itps-barrier-temperature", type=float, default=0.01)
-    parser.add_argument("--max-steps", type=int, default=80)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=150,
+        help=(
+            "Maximum task steps before timeout (default: 150). A successful rollout "
+            "continues only for the configured post-success hold."
+        ),
+    )
     parser.add_argument("--post-success-steps", type=int, default=16)
     parser.add_argument("--planning-horizon-chunks", type=int, default=1)
     parser.add_argument("--execution-horizon-chunks", type=int, default=1)
