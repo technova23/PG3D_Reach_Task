@@ -60,6 +60,7 @@ from pg3d.eval import (
     direct_path_avoid_region,
     episode_metric_row,
     load_episode_constraints,
+    paired_method_comparisons,
     progress_series,
     save_episode_constraints,
     scene_context_for_constraints,
@@ -715,6 +716,12 @@ def main(argv: list[str] | None = None) -> int:
         "timing": timer.summary(),
         "episodes": rows,
         "by_method": summarize_metrics(rows),
+        "paired_comparisons": paired_method_comparisons(
+            rows,
+            methods=list(args.methods),
+            bootstrap_samples=args.paired_bootstrap_samples,
+            bootstrap_seed=args.paired_bootstrap_seed,
+        ),
         "code_only_baseline_note": (
             "Code-only waypoint planning is a strong reach baseline and is intentionally "
             "not implemented in this P10 scaffold; do not over-claim reach-only results."
@@ -1082,6 +1089,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-every-episodes", type=int, default=10)
     parser.add_argument("--sync-cuda-timers", action="store_true")
+    parser.add_argument("--paired-bootstrap-samples", type=int, default=10_000)
+    parser.add_argument("--paired-bootstrap-seed", type=int, default=0)
     parser.add_argument("--video-fps", type=int, default=10)
     parser.add_argument(
         "--wandb-mode",
@@ -1095,6 +1104,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.episodes <= 0:
         raise ValueError("--episodes must be positive")
+    if args.paired_bootstrap_samples <= 0:
+        raise ValueError("--paired-bootstrap-samples must be positive")
     if args.no_constraints and args.constraints_dir is not None:
         raise ValueError("--no-constraints and --constraints-dir are mutually exclusive")
     if args.embody_obstacle and args.obstacle_family == "cylinder":

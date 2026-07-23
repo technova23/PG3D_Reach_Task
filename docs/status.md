@@ -58,8 +58,7 @@ episode subset; plots alone do not complete an experiment. The current evaluator
 pilot metrics and now logs stable-hold success, TCP/whole-robot violation
 duration/integral/events, TCP/joint path length, physical-time acceleration/jerk,
 maximum joint velocity, executed-action replan discontinuity, and robust continuous
-summaries. It still needs paired statistical utilities before the definitive
-comparison. E0 protocol validation now also assigns an order-independent shared
+summaries. E0 protocol validation now also assigns an order-independent shared
 policy seed per episode, fingerprints serialized constraints, records source/checkpoint/run
 identities, rejects mismatched method pairs, and reports CUDA-synchronized end-to-end
 action-selection latency. A one-step live ManiSkill smoke passed for base, rejection,
@@ -121,6 +120,12 @@ totals, and absolute/incremental peak PyTorch CUDA allocation during action sele
 The counters exclude Rerun and post-hoc whole-robot grading. A live `K=2` smoke
 measured 100/100 denoiser calls/evaluations for base, 100/200 plus 16 EEF queries for
 reranking, and 400/400 plus 396 FK calls over 6,336 poses for ITPS.
+Paired statistical reporting is now serialized for every method pair. It records
+explicit `method_a - method_b` differences, deterministic episode-paired bootstrap
+intervals for binary and continuous endpoints, exact two-sided McNemar tests for
+binary outcomes, excluded-pair counts, and path-length comparisons conditioned on
+both methods achieving stable combined success. A live three-method smoke wrote all
+three expected comparisons to `summary.json`.
 
 ## Current phase
 
@@ -197,8 +202,7 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Add paired statistical comparison utilities before the definitive E3 comparison.
-4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
+3. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 
 ## Active risks

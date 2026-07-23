@@ -25,13 +25,57 @@ from pg3d.constraints.core import mean_squared_norm
 from pg3d.utils.serialization import jsonable
 from pg3d.world_model import ActionChunk, ImaginedRollout
 
-EvalMethod = Literal["base", "rejection", "reranking"]
+EvalMethod = Literal["base", "rejection", "reranking", "itps"]
 ArtifactSelection = Literal["periodic", "random", "all"]
 SUCCESS_RATE_METRICS: tuple[tuple[str, str], ...] = (
     ("reach_success", "Reach"),
     ("constraint_satisfied", "Constraint"),
     ("combined_success", "Combined"),
     ("stable_combined_success", "Stable combined"),
+)
+PAIRED_BINARY_METRICS = (
+    "stable_combined_success",
+    "combined_success",
+    "reach_success",
+    "stable_goal_reached",
+    "constraint_satisfied",
+    "constraint_satisfied_tcp",
+)
+PAIRED_CONTINUOUS_METRICS = (
+    "final_target_distance",
+    "min_target_distance",
+    "min_clearance",
+    "min_clearance_tcp",
+    "max_violation_depth",
+    "max_violation_depth_tcp",
+    "violation_fraction",
+    "violation_fraction_tcp",
+    "integrated_violation",
+    "integrated_violation_tcp",
+    "violation_event_count",
+    "tcp_acceleration_mse",
+    "tcp_jerk_mse",
+    "joint_acceleration_mse",
+    "joint_jerk_mse",
+    "max_joint_velocity",
+    "action_discontinuity_mean",
+    "action_discontinuity_max",
+    "replan_boundary_discontinuity_mean",
+    "replan_boundary_discontinuity_max",
+    "action_selection_time_total",
+    "action_selection_time_median",
+    "action_selection_time_p95",
+    "denoiser_forward_calls",
+    "denoiser_evaluations",
+    "geometry_evaluations",
+    "peak_gpu_memory_bytes",
+    "peak_gpu_memory_delta_bytes",
+    "steps",
+    "replans",
+)
+PAIRED_SUCCESS_CONDITIONAL_METRICS = (
+    "tcp_path_length",
+    "joint_path_length",
 )
 
 
@@ -941,6 +985,316 @@ def validate_paired_episode_rows(
                 raise ValueError(
                     f"episode {episode} has mismatched {key} across methods: {values}"
                 )
+
+
+def paired_bootstrap_difference(
+    rows: list[dict[str, Any]],
+    *,
+    method_a: str,
+    method_b: str,
+    metric: str,
+    samples: int = 10_000,
+    seed: int = 0,
+    confidence: float = 0.95,
+    binary: bool = False,
+    condition_key: str | None = None,
+) -> dict[str, Any]:
+    """Estimate a paired mean difference and percentile bootstrap interval.
+
+    The reported difference is always ``method_a - method_b``. Continuous pairs
+    with a missing or non-finite value are excluded together. Binary endpoints
+    must be present for every eligible pair.
+    """
+    if samples <= 0:
+        raise ValueError("samples must be positive")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be between zero and one")
+    values_a, values_b, excluded = _paired_metric_values(
+        rows,
+        method_a=method_a,
+        method_b=method_b,
+        metric=metric,
+        binary=binary,
+        condition_key=condition_key,
+    )
+    paired_count = int(values_a.size)
+    result: dict[str, Any] = {
+        "method_a": method_a,
+        "method_b": method_b,
+        "difference_convention": "method_a - method_b",
+        "metric": metric,
+        "metric_kind": "binary" if binary else "continuous",
+        "condition_key": condition_key,
+        "paired_episodes": paired_count,
+        "excluded_condition_pairs": excluded["condition"],
+        "excluded_missing_pairs": excluded["missing"],
+        "bootstrap_samples": int(samples),
+        "bootstrap_seed": int(seed),
+        "confidence": float(confidence),
+        "method_a_mean": None,
+        "method_b_mean": None,
+        "mean_difference": None,
+        "ci_low": None,
+        "ci_high": None,
+    }
+    if paired_count == 0:
+        return result
+
+    differences = values_a - values_b
+    bootstrap_means = np.empty((samples,), dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    max_index_values = 1_000_000
+    chunk_size = max(1, min(samples, max_index_values // paired_count))
+    for start in range(0, samples, chunk_size):
+        stop = min(samples, start + chunk_size)
+        indices = rng.integers(
+            0,
+            paired_count,
+            size=(stop - start, paired_count),
+        )
+        bootstrap_means[start:stop] = np.mean(differences[indices], axis=1)
+    tail = (1.0 - confidence) / 2.0
+    result.update(
+        {
+            "method_a_mean": float(np.mean(values_a)),
+            "method_b_mean": float(np.mean(values_b)),
+            "mean_difference": float(np.mean(differences)),
+            "ci_low": float(np.quantile(bootstrap_means, tail)),
+            "ci_high": float(np.quantile(bootstrap_means, 1.0 - tail)),
+        }
+    )
+    return result
+
+
+def mcnemar_exact(
+    rows: list[dict[str, Any]],
+    *,
+    method_a: str,
+    method_b: str,
+    metric: str,
+    condition_key: str | None = None,
+) -> dict[str, Any]:
+    """Return the two-sided exact McNemar test for one paired binary endpoint."""
+    values_a, values_b, excluded = _paired_metric_values(
+        rows,
+        method_a=method_a,
+        method_b=method_b,
+        metric=metric,
+        binary=True,
+        condition_key=condition_key,
+    )
+    a_success_b_failure = int(np.count_nonzero((values_a == 1.0) & (values_b == 0.0)))
+    a_failure_b_success = int(np.count_nonzero((values_a == 0.0) & (values_b == 1.0)))
+    discordant = a_success_b_failure + a_failure_b_success
+    tail_count = min(a_success_b_failure, a_failure_b_success)
+    if discordant == 0:
+        p_value = 1.0
+    else:
+        log_two = math.log(2.0)
+        tail_probability = sum(
+            math.exp(
+                math.lgamma(discordant + 1)
+                - math.lgamma(k + 1)
+                - math.lgamma(discordant - k + 1)
+                - discordant * log_two
+            )
+            for k in range(tail_count + 1)
+        )
+        p_value = min(1.0, 2.0 * tail_probability)
+    return {
+        "method_a": method_a,
+        "method_b": method_b,
+        "metric": metric,
+        "condition_key": condition_key,
+        "paired_episodes": int(values_a.size),
+        "excluded_condition_pairs": excluded["condition"],
+        "a_success_b_failure": a_success_b_failure,
+        "a_failure_b_success": a_failure_b_success,
+        "discordant_pairs": discordant,
+        "p_value_two_sided": float(p_value),
+    }
+
+
+def paired_method_comparisons(
+    rows: list[dict[str, Any]],
+    *,
+    methods: list[str],
+    bootstrap_samples: int = 10_000,
+    bootstrap_seed: int = 0,
+    confidence: float = 0.95,
+) -> dict[str, Any]:
+    """Build deterministic paired comparisons for every requested method pair."""
+    validate_paired_episode_rows(rows, methods=methods)
+    if not all("stable_combined_success" in row for row in rows):
+        raise ValueError(
+            "stable_combined_success is required for paired primary reporting"
+        )
+    comparisons: list[dict[str, Any]] = []
+    for method_a_index in range(1, len(methods)):
+        method_a = methods[method_a_index]
+        for method_b_index in range(method_a_index):
+            method_b = methods[method_b_index]
+            pair_rows = [
+                row for row in rows if str(row["method"]) in {method_a, method_b}
+            ]
+            metrics: dict[str, Any] = {}
+            for metric in PAIRED_BINARY_METRICS:
+                if not all(metric in row for row in pair_rows):
+                    continue
+                metric_seed = _paired_bootstrap_seed(
+                    bootstrap_seed,
+                    method_a,
+                    method_b,
+                    metric,
+                    "all",
+                )
+                metric_result = paired_bootstrap_difference(
+                    pair_rows,
+                    method_a=method_a,
+                    method_b=method_b,
+                    metric=metric,
+                    samples=bootstrap_samples,
+                    seed=metric_seed,
+                    confidence=confidence,
+                    binary=True,
+                )
+                metric_result["mcnemar_exact"] = mcnemar_exact(
+                    pair_rows,
+                    method_a=method_a,
+                    method_b=method_b,
+                    metric=metric,
+                )
+                metrics[metric] = metric_result
+            for metric in PAIRED_CONTINUOUS_METRICS:
+                if not all(metric in row for row in pair_rows):
+                    continue
+                metrics[metric] = paired_bootstrap_difference(
+                    pair_rows,
+                    method_a=method_a,
+                    method_b=method_b,
+                    metric=metric,
+                    samples=bootstrap_samples,
+                    seed=_paired_bootstrap_seed(
+                        bootstrap_seed,
+                        method_a,
+                        method_b,
+                        metric,
+                        "all",
+                    ),
+                    confidence=confidence,
+                )
+            conditional_metrics: dict[str, Any] = {}
+            if all("stable_combined_success" in row for row in pair_rows):
+                for metric in PAIRED_SUCCESS_CONDITIONAL_METRICS:
+                    if not all(metric in row for row in pair_rows):
+                        continue
+                    conditional_metrics[metric] = paired_bootstrap_difference(
+                        pair_rows,
+                        method_a=method_a,
+                        method_b=method_b,
+                        metric=metric,
+                        samples=bootstrap_samples,
+                        seed=_paired_bootstrap_seed(
+                            bootstrap_seed,
+                            method_a,
+                            method_b,
+                            metric,
+                            "stable_combined_success",
+                        ),
+                        confidence=confidence,
+                        condition_key="stable_combined_success",
+                    )
+            comparisons.append(
+                {
+                    "comparison_id": f"{method_a}_minus_{method_b}",
+                    "method_a": method_a,
+                    "method_b": method_b,
+                    "difference_convention": "method_a - method_b",
+                    "primary_metric": metrics.get("stable_combined_success"),
+                    "metrics": metrics,
+                    "conditional_on_both_stable_combined_success": conditional_metrics,
+                }
+            )
+    return {
+        "difference_convention": "method_a - method_b",
+        "confidence": float(confidence),
+        "bootstrap_samples": int(bootstrap_samples),
+        "bootstrap_seed": int(bootstrap_seed),
+        "comparisons": comparisons,
+    }
+
+
+def _paired_metric_values(
+    rows: list[dict[str, Any]],
+    *,
+    method_a: str,
+    method_b: str,
+    metric: str,
+    binary: bool,
+    condition_key: str | None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    if not method_a or not method_b or method_a == method_b:
+        raise ValueError("method_a and method_b must be distinct non-empty names")
+    pair_rows = [
+        row for row in rows if str(row.get("method")) in {method_a, method_b}
+    ]
+    validate_paired_episode_rows(pair_rows, methods=[method_a, method_b])
+    by_episode: dict[int, dict[str, dict[str, Any]]] = {}
+    for row in pair_rows:
+        by_episode.setdefault(int(row["episode"]), {})[str(row["method"])] = row
+
+    values_a: list[float] = []
+    values_b: list[float] = []
+    excluded_condition = 0
+    excluded_missing = 0
+    for episode_rows in (by_episode[index] for index in sorted(by_episode)):
+        row_a = episode_rows[method_a]
+        row_b = episode_rows[method_b]
+        if condition_key is not None:
+            if condition_key not in row_a or condition_key not in row_b:
+                raise ValueError(
+                    f"paired condition {condition_key!r} is missing from an episode"
+                )
+            if not (bool(row_a[condition_key]) and bool(row_b[condition_key])):
+                excluded_condition += 1
+                continue
+        if metric not in row_a or metric not in row_b:
+            raise ValueError(f"paired metric {metric!r} is missing from an episode")
+        value_a = row_a[metric]
+        value_b = row_b[metric]
+        if binary:
+            if value_a is None or value_b is None:
+                raise ValueError(f"binary paired metric {metric!r} must not be null")
+            values_a.append(float(bool(value_a)))
+            values_b.append(float(bool(value_b)))
+            continue
+        numeric_a = _finite_optional_float(value_a)
+        numeric_b = _finite_optional_float(value_b)
+        if numeric_a is None or numeric_b is None:
+            excluded_missing += 1
+            continue
+        values_a.append(numeric_a)
+        values_b.append(numeric_b)
+    return (
+        np.asarray(values_a, dtype=np.float64),
+        np.asarray(values_b, dtype=np.float64),
+        {"condition": excluded_condition, "missing": excluded_missing},
+    )
+
+
+def _finite_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if np.isfinite(numeric) else None
+
+
+def _paired_bootstrap_seed(base_seed: int, *parts: str) -> int:
+    payload = ":".join([str(int(base_seed)), *parts]).encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little")
 
 
 def success_rate_ci_rows(

@@ -27,8 +27,11 @@ from pg3d.eval import (
     episode_metric_row,
     load_episode_constraints,
     max_joint_velocity,
+    mcnemar_exact,
     min_constraint_clearance,
     nominal_path_avoid_region,
+    paired_bootstrap_difference,
+    paired_method_comparisons,
     path_satisfies_constraints,
     point_set_constraint_clearance_series,
     progress_series,
@@ -572,6 +575,86 @@ def test_success_rate_ci_rows_accepts_full_summary() -> None:
     assert rows[0]["err_high"] == pytest.approx(0.25)
 
 
+def test_paired_bootstrap_and_mcnemar_use_episode_differences() -> None:
+    rows = _paired_stat_rows()
+
+    continuous = paired_bootstrap_difference(
+        rows,
+        method_a="itps",
+        method_b="reranking",
+        metric="final_target_distance",
+        samples=2_000,
+        seed=17,
+    )
+    repeated = paired_bootstrap_difference(
+        rows,
+        method_a="itps",
+        method_b="reranking",
+        metric="final_target_distance",
+        samples=2_000,
+        seed=17,
+    )
+    binary = paired_bootstrap_difference(
+        rows,
+        method_a="itps",
+        method_b="reranking",
+        metric="stable_combined_success",
+        samples=2_000,
+        seed=19,
+        binary=True,
+    )
+    exact = mcnemar_exact(
+        rows,
+        method_a="itps",
+        method_b="reranking",
+        metric="stable_combined_success",
+    )
+
+    assert continuous == repeated
+    assert continuous["paired_episodes"] == 4
+    assert continuous["mean_difference"] == pytest.approx(-2.5)
+    assert continuous["ci_high"] < 0.0
+    assert binary["mean_difference"] == pytest.approx(0.75)
+    assert exact["a_success_b_failure"] == 3
+    assert exact["a_failure_b_success"] == 0
+    assert exact["p_value_two_sided"] == pytest.approx(0.25)
+
+
+def test_paired_method_comparisons_include_primary_and_conditional_metrics() -> None:
+    summary = paired_method_comparisons(
+        _paired_stat_rows(),
+        methods=["reranking", "itps"],
+        bootstrap_samples=500,
+        bootstrap_seed=23,
+    )
+
+    comparison = summary["comparisons"][0]
+    assert comparison["comparison_id"] == "itps_minus_reranking"
+    assert comparison["primary_metric"]["metric"] == "stable_combined_success"
+    assert comparison["primary_metric"]["mean_difference"] == pytest.approx(0.75)
+    assert comparison["primary_metric"]["mcnemar_exact"]["p_value_two_sided"] == (
+        pytest.approx(0.25)
+    )
+    conditional = comparison["conditional_on_both_stable_combined_success"][
+        "tcp_path_length"
+    ]
+    assert conditional["paired_episodes"] == 1
+    assert conditional["excluded_condition_pairs"] == 3
+
+
+def test_paired_bootstrap_rejects_incomplete_method_pair() -> None:
+    rows = _paired_stat_rows()[:-1]
+
+    with pytest.raises(ValueError, match="methods do not match protocol"):
+        paired_bootstrap_difference(
+            rows,
+            method_a="itps",
+            method_b="reranking",
+            metric="final_target_distance",
+            samples=10,
+        )
+
+
 def test_candidate_feasibility_fraction_validates_counts() -> None:
     assert candidate_feasibility_fraction(1, 4) == pytest.approx(0.25)
     assert candidate_feasibility_fraction(0, 0) is None
@@ -881,6 +964,40 @@ def test_eval_artifact_selection_seed_defaults_to_run_seed(tmp_path: Path) -> No
     assert args.artifact_selection == "periodic"
     assert args.artifact_episode_count == 5
     assert args.artifact_selection_seed == 13
+
+
+def test_eval_paired_bootstrap_configuration(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "eval"),
+            "--paired-bootstrap-samples",
+            "1234",
+            "--paired-bootstrap-seed",
+            "91",
+        ]
+    )
+
+    assert args.paired_bootstrap_samples == 1234
+    assert args.paired_bootstrap_seed == 91
+
+    with pytest.raises(ValueError, match="paired-bootstrap-samples"):
+        parse_eval_args(
+            [
+                "--checkpoint",
+                str(tmp_path / "policy.pt"),
+                "--dataset",
+                str(tmp_path / "dataset.zarr"),
+                "--output-dir",
+                str(tmp_path / "eval"),
+                "--paired-bootstrap-samples",
+                "0",
+            ]
+        )
 
 
 def test_eval_episode_indices_file_and_precomputed_constraints(tmp_path: Path) -> None:
@@ -1450,6 +1567,41 @@ def _metric_row(
         "candidate_feasibility_fraction": None,
         "fallback_count": 0,
     }
+
+
+def _paired_stat_rows() -> list[dict[str, object]]:
+    stable = {
+        "reranking": [False, False, False, True],
+        "itps": [True, True, True, True],
+    }
+    final_distance = {
+        "reranking": [2.0, 4.0, 6.0, 8.0],
+        "itps": [1.0, 2.0, 3.0, 4.0],
+    }
+    path_length = {
+        "reranking": [10.0, 11.0, 12.0, 13.0],
+        "itps": [8.0, 9.0, 10.0, 11.0],
+    }
+    rows: list[dict[str, object]] = []
+    for episode in range(4):
+        for method in ("reranking", "itps"):
+            rows.append(
+                {
+                    "method": method,
+                    "episode": episode,
+                    "simulator_seed": 100 + episode,
+                    "source": "dataset",
+                    "dataset_episode_index": episode,
+                    "policy_seed": 200 + episode,
+                    "constraint_id": f"constraint-{episode}",
+                    "checkpoint_id": "checkpoint.pt",
+                    "stable_combined_success": stable[method][episode],
+                    "combined_success": stable[method][episode],
+                    "final_target_distance": final_distance[method][episode],
+                    "tcp_path_length": path_length[method][episode],
+                }
+            )
+    return rows
 
 
 class _FakeDP3Policy:

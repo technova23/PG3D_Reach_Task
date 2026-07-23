@@ -897,6 +897,19 @@ queries/cache-miss renders. `peak_gpu_memory_bytes` and
 `peak_gpu_memory_delta_bytes` use PyTorch CUDA allocation statistics and are `null`
 on CPU.
 
+Every run also writes episode-paired statistical comparisons under
+`summary.json["paired_comparisons"]`. The default is 10,000 bootstrap resamples with
+seed 0; override them with `--paired-bootstrap-samples` and
+`--paired-bootstrap-seed`. Differences are explicitly `method_a - method_b`, and
+binary entries include an exact two-sided McNemar result. Inspect the direct
+ITPS-versus-reranking comparison with:
+
+```bash
+jq '.paired_comparisons.comparisons[] |
+    select(.comparison_id == "itps_minus_reranking")' \
+  artifacts/compute-metrics-smoke/summary.json
+```
+
 Smoke the compute schema across the three main inference paths:
 
 ```bash

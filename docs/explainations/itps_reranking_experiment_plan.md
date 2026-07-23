@@ -215,6 +215,15 @@ predeclared representative subset rather than recording every episode.
   The latter is a steering-mechanism evaluation and must not be described as general
   task success.
 
+Paired reporting is implemented in `summary.json`. For every requested method pair it
+reports `method_a - method_b`, a deterministic episode-paired percentile-bootstrap
+interval, the number of included and excluded pairs, and an exact two-sided McNemar
+test for each binary endpoint. Continuous values are dropped only as a pair when
+either method is missing or non-finite. TCP/joint path-length differences are
+reported separately and conditioned on both methods achieving stable combined
+success, preventing short failed motions from appearing efficient. The bootstrap
+sample count and seed are recorded with the result.
+
 ## 5. Experiment list
 
 ### E0 — Metric and implementation validation
@@ -417,9 +426,8 @@ distant or zero-weight obstacle. Success termination is ignored only while colle
 the configured post-success hold, and that hold extends beyond rather than consumes
 the nominal task-step budget.
 
-Before the paper-scale comparison, add paired statistical comparison utilities and,
-if a stable sampler seam becomes available, an ITPS before/after-guidance trajectory
-overlay.
+If a stable sampler seam becomes available before the paper-scale comparison, add an
+ITPS before/after-guidance trajectory overlay.
 
 Measured compute instrumentation is now implemented at the actual call boundaries.
 Each episode reports denoiser module calls and batch-item-equivalent evaluations;
@@ -453,6 +461,6 @@ fraction, integral, and event count. The paper default samples every timestep.
 Executed simulator joint targets also produce overall mean/maximum action
 discontinuity and a separate mean/maximum over replan boundaries.
 
-No experiment should be blocked on every diagnostic metric. E0--E2 are complete.
-Add the paired statistical utilities and clear the nominal checkpoint gate before the
-definitive E3 run.
+No experiment should be blocked on every diagnostic metric. E0--E2 and the
+paper-metric/statistics instrumentation are complete. Clear the nominal checkpoint
+gate before the definitive E3 run.
