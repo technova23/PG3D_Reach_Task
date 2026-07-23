@@ -850,6 +850,18 @@ signed-clearance classification. It uses raw contact pairs for the boolean decis
 contact-force magnitude is retained only as a diagnostic because a valid resting
 contact can have nearly zero instantaneous force.
 
+Every constrained-evaluation command using `--video --rerun` writes
+`artifact_manifest.json` in its output directory. The evaluator validates non-empty
+files, SHA-256 records, metrics-row selectors, paired seeds, and constraint
+fingerprints before completing. `--video` without `--rerun` is intentionally rejected.
+
+A quick manifest schema check is:
+
+```bash
+uv run python -c \
+  'import json; from pathlib import Path; p=Path("artifacts/e2-cylinder-smoke/artifact_manifest.json"); m=json.loads(p.read_text()); assert m["schema_version"] == "pg3d.artifact_manifest.v1"; assert m["artifacts"]'
+```
+
 Longer multi-chunk planning smoke:
 
 ```bash

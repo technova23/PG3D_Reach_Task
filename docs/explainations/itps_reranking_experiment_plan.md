@@ -401,7 +401,15 @@ Before the paper-scale comparison, add:
 - peak GPU memory, and
 - paired statistical comparison utilities,
 - obstacle/goal-marker point categories in Rerun, and
-- richer candidate/guidance overlays linked through an artifact manifest.
+- richer candidate/guidance overlays.
+
+Artifact manifests are now implemented. Each run writes
+`pg3d.artifact_manifest.v1`, and each selected method/episode entry binds the MP4,
+`.rrd`, and constraint JSON to its exact `metrics.jsonl` row, paired seeds,
+constraint fingerprint, obstacle pose/geometry, checkpoint, dataset, and git commit.
+File sizes and SHA-256 digests are validated before the run is accepted. The CLI
+rejects `--video` without `--rerun`, so an MP4 cannot be emitted without its
+point-cloud timeline.
 
 No experiment should be blocked on every diagnostic metric. E0 and E1 can run with the
 current schema. Complete realistic-obstacle observation validation in E2 before a

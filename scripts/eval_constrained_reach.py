@@ -45,6 +45,7 @@ from pg3d.envs.maniskill_adapter import (
 )
 from pg3d.envs.maniskill_adapter.dataset import (
     PointCloudCropConfig,
+    git_commit_info,
     load_reach_metadata,
 )
 from pg3d.envs.obstacles import CABINET_COMPONENTS, transform_box_component
@@ -341,8 +342,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.rerun
         else set()
     )
+    missing_rerun = video_episode_indices - rerun_episode_indices
+    if missing_rerun:
+        raise ValueError(
+            "every selected video episode must also have Rerun output; missing "
+            f"episode indices {sorted(missing_rerun)}"
+        )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    artifact_manifest_path = args.output_dir / "artifact_manifest.json"
+    git_info = git_commit_info(Path(__file__).resolve().parents[1])
     run = _init_wandb(args, metadata=metadata, checkpoint_path=checkpoint_path)
     sim_env: Any | None = None
     ghost_env: Any | None = None
@@ -461,6 +470,18 @@ def main(argv: list[str] | None = None) -> int:
                             "policy_seed": policy_seed,
                             "constraint_id": constraint_id,
                             "constraint_path": str(constraint_path),
+                            "git_commit": git_info["commit"],
+                            "method_config": _method_config(
+                                args,
+                                method=method,
+                                itps_config=itps_config,
+                            ),
+                            "artifact_manifest_path": (
+                                str(artifact_manifest_path)
+                                if row.get("video") is not None
+                                or row.get("rerun") is not None
+                                else None
+                            ),
                         }
                     )
                     rows.append(row)
@@ -505,6 +526,14 @@ def main(argv: list[str] | None = None) -> int:
             ghost_env.close()
 
     validate_paired_episode_rows(rows, methods=list(args.methods))
+    artifact_manifest = _write_artifact_manifest(
+        artifact_manifest_path,
+        rows=rows,
+        run_id=run_id,
+        checkpoint_path=checkpoint_path,
+        dataset_path=args.dataset,
+        git_info=git_info,
+    )
     summary = {
         "run_id": run_id,
         "checkpoint": str(checkpoint_path),
@@ -525,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
             rerun_episode_indices=rerun_episode_indices,
             args=args,
         ),
+        "artifact_manifest": str(artifact_manifest_path),
+        "artifact_manifest_entries": len(artifact_manifest["artifacts"]),
         "constraint_overlay_video": bool(args.constraint_overlay_video),
         "constraint_overlay_alpha": float(args.constraint_overlay_alpha),
         "constraint_overlay_color": list(args.constraint_overlay_color),
@@ -937,6 +968,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.embody_obstacle and len(args.avoid_path_fractions) != 1:
         raise ValueError("--embody-obstacle currently supports exactly one avoid region")
+    if args.video and not args.rerun:
+        raise ValueError("--video requires --rerun so every MP4 has a point-cloud timeline")
     if args.obstacle_point_quota < 0:
         raise ValueError("--obstacle-point-quota must be non-negative")
     if not np.isfinite(args.obstacle_yaw_deg):
@@ -3415,6 +3448,150 @@ def _artifact_selection_summary(
         "video": _selected_spec_summary(spec_by_output, video_episode_indices),
         "rerun": _selected_spec_summary(spec_by_output, rerun_episode_indices),
     }
+
+
+def _method_config(
+    args: argparse.Namespace,
+    *,
+    method: str,
+    itps_config: ITPSGuidanceConfig,
+) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "planning_horizon_chunks": int(args.planning_horizon_chunks),
+        "execution_horizon_chunks": int(args.execution_horizon_chunks),
+        "geometry_mode": str(args.geometry_mode),
+        "constraint_target": str(args.constraint_target),
+    }
+    if method in {"rejection", "reranking"}:
+        config["k_schedule"] = [int(value) for value in args.k_schedule]
+    if method == "itps":
+        config["itps"] = itps_config.to_json()
+    return config
+
+
+def _write_artifact_manifest(
+    path: Path,
+    *,
+    rows: list[dict[str, Any]],
+    run_id: str,
+    checkpoint_path: Path,
+    dataset_path: Path,
+    git_info: dict[str, Any],
+) -> dict[str, Any]:
+    """Write and validate links between qualitative artifacts and metric rows."""
+    artifacts: list[dict[str, Any]] = []
+    for row_index, row in enumerate(rows):
+        video = row.get("video")
+        rerun = row.get("rerun")
+        if video is None and rerun is None:
+            continue
+        if video is not None and rerun is None:
+            raise ValueError(
+                f"metrics row {row_index} has MP4 output without a matching Rerun file"
+            )
+        constraint_path = Path(str(row["constraint_path"]))
+        files = {
+            "video": _artifact_file_record(Path(str(video))) if video is not None else None,
+            "rerun": _artifact_file_record(Path(str(rerun))) if rerun is not None else None,
+            "constraint": _artifact_file_record(constraint_path),
+        }
+        artifacts.append(
+            {
+                "artifact_id": (
+                    f"episode_{int(row['episode']):03d}:{str(row['method'])}"
+                ),
+                "metrics": {
+                    "path": str(path.parent / "metrics.jsonl"),
+                    "row_index": row_index,
+                    "episode": int(row["episode"]),
+                    "method": str(row["method"]),
+                },
+                "paired_identity": {
+                    "simulator_seed": int(row["simulator_seed"]),
+                    "policy_seed": int(row["policy_seed"]),
+                    "dataset_episode_index": row.get("dataset_episode_index"),
+                    "constraint_id": str(row["constraint_id"]),
+                },
+                "obstacle": {
+                    "id": row.get("obstacle_id"),
+                    "family": row.get("obstacle_family"),
+                    "pose": row.get("obstacle_pose"),
+                    "collision_geometry": row.get("obstacle_collision_geometry"),
+                },
+                "files": files,
+            }
+        )
+    manifest = {
+        "schema_version": "pg3d.artifact_manifest.v1",
+        "run_id": run_id,
+        "checkpoint": str(checkpoint_path),
+        "dataset": str(dataset_path),
+        "git": {
+            "commit": git_info.get("commit"),
+            "dirty": bool(git_info.get("dirty")),
+        },
+        "artifacts": artifacts,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_jsonable(manifest), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    validate_artifact_manifest(manifest, rows=rows)
+    return manifest
+
+
+def _artifact_file_record(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise ValueError(f"required artifact does not exist: {path}")
+    size = path.stat().st_size
+    if size <= 0:
+        raise ValueError(f"required artifact is empty: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(path),
+        "size_bytes": size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def validate_artifact_manifest(
+    manifest: dict[str, Any],
+    *,
+    rows: list[dict[str, Any]],
+) -> None:
+    if manifest.get("schema_version") != "pg3d.artifact_manifest.v1":
+        raise ValueError("unsupported artifact manifest schema")
+    seen: set[tuple[int, str]] = set()
+    for artifact in manifest.get("artifacts", []):
+        metrics = artifact["metrics"]
+        row_index = int(metrics["row_index"])
+        if not 0 <= row_index < len(rows):
+            raise ValueError(f"artifact references invalid metrics row {row_index}")
+        row = rows[row_index]
+        identity = (int(row["episode"]), str(row["method"]))
+        if identity in seen:
+            raise ValueError(f"duplicate artifact entry for {identity}")
+        seen.add(identity)
+        if metrics["episode"] != identity[0] or metrics["method"] != identity[1]:
+            raise ValueError(f"artifact metrics selector disagrees with row {row_index}")
+        paired = artifact["paired_identity"]
+        for key in ("simulator_seed", "policy_seed", "constraint_id"):
+            if paired[key] != row[key]:
+                raise ValueError(
+                    f"artifact identity {key} disagrees with metrics row {row_index}"
+                )
+        files = artifact["files"]
+        if files.get("video") is not None and files.get("rerun") is None:
+            raise ValueError(f"artifact {artifact['artifact_id']} has video without Rerun")
+        for record in files.values():
+            if record is None:
+                continue
+            if len(str(record["sha256"])) != 64 or int(record["size_bytes"]) <= 0:
+                raise ValueError(f"invalid file record in {artifact['artifact_id']}")
 
 
 def _selected_spec_summary(

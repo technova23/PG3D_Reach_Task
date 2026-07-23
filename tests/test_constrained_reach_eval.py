@@ -49,6 +49,7 @@ from scripts.build_nominal_path_constraints import (
 )
 from scripts.eval_constrained_reach import (
     DP3ChunkPolicyAdapter,
+    _artifact_file_record,
     _artifact_selection_summary,
     _build_multichunk_candidates,
     _constraint_source_summary,
@@ -67,6 +68,8 @@ from scripts.eval_constrained_reach import (
     _read_episode_indices_file,
     _seed_torch,
     _validate_embodied_obstacle_geometry,
+    _write_artifact_manifest,
+    validate_artifact_manifest,
 )
 from scripts.eval_constrained_reach import (
     parse_args as parse_eval_args,
@@ -632,6 +635,121 @@ def test_disabled_artifact_modes_record_empty_selection(tmp_path: Path) -> None:
 
     assert summary["video"] == []
     assert summary["rerun"] == []
+
+
+def test_video_requires_corresponding_rerun_output(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="video requires --rerun"):
+        parse_eval_args(
+            [
+                "--checkpoint",
+                str(tmp_path / "policy.pt"),
+                "--dataset",
+                str(tmp_path / "dataset.zarr"),
+                "--output-dir",
+                str(tmp_path / "eval"),
+                "--video",
+            ]
+        )
+
+
+def test_artifact_manifest_links_nonempty_files_to_metrics_row(tmp_path: Path) -> None:
+    video = tmp_path / "videos" / "base" / "episode_000.mp4"
+    rerun = tmp_path / "rerun" / "base" / "episode_000.rrd"
+    constraint = tmp_path / "constraints" / "episode_000.json"
+    for path, content in (
+        (video, b"mp4"),
+        (rerun, b"rrd"),
+        (constraint, b"[]"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    row = {
+        "episode": 0,
+        "method": "base",
+        "video": str(video),
+        "rerun": str(rerun),
+        "constraint_path": str(constraint),
+        "constraint_id": "abc",
+        "simulator_seed": 11,
+        "policy_seed": 22,
+        "dataset_episode_index": 3,
+        "obstacle_id": "box:episode_000",
+        "obstacle_family": "box",
+        "obstacle_pose": {"center": [0.0, 0.0, 0.5], "yaw": 0.0},
+        "obstacle_collision_geometry": [{"type": "box"}],
+    }
+    manifest_path = tmp_path / "artifact_manifest.json"
+
+    manifest = _write_artifact_manifest(
+        manifest_path,
+        rows=[row],
+        run_id="test-run",
+        checkpoint_path=tmp_path / "checkpoint.pt",
+        dataset_path=tmp_path / "dataset.zarr",
+        git_info={"commit": "deadbeef", "dirty": False},
+    )
+
+    assert manifest_path.is_file()
+    assert len(manifest["artifacts"]) == 1
+    artifact = manifest["artifacts"][0]
+    assert artifact["metrics"]["row_index"] == 0
+    assert artifact["paired_identity"]["constraint_id"] == "abc"
+    assert artifact["files"]["video"] == _artifact_file_record(video)
+    assert artifact["files"]["rerun"] == _artifact_file_record(rerun)
+
+
+def test_artifact_manifest_rejects_video_without_rerun(tmp_path: Path) -> None:
+    video = tmp_path / "episode.mp4"
+    constraint = tmp_path / "constraint.json"
+    video.write_bytes(b"mp4")
+    constraint.write_bytes(b"[]")
+    row = {
+        "episode": 0,
+        "method": "base",
+        "video": str(video),
+        "rerun": None,
+        "constraint_path": str(constraint),
+    }
+
+    with pytest.raises(ValueError, match="without a matching Rerun"):
+        _write_artifact_manifest(
+            tmp_path / "artifact_manifest.json",
+            rows=[row],
+            run_id="test-run",
+            checkpoint_path=tmp_path / "checkpoint.pt",
+            dataset_path=tmp_path / "dataset.zarr",
+            git_info={},
+        )
+
+
+def test_artifact_manifest_validator_rejects_identity_mismatch() -> None:
+    rows = [
+        {
+            "episode": 0,
+            "method": "base",
+            "simulator_seed": 1,
+            "policy_seed": 2,
+            "constraint_id": "expected",
+        }
+    ]
+    manifest = {
+        "schema_version": "pg3d.artifact_manifest.v1",
+        "artifacts": [
+            {
+                "artifact_id": "episode_000:base",
+                "metrics": {"row_index": 0, "episode": 0, "method": "base"},
+                "paired_identity": {
+                    "simulator_seed": 1,
+                    "policy_seed": 2,
+                    "constraint_id": "wrong",
+                },
+                "files": {},
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="constraint_id"):
+        validate_artifact_manifest(manifest, rows=rows)
 
 
 def test_eval_artifact_selection_seed_defaults_to_run_seed(tmp_path: Path) -> None:

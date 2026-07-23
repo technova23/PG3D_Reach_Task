@@ -97,6 +97,10 @@ E2 is complete: an eight-case collision probe covering intersecting and separate
 placements for box, carton, cylinder, and cabinet produced zero disagreements between
 raw PhysX contacts and serialized signed clearance. Every family has also passed the
 camera-to-crop-to-policy point-count gate with a decoded MP4 and matching `.rrd`.
+Artifact provenance is now enforced by `pg3d.artifact_manifest.v1`. Every selected
+MP4/`.rrd` pair is linked to an exact metrics row, constraint file/fingerprint,
+obstacle configuration, paired seeds, checkpoint, dataset, and git commit, with
+non-empty size and SHA-256 validation. Video-only evaluation is rejected.
 
 ## Current phase
 
@@ -173,8 +177,8 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Add `artifact_manifest.json` and enrich Rerun timelines with the complete semantic
-   overlays required by the experiment plan.
+3. Enrich Rerun timelines with candidate/guidance trajectories, clearance state, and
+   complete policy-input semantics required by the experiment plan.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 
