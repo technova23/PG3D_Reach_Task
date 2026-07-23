@@ -355,6 +355,25 @@ episode, XY is fixed at the 0.5 arc-length point of the successful nominal TCP p
 The locked 10-episode pilot pool produced eight such precomputed instances; all eight
 intersect the nominal TCP path and are reserved for integration/tuning only.
 
+The first paired tuning pilot (2026-07-23) completed all eight instances with
+whole-robot executed safety grading. Stable combined success was 5/8 for base, 5/8
+for rejection, 8/8 for reranking, and 6/8 for ITPS. For the direct ITPS-versus-reranking
+pilot contrast, the paired difference (ITPS minus reranking) was `-0.25`, with a
+95% paired-bootstrap interval `[-0.625, 0]`; McNemar's exact two-sided `p=0.5`.
+These intervals are intentionally wide and are tuning diagnostics, not a test-set
+claim. ITPS achieved greater mean whole-robot clearance (`0.0847` versus `0.0585` m)
+but its mean per-episode planning time was `118.9` versus `9.3` seconds and its mean
+per-replan median latency was `9.82` versus `1.02` seconds.
+
+The run at `artifacts/e3-pilot-carton-comparison-v1` contains 32/32 validated
+MP4/`.rrd` pairs, 2,467 decoded 512x512 video frames, 22 graphs, and no episode
+errors. Every final DP3 tensor retained at least 32 ordinary-camera obstacle points.
+The camera videos visibly show the grounded carton, robot, and goal, while the RRDs
+contain the semantic point cloud and planning/execution overlays. Before the
+definitive run, add burned-in method/episode/seed and outcome text to the MP4 frames;
+the current identity is exact in the artifact manifest but not visible within the
+video image itself.
+
 ### E4 — Constraint difficulty sweep
 
 Sweep obstacle size/clearance margin, pose, orientation, placement along the nominal

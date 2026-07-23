@@ -290,6 +290,12 @@ the full point-cloud tensor into memory.
   trailing goal tokens cannot erase the reserved camera-observed obstacle points.
 - Qualitative artifact validation is fail-closed: hashes are recomputed, every MP4 frame is
   decoded, and every Rerun `.rrd` is parsed before a run manifest is accepted.
+- The locked E3 nominal-base-success tuning pilot is complete on eight grounded-carton
+  instances: stable combined success was base 5/8, rejection 5/8, reranking 8/8, and ITPS
+  6/8. All 32 MP4/`.rrd` pairs validated. This is pilot evidence only; the 50 definitive
+  test episodes remain untouched.
+- Before the definitive E3 run, burn method/episode/seed and outcome text into MP4 frames.
+  The current manifest binds those identities exactly, but the camera image itself is unlabeled.
 - Eval geometry mode defaults to `fast`; use `--geometry-mode exact` for one-episode reference
   comparisons when validating speedups.
 - Constrained reach validation should use a held-out solved validation Zarr with `--source dataset`
