@@ -6,9 +6,12 @@ import sys
 import numpy as np
 import torch
 
+from pg3d.constraints import AvoidRegion, SphereRegion
 from pg3d.policies.dp3.goal_markers import goal_marker_offsets
 from scripts.rollout_dp3_reach_policy import (
     _distance_drift,
+    _policy_point_cloud_semantics,
+    _rerun_tcp_clearance,
     append_obs_window,
     make_initial_obs_window,
     obs_window_to_torch,
@@ -215,6 +218,45 @@ def test_obs_window_to_torch_inserts_goal_marker_tail_points() -> None:
     offsets = goal_marker_offsets(num_points=2, radius=0.015)
     np.testing.assert_allclose(points[0, 0, -2:, :], offsets)
     np.testing.assert_allclose(points[0, 1, -2:, :], 1.0 + offsets)
+
+
+def test_rerun_semantics_match_final_policy_tensor_and_marker_overwrite() -> None:
+    entry = _entry(0.0)
+    entry["robot_mask"] = np.asarray([True, False, False, False])
+    entry["obstacle_mask"] = np.asarray([False, False, True, True])
+    entry["target_position"] = np.asarray([0.4, 0.2, 0.3], dtype=np.float32)
+
+    semantics = _policy_point_cloud_semantics(
+        entry,
+        goal_marker_points=2,
+        goal_marker_radius=0.015,
+    )
+    policy = obs_window_to_torch(
+        [entry],
+        device=torch.device("cpu"),
+        goal_marker_points=2,
+        goal_marker_radius=0.015,
+    )
+
+    np.testing.assert_allclose(
+        semantics["all_points"],
+        policy["point_cloud"].cpu().numpy()[0, 0],
+    )
+    assert semantics["robot_mask"].tolist() == [True, False, False, False]
+    assert semantics["obstacle_mask"].tolist() == [False, False, False, False]
+    assert semantics["goal_mask"].tolist() == [False, False, True, True]
+
+
+def test_rerun_tcp_clearance_uses_constraint_margin() -> None:
+    constraint = AvoidRegion(
+        SphereRegion(center=[0.0, 0.0, 0.0], radius=0.1),
+        margin=0.02,
+    )
+
+    assert np.isclose(
+        _rerun_tcp_clearance(np.asarray([0.15, 0.0, 0.0]), [constraint]),
+        0.03,
+    )
 
 
 def test_rollout_script_import_keeps_simulator_lazy() -> None:

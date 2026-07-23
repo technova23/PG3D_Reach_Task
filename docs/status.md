@@ -101,6 +101,11 @@ Artifact provenance is now enforced by `pg3d.artifact_manifest.v1`. Every select
 MP4/`.rrd` pair is linked to an exact metrics row, constraint file/fingerprint,
 obstacle configuration, paired seeds, checkpoint, dataset, and git commit, with
 non-empty size and SHA-256 validation. Video-only evaluation is rejected.
+Rerun timelines now contain the exact final DP3 point tensor and separate semantic
+robot/scene/obstacle/goal-marker entities, executed TCP path, target and collision
+wireframes, per-step clearance/violation scalars, reranking candidate paths and
+scores, and selected predicted paths for base/reranking/ITPS. A live three-method
+recording was inspected with `rerun rrd print`.
 
 ## Current phase
 
@@ -177,8 +182,8 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Enrich Rerun timelines with candidate/guidance trajectories, clearance state, and
-   complete policy-input semantics required by the experiment plan.
+3. Complete the remaining primary/compute metric fields and paired statistical
+   utilities before the definitive E3 comparison.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 

@@ -862,6 +862,18 @@ uv run python -c \
   'import json; from pathlib import Path; p=Path("artifacts/e2-cylinder-smoke/artifact_manifest.json"); m=json.loads(p.read_text()); assert m["schema_version"] == "pg3d.artifact_manifest.v1"; assert m["artifacts"]'
 ```
 
+Inspect the entities stored in a Rerun file without opening the GUI:
+
+```bash
+uv run rerun rrd print \
+  artifacts/e2-cylinder-smoke/rerun/reranking/episode_000.rrd
+```
+
+Expected paths include `policy_input/point_cloud`, semantic robot/scene/obstacle/goal
+subsets, `world/executed_tcp_path`, `metrics/min_clearance_m`,
+`metrics/constraint_violation`, `planning/replan_*/candidates/*`, candidate scores,
+and `planning/replan_*/selected`.
+
 Longer multi-chunk planning smoke:
 
 ```bash

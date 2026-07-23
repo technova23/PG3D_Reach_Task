@@ -1160,6 +1160,7 @@ def run_eval_episode(
     path = EpisodePath()
     _append_path(path, sim_entry)
     timeline = [sim_entry.copy()]
+    rerun_replans: list[dict[str, Any]] = []
     frames = []
     raw_action_log = (
         output_dir / "debug" / method / f"episode_{spec.output_index:03d}_actions.jsonl"
@@ -1177,7 +1178,7 @@ def run_eval_episode(
             frames.append(_frame_to_numpy(_render_video_frame(sim_env, video_env)))
     provider: ManiSkillGhostPandaGeometryProvider | None = None
     world_model: GeometricWorldModel | None = None
-    if method != "base" or robot_clearance_metric:
+    if method != "base" or robot_clearance_metric or rerun:
         provider = ManiSkillGhostPandaGeometryProvider(
             ghost_env,
             task_name=_env_task_name(sim_env),
@@ -1252,6 +1253,17 @@ def run_eval_episode(
                 step=steps,
                 decision=decision,
             )
+            if rerun and provider is not None:
+                rerun_replans.append(
+                    _rerun_replan_record(
+                        decision,
+                        provider=provider,
+                        current_entry=sim_entry,
+                        step=steps,
+                        replan_index=replans - 1,
+                        timer=timer,
+                    )
+                )
             steps_to_execute = min(
                 decision.selected_chunk.horizon,
                 int(policy.n_action_steps) * execution_horizon_chunks,
@@ -1372,7 +1384,16 @@ def run_eval_episode(
     if rerun:
         rerun_path = output_dir / "rerun" / method / f"episode_{spec.output_index:03d}.rrd"
         with timer.time("rerun_write", method=method):
-            save_rerun_timeline(rerun_path, timeline, constraints=constraints)
+            save_rerun_timeline(
+                rerun_path,
+                timeline,
+                constraints=constraints,
+                replans=rerun_replans,
+                goal_marker_points=int(getattr(policy, "goal_marker_points", 0)),
+                goal_marker_radius=float(
+                    getattr(policy, "goal_marker_radius", DEFAULT_GOAL_MARKER_RADIUS)
+                ),
+            )
     robot_clearance_points: np.ndarray | None = None
     if robot_clearance_metric and constraints and provider is not None:
         try:
@@ -1990,6 +2011,60 @@ def _write_decision(
         )
     decisions_file.write(json.dumps(_jsonable(row), sort_keys=True) + "\n")
     decisions_file.flush()
+
+
+def _rerun_replan_record(
+    decision: EvalDecisionSummary,
+    *,
+    provider: ManiSkillGhostPandaGeometryProvider,
+    current_entry: Entry,
+    step: int,
+    replan_index: int,
+    timer: TimingRecorder,
+) -> dict[str, Any]:
+    """Build Rerun-ready candidate and selected EEF paths for one replan."""
+    current_tcp = np.asarray(current_entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3]
+    candidates: list[dict[str, Any]] = []
+    selected_path: np.ndarray
+    if decision.result is not None:
+        for candidate in decision.result.candidates:
+            eef_path = np.concatenate(
+                [current_tcp.reshape(1, 3), candidate.rollout.eef_path], axis=0
+            )
+            candidates.append(
+                {
+                    "index": int(candidate.index),
+                    "eef_path": eef_path,
+                    "feasible": bool(candidate.feasible),
+                    "score": float(candidate.total_score),
+                    "constraint_penalty": float(candidate.constraint_penalty),
+                }
+            )
+        selected_path = np.concatenate(
+            [current_tcp.reshape(1, 3), decision.result.selected.rollout.eef_path],
+            axis=0,
+        )
+        selected_index: int | None = int(decision.result.selected.index)
+    else:
+        rollout = _fast_imagine_rollout(
+            provider=provider,
+            observation=entry_to_world_model_observation(current_entry),
+            action_chunk=decision.selected_chunk,
+            metadata={"replan_index": replan_index, "artifact": "rerun"},
+            timer=timer,
+        )
+        selected_path = np.concatenate(
+            [current_tcp.reshape(1, 3), rollout.eef_path], axis=0
+        )
+        selected_index = None
+    return {
+        "step": int(step),
+        "replan_index": int(replan_index),
+        "selection_reason": decision.selection_reason,
+        "selected_index": selected_index,
+        "selected_eef_path": selected_path,
+        "candidates": candidates,
+    }
 
 
 def _entry_robot_points(entry: Entry) -> np.ndarray:

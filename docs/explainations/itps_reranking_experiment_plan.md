@@ -411,6 +411,15 @@ File sizes and SHA-256 digests are validated before the run is accepted. The CLI
 rejects `--video` without `--rerun`, so an MP4 cannot be emitted without its
 point-cloud timeline.
 
+The required semantic Rerun timeline is also implemented for constrained evaluation.
+It logs the exact fixed-size point tensor supplied to DP3 after goal-marker
+replacement, plus separate valid robot, ordinary-scene, obstacle, and goal-marker
+entities; executed TCP history; target and constraint wireframes; per-step signed
+clearance and violation state; all reranking candidates with feasibility colors and
+scores; and the selected predicted path for base, reranking, and ITPS. ITPS currently
+has only its final guided path because the isolated sampler does not expose a stable
+before-guidance trajectory artifact.
+
 No experiment should be blocked on every diagnostic metric. E0 and E1 can run with the
 current schema. Complete realistic-obstacle observation validation in E2 before a
 pilot E3, and complete the missing primary/compute fields and required qualitative

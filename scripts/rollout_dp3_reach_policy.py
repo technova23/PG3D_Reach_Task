@@ -697,6 +697,9 @@ def save_rerun_timeline(
     timeline: list[dict[str, np.ndarray | bool | float]],
     *,
     constraints: list[object] | None = None,
+    replans: list[dict[str, Any]] | None = None,
+    goal_marker_points: int = 0,
+    goal_marker_radius: float = DEFAULT_GOAL_MARKER_RADIUS,
 ) -> None:
     try:
         import rerun as rr
@@ -724,25 +727,150 @@ def save_rerun_timeline(
         valid = np.asarray(entry["point_valid_mask"], dtype=bool)
         points = np.asarray(entry["point_cloud"], dtype=np.float32)[valid]
         if points.size:
-            rr.log("world/point_cloud", rr.Points3D(points, colors=[180, 180, 180]))
+            semantics = _policy_point_cloud_semantics(
+                entry,
+                goal_marker_points=goal_marker_points,
+                goal_marker_radius=goal_marker_radius,
+            )
+            rr.log(
+                "policy_input/point_cloud",
+                rr.Points3D(
+                    semantics["all_points"], colors=semantics["all_colors"]
+                ),
+            )
             robot_points = points[np.asarray(entry["robot_mask"], dtype=bool)[valid]]
             if robot_points.size:
-                rr.log("world/robot_points", rr.Points3D(robot_points, colors=[0, 128, 255]))
+                rr.log(
+                    "policy_input/robot_points",
+                    rr.Points3D(robot_points, colors=[0, 128, 255]),
+                )
             obstacle_mask = entry.get("obstacle_mask")
             if obstacle_mask is not None:
                 obstacle_points = points[np.asarray(obstacle_mask, dtype=bool)[valid]]
                 if obstacle_points.size:
                     rr.log(
-                        "world/obstacle_points",
+                        "policy_input/obstacle_points",
                         rr.Points3D(obstacle_points, colors=[180, 90, 20]),
                     )
+            scene_mask = ~np.asarray(entry["robot_mask"], dtype=bool)[valid]
+            if obstacle_mask is not None:
+                scene_mask &= ~np.asarray(obstacle_mask, dtype=bool)[valid]
+            scene_points = points[scene_mask]
+            if scene_points.size:
+                rr.log(
+                    "policy_input/scene_points",
+                    rr.Points3D(scene_points, colors=[160, 160, 160]),
+                )
+            goal_points = semantics["points"][semantics["goal_mask"]]
+            if goal_points.size:
+                rr.log(
+                    "policy_input/goal_marker_points",
+                    rr.Points3D(goal_points, colors=[0, 255, 0]),
+                )
         target = np.asarray(entry["target_position"], dtype=np.float32).reshape(1, 3)
         if np.all(np.isfinite(target)):
             rr.log("world/goal", rr.Points3D(target, colors=[0, 255, 0]))
         tcp = np.asarray(entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3].reshape(1, 3)
         if np.all(np.isfinite(tcp)):
             rr.log("world/tcp", rr.Points3D(tcp, colors=[255, 220, 0]))
+            executed = np.stack(
+                [
+                    np.asarray(previous["tcp_pose"], dtype=np.float32).reshape(-1)[:3]
+                    for previous in timeline[: step_idx + 1]
+                ],
+                axis=0,
+            )
+            if executed.shape[0] >= 2:
+                rr.log(
+                    "world/executed_tcp_path",
+                    rr.LineStrips3D([executed], colors=[255, 220, 0]),
+                )
+            clearance = _rerun_tcp_clearance(tcp.reshape(3), constraints or [])
+            if clearance is not None:
+                rr.log("metrics/min_clearance_m", rr.Scalar(clearance))
+                rr.log(
+                    "metrics/constraint_violation",
+                    rr.Scalar(1.0 if clearance < 0.0 else 0.0),
+                )
+    for replan in replans or []:
+        rr.set_time_sequence("step", int(replan["step"]))
+        replan_index = int(replan["replan_index"])
+        for candidate in replan.get("candidates", []):
+            candidate_index = int(candidate["index"])
+            path_points = np.asarray(candidate["eef_path"], dtype=np.float32)
+            color = [40, 200, 80] if candidate.get("feasible") else [220, 60, 40]
+            rr.log(
+                f"planning/replan_{replan_index:03d}/candidates/{candidate_index:03d}",
+                rr.LineStrips3D([path_points], colors=color),
+            )
+            rr.log(
+                f"planning/replan_{replan_index:03d}/scores/{candidate_index:03d}",
+                rr.Scalar(float(candidate.get("score", 0.0))),
+            )
+        selected_path = replan.get("selected_eef_path")
+        if selected_path is not None:
+            rr.log(
+                f"planning/replan_{replan_index:03d}/selected",
+                rr.LineStrips3D(
+                    [np.asarray(selected_path, dtype=np.float32)],
+                    colors=[255, 0, 255],
+                    radii=0.004,
+                ),
+            )
     rr.disconnect()
+
+
+def _policy_point_cloud_semantics(
+    entry: dict[str, Any],
+    *,
+    goal_marker_points: int,
+    goal_marker_radius: float,
+) -> dict[str, np.ndarray]:
+    point_cloud = np.asarray(entry["point_cloud"], dtype=np.float32).copy()
+    if goal_marker_points:
+        point_cloud = insert_goal_marker_points(
+            point_cloud,
+            np.asarray(entry["target_position"], dtype=np.float32),
+            num_points=goal_marker_points,
+            radius=goal_marker_radius,
+        )
+    valid = np.asarray(entry["point_valid_mask"], dtype=bool).copy()
+    robot = np.asarray(entry["robot_mask"], dtype=bool).copy()
+    obstacle = np.asarray(
+        entry.get("obstacle_mask", np.zeros_like(valid)), dtype=bool
+    ).copy()
+    goal = np.zeros_like(valid)
+    if goal_marker_points:
+        marker_count = min(goal_marker_points, goal.size)
+        goal[-marker_count:] = True
+        valid[-marker_count:] = True
+        robot[-marker_count:] = False
+        obstacle[-marker_count:] = False
+    colors = np.full((point_cloud.shape[0], 3), [160, 160, 160], dtype=np.uint8)
+    colors[~valid] = [40, 40, 40]
+    colors[robot] = [0, 128, 255]
+    colors[obstacle] = [180, 90, 20]
+    colors[goal] = [0, 255, 0]
+    return {
+        "all_points": point_cloud,
+        "all_colors": colors,
+        "points": point_cloud[valid],
+        "colors": colors[valid],
+        "robot_mask": robot[valid],
+        "obstacle_mask": obstacle[valid],
+        "goal_mask": goal[valid],
+    }
+
+
+def _rerun_tcp_clearance(tcp: np.ndarray, constraints: list[object]) -> float | None:
+    clearances: list[float] = []
+    for constraint in constraints:
+        region = getattr(constraint, "region", None)
+        if region is None or not hasattr(region, "signed_distance"):
+            continue
+        distance = float(region.signed_distance(tcp.reshape(1, 3))[0])
+        clearances.append(distance - float(getattr(constraint, "margin", 0.0)))
+    return min(clearances) if clearances else None
 
 
 def _copy_window(
