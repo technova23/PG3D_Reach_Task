@@ -239,11 +239,19 @@ Franka/Panda reach distribution. Report task metrics and require the predeclared
 success gate before interpreting steering results. Also run ITPS and reranking with
 zero guidance/constraint weight to catch unintended changes to ordinary inference.
 
-Current E1 result (2026-07-23): the 65k checkpoint reached 14/25 unique held-out
-dataset seeds (56%, Wilson 95% CI 37.1–73.3%) and completed the full 16-step stable
-hold on 12/25 (48%, Wilson 95% CI 30.0–66.5%). This misses the predeclared 15/25
-transient-reach gate by one episode, so E3 steering results must not yet be treated as
-definitive. The `K=1`, zero-guidance three-episode regression produced bit-identical
+Initial E1 result (2026-07-23): the 65k checkpoint reached 14/25 unique nominal
+validation seeds and completed the full 16-step stable hold on 12/25, missing the
+predeclared 15/25 transient-reach gate by one.
+
+Final E1 checkpoint selection (2026-07-23): the existing 100k checkpoint was evaluated
+on the exact same 25 nominal validation episodes without inspecting constrained
+outcomes. It reached 15/25 (60%, Wilson 95% CI 40.7–76.6%) and stably held 14/25
+(56%, Wilson 95% CI 37.1–73.3%), so it clears the unchanged gate exactly and is locked
+for E3. The artifact-enabled replication produced identical endpoint rows plus five
+validated MP4/`.rrd` pairs. Because these 25 episodes were used for checkpoint
+selection, the definitive E3 constrained-test episode set must be disjoint.
+
+The `K=1`, zero-guidance three-episode regression produced bit-identical
 base/rejection/reranking chunks on every seed; ITPS remained different because its
 zero-energy path still uses the isolated DDPM/MCMC sampler rather than ordinary DDIM.
 

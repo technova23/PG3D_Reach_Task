@@ -63,12 +63,18 @@ policy seed per episode, fingerprints serialized constraints, records source/che
 identities, rejects mismatched method pairs, and reports CUDA-synchronized end-to-end
 action-selection latency. A one-step live ManiSkill smoke passed for base, rejection,
 reranking, and ITPS on the same dataset episode and constraint.
-E1 now has an explicit no-constraint evaluator mode and a completed 25-episode nominal gate for
-the 65k checkpoint. It reached 14/25 episodes and stably held 12/25, so it missed the existing
-15/25 interpretation gate by one. Five deterministic MP4/`.rrd` pairs were produced. A separate
-three-episode `K=1`, zero-guidance regression produced bit-identical base/rejection/reranking
-chunks and complete MP4/`.rrd` pairs for all four methods; ITPS appropriately remained different
-because its zero-energy path still uses DDPM/MCMC inference.
+E1 now has an explicit no-constraint evaluator mode and a completed fixed 25-episode
+nominal checkpoint gate. The initial 65k checkpoint reached 14/25 and stably held
+12/25, missing the 15/25 gate by one. The existing 100k checkpoint was then evaluated
+on the same nominal-validation episodes without using constrained outcomes: it
+reached 15/25 (60%) and stably held 14/25 (56%), clearing the unchanged gate exactly.
+It is now locked for E3, whose definitive constrained-test episodes must be disjoint
+from these 25 checkpoint-selection episodes. A deterministic artifact-enabled
+replication had identical endpoints and produced five validated MP4/`.rrd` pairs.
+A separate three-episode `K=1`, zero-guidance regression produced bit-identical
+base/rejection/reranking chunks and complete MP4/`.rrd` pairs for all four methods;
+ITPS appropriately remained different because its zero-energy path still uses
+DDPM/MCMC inference.
 E2 has its first end-to-end realistic-obstacle slice: an axis-aligned box is now a
 collidable actor in the control environment rather than a render-only overlay. Live
 camera segmentation tracks it through cropping and Rerun, and runtime validation
@@ -198,12 +204,9 @@ the full point-cloud tensor into memory.
 
 ## Immediate next steps
 
-1. Inspect the E1 65k-checkpoint failures: it reached 14/25 unique held-out episodes and stably
-   held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
-2. Decide whether inference settings or another existing checkpoint can clear the same fixed
-   25-episode gate without selecting on the final constrained-test outcomes.
-3. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
-   the nominal gate.
+1. Lock a disjoint E3 constrained-test episode set for the selected 100k checkpoint.
+2. Build nominal-path realistic-obstacle constraints without tuning on method outcomes.
+3. Run a small paired E3 pilot with required MP4/`.rrd` artifacts before scaling.
 
 ## Active risks
 

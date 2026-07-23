@@ -661,7 +661,7 @@ empty constraint program:
 ```bash
 uv run python scripts/eval_constrained_reach.py \
   --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
-  --checkpoint /scratch2/skills/train_final_Arya/step_00065000.pt \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
   --methods base \
   --source dataset \
   --unique-dataset-seeds \
@@ -677,7 +677,7 @@ uv run python scripts/eval_constrained_reach.py \
   --plots \
   --profile \
   --sync-cuda-timers \
-  --output-dir artifacts/e1-nominal-step-65000 \
+  --output-dir artifacts/e1-nominal-step-100000-v2 \
   --allow-failure
 ```
 
@@ -711,11 +711,13 @@ These are nominal-policy and implementation-regression runs, not constrained-tas
 results. ITPS still uses its isolated DDPM/MCMC inference procedure when the guide
 ratio is zero, so equality with ordinary DDIM is not expected.
 
-The 2026-07-23 E1 run is stored under
-`artifacts/e1-nominal-step-65000-v2`. On the 25 unique held-out seeds it reached
-14/25 episodes and held the goal for all 16 requested post-success steps on 12/25.
-This is below the predeclared 15/25 transient-success gate. Five deterministic MP4s
-and five matching Rerun files were written. The companion
+The initial 2026-07-23 E1 run under `artifacts/e1-nominal-step-65000-v2` reached
+14/25 episodes and stably held 12/25, below the predeclared 15/25 transient gate.
+The selected 100k checkpoint run under `artifacts/e1-nominal-step-100000-v2` reached
+15/25 and stably held 14/25, clearing the unchanged gate exactly. Its metrics-only
+and artifact-enabled runs had identical endpoints; the latter wrote five validated
+MP4/`.rrd` pairs. The 100k checkpoint is locked for E3, and the definitive constrained
+test set must exclude these 25 nominal checkpoint-selection episodes. The companion
 `artifacts/e1-zero-guidance-step-65000` regression wrote MP4/`.rrd` pairs for all
 three episodes and all four methods; base, rejection, and reranking chunks were
 bit-identical for every seed at `K=1`.
