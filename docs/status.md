@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-07-09
+Last updated: 2026-07-23
 
 ## Current objective
 
@@ -103,6 +103,19 @@ converted with `scripts/convert_xarm_m1_to_m2.py` before use on this branch.
 The current mixed-Zarr audit also has a dedicated interactive exporter,
 `scripts/export_real_sim_episode_overlay_rerun.py`, which overlays full real and sim episodes in
 distinct colors on a normalized-progress Rerun timeline without transforming or recropping points.
+The follow-up camera/alignment audit is documented in
+`docs/explainations/real_sim_camera_alignment_audit.md`. For
+`/scratch2/skills/pg3d_real_sim_mixed.zarr`, joint-state-matched trimmed ICP found an approximately
+9.9 cm / 4.7 degree median real-to-sim point-cloud transform plus substantial episode-dependent
+variation (4.5 cm / 3.5 degree median distance from the global transform). Same-domain controls
+showed materially larger sim-to-sim than real-to-real variation, consistent with the configured
+per-episode camera and calibration randomization. These are point-cloud-domain registration
+measurements, not direct physical-camera pose estimates.
+The audited M1 artifact has now been converted into the validated M2/base-frame dataset
+`/scratch2/skills/pg3d_real_sim_mixed_m2.zarr`; the original M1 dataset is preserved. The
+converter now shifts absolute spatial fields in `metadata.json` as well as Zarr arrays, preventing
+M1 crop, goal, TCP, sampled-start, and waypoint metadata from remaining inside an M2-labeled
+artifact.
 
 ## Immediate next steps
 

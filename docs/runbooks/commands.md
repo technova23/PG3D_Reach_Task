@@ -105,6 +105,17 @@ python scripts/convert_xarm_m1_to_m2.py \
   --output-constraints-dir artifacts/xarm_m2_constraints
 ```
 
+The Zarr converter shifts both stored Cartesian arrays and absolute spatial fields embedded in
+`metadata.json`, including crop bounds, goal centers, per-episode poses/targets, sampled starts,
+and trajectory waypoints. Joint/action arrays, orientations, masks, relative offsets, radii, and
+episode boundaries are preserved.
+
+The mixed real/sim dataset converted on 2026-07-23 is:
+
+```text
+/scratch2/skills/pg3d_real_sim_mixed_m2.zarr
+```
+
 Run the simulator-free M2 frame/converter checks:
 
 ```bash

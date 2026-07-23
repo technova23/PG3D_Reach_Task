@@ -213,11 +213,85 @@ def _update_metadata_json(output_path: Path, *, shifted_arrays: list[str]) -> No
     metadata: dict[str, Any] = {}
     if metadata_path.exists():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    shifted_metadata_fields = metadata.get("shifted_metadata_fields")
+    if shifted_metadata_fields is None:
+        shifted_metadata_fields = _shift_metadata_coordinates(metadata)
     metadata["coordinate_frame"] = COORDINATE_FRAME
     metadata["converted_from"] = CONVERTED_FROM
     metadata["m1_to_m2_xyz_shift"] = M1_TO_M2_XYZ_SHIFT.astype(float).tolist()
     metadata["shifted_arrays"] = list(shifted_arrays)
+    metadata["shifted_metadata_fields"] = list(shifted_metadata_fields)
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _shift_metadata_coordinates(metadata: dict[str, Any]) -> list[str]:
+    """Shift known absolute Cartesian fields in reach-dataset metadata."""
+    shifted: list[str] = []
+
+    crop = metadata.get("crop")
+    if isinstance(crop, dict) and "bounds" in crop:
+        bounds = np.asarray(crop["bounds"], dtype=np.float32)
+        if bounds.shape != (3, 2):
+            raise ValueError(f"metadata crop.bounds must have shape (3, 2), got {bounds.shape}")
+        crop["bounds"] = (bounds + M1_TO_M2_XYZ_SHIFT.reshape(3, 1)).astype(float).tolist()
+        shifted.append("crop.bounds")
+
+    env_kwargs = metadata.get("env_kwargs")
+    if isinstance(env_kwargs, dict):
+        if "goal_center" in env_kwargs:
+            env_kwargs["goal_center"] = _shift_vector(env_kwargs["goal_center"], dims=3)
+            shifted.append("env_kwargs.goal_center")
+        goal_regions = env_kwargs.get("goal_regions")
+        if isinstance(goal_regions, list):
+            for region in goal_regions:
+                if isinstance(region, dict) and "center" in region:
+                    region["center"] = _shift_vector(region["center"], dims=3)
+            if any(isinstance(region, dict) and "center" in region for region in goal_regions):
+                shifted.append("env_kwargs.goal_regions[*].center")
+
+    episodes = metadata.get("episodes")
+    if isinstance(episodes, list):
+        field_counts: dict[str, int] = {}
+        for episode in episodes:
+            if not isinstance(episode, dict):
+                continue
+            for key in ("target_position",):
+                if key in episode:
+                    episode[key] = _shift_vector(episode[key], dims=3)
+                    field_counts[key] = field_counts.get(key, 0) + 1
+            for key in ("start_tcp_pose", "goal_pose"):
+                if key in episode:
+                    episode[key] = _shift_metadata_pose(episode[key])
+                    field_counts[key] = field_counts.get(key, 0) + 1
+            start_sampling = episode.get("start_sampling")
+            if isinstance(start_sampling, dict):
+                for key in ("actual_position", "sampled_position"):
+                    if key in start_sampling:
+                        start_sampling[key] = _shift_vector(start_sampling[key], dims=3)
+                        path = f"start_sampling.{key}"
+                        field_counts[path] = field_counts.get(path, 0) + 1
+            waypoints = episode.get("trajectory_waypoints")
+            if isinstance(waypoints, list):
+                episode["trajectory_waypoints"] = [
+                    _shift_vector(waypoint, dims=3) for waypoint in waypoints
+                ]
+                field_counts["trajectory_waypoints"] = (
+                    field_counts.get("trajectory_waypoints", 0) + 1
+                )
+        shifted.extend(
+            f"episodes[*].{field} ({count} episodes)"
+            for field, count in sorted(field_counts.items())
+        )
+    return shifted
+
+
+def _shift_metadata_pose(value: Any) -> list[float]:
+    pose = np.asarray(value, dtype=np.float32).reshape(-1)
+    if pose.size < 3:
+        raise ValueError(f"metadata pose must have at least 3 values, got {pose.shape}")
+    shifted = pose.copy()
+    shifted[:3] += M1_TO_M2_XYZ_SHIFT
+    return shifted.astype(float).tolist()
 
 
 if __name__ == "__main__":

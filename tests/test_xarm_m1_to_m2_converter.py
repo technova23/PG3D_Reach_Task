@@ -58,6 +58,34 @@ def test_convert_zarr_shifts_only_supported_cartesian_fields(tmp_path: Path) -> 
     metadata = json.loads((output_zarr / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["coordinate_frame"] == COORDINATE_FRAME
     assert metadata["converted_from"] == CONVERTED_FROM
+    np.testing.assert_allclose(
+        metadata["crop"]["bounds"],
+        [[0.515, 1.215], [-0.55, 0.55], [-0.02, 0.60]],
+    )
+    np.testing.assert_allclose(metadata["env_kwargs"]["goal_center"], [0.34, 0.0, 0.21])
+    np.testing.assert_allclose(metadata["env_kwargs"]["goal_regions"][0]["center"], [0.34, 0, 0.21])
+    np.testing.assert_allclose(metadata["episodes"][0]["target_position"], [0.715, 0.2, 0.3])
+    np.testing.assert_allclose(
+        metadata["episodes"][0]["start_tcp_pose"],
+        [0.815, 0.0, 0.4, 1.0, 0.0, 0.0, 0.0],
+    )
+    np.testing.assert_allclose(
+        metadata["episodes"][0]["goal_pose"],
+        [0.915, 0.1, 0.5, 1.0, 0.0, 0.0, 0.0],
+    )
+    np.testing.assert_allclose(
+        metadata["episodes"][0]["start_sampling"]["actual_position"],
+        [0.765, 0.1, 0.2],
+    )
+    np.testing.assert_allclose(
+        metadata["episodes"][0]["start_sampling"]["sampled_position"],
+        [0.775, 0.1, 0.2],
+    )
+    np.testing.assert_allclose(
+        metadata["episodes"][0]["trajectory_waypoints"],
+        [[0.815, 0.1, 0.3], [0.915, -0.1, 0.4]],
+    )
+    assert "crop.bounds" in metadata["shifted_metadata_fields"]
 
 
 def test_convert_constraints_dir_shifts_centers_and_cartesian_targets(tmp_path: Path) -> None:
@@ -172,6 +200,33 @@ def _write_tiny_zarr(path: Path) -> None:
     data.array(name="point_valid_mask", data=np.ones((2, 2), dtype=bool))
     meta.array(name="episode_ends", data=np.asarray([2], dtype=np.int64))
     (path / "metadata.json").write_text(
-        json.dumps({"name": "tiny_m1"}, indent=2),
+        json.dumps(
+            {
+                "name": "tiny_m1",
+                "crop": {
+                    "bounds": [[-0.1, 0.6], [-0.55, 0.55], [-0.02, 0.60]],
+                },
+                "env_kwargs": {
+                    "goal_center": [-0.275, 0.0, 0.21],
+                    "goal_regions": [{"center": [-0.275, 0.0, 0.21]}],
+                },
+                "episodes": [
+                    {
+                        "target_position": [0.1, 0.2, 0.3],
+                        "start_tcp_pose": [0.2, 0.0, 0.4, 1.0, 0.0, 0.0, 0.0],
+                        "goal_pose": [0.3, 0.1, 0.5, 1.0, 0.0, 0.0, 0.0],
+                        "start_sampling": {
+                            "actual_position": [0.15, 0.1, 0.2],
+                            "sampled_position": [0.16, 0.1, 0.2],
+                        },
+                        "trajectory_waypoints": [
+                            [0.2, 0.1, 0.3],
+                            [0.3, -0.1, 0.4],
+                        ],
+                    },
+                ],
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
