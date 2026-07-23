@@ -306,9 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     artifact_seed = args.artifact_selection_seed
     video_episode_indices = (
-        set(spec.output_index for spec in specs)
-        if args.video
-        else set(
+        set(
             select_artifact_episode_indices(
                 [spec.output_index for spec in specs],
                 selection=args.artifact_selection,
@@ -317,15 +315,21 @@ def main(argv: list[str] | None = None) -> int:
                 every_episodes=args.video_every_episodes,
             )
         )
+        if args.video
+        else set()
     )
-    rerun_episode_indices = set(
-        select_artifact_episode_indices(
-            [spec.output_index for spec in specs],
-            selection=args.artifact_selection,
-            count=args.artifact_episode_count,
-            seed=artifact_seed,
-            every_episodes=args.rerun_every_episodes,
+    rerun_episode_indices = (
+        set(
+            select_artifact_episode_indices(
+                [spec.output_index for spec in specs],
+                selection=args.artifact_selection,
+                count=args.artifact_episode_count,
+                seed=artifact_seed,
+                every_episodes=args.rerun_every_episodes,
+            )
         )
+        if args.rerun
+        else set()
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -781,6 +785,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Directory containing precomputed constraints/episode_XXX.json files.",
     )
+    parser.add_argument(
+        "--no-constraints",
+        action="store_true",
+        help=(
+            "Disable constraint generation/loading for the E1 nominal checkpoint gate. "
+            "All methods receive an empty constraint program."
+        ),
+    )
     parser.add_argument("--gripper-open", type=float, default=0.04)
     parser.add_argument(
         "--match-current-robot-points",
@@ -840,6 +852,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.episodes <= 0:
         raise ValueError("--episodes must be positive")
+    if args.no_constraints and args.constraints_dir is not None:
+        raise ValueError("--no-constraints and --constraints-dir are mutually exclusive")
     if args.episode_indices is not None and args.episode_indices_file is not None:
         raise ValueError("--episode-indices and --episode-indices-file are mutually exclusive")
     if args.episode_indices_file is not None and args.source != "dataset":
@@ -1048,9 +1062,16 @@ def run_eval_episode(
     was_training = policy.training
     policy.eval()
     try:
-        while steps < max_steps:
+        while True:
+            if first_success_step is None and steps >= max_steps:
+                break
             if first_success_step is not None and observed_post_success_steps >= post_success_steps:
                 break
+            step_limit = _episode_step_limit(
+                max_task_steps=max_steps,
+                post_success_steps=post_success_steps,
+                first_success_step=first_success_step,
+            )
             with timer.time(
                 "action_selection",
                 method=method,
@@ -1097,7 +1118,7 @@ def run_eval_episode(
             steps_to_execute = min(
                 decision.selected_chunk.horizon,
                 int(policy.n_action_steps) * execution_horizon_chunks,
-                max_steps - steps,
+                step_limit - steps,
             )
             if replans == 1:
                 print(
@@ -1163,7 +1184,11 @@ def run_eval_episode(
                     first_success_step = steps
                 elif first_success_step is not None:
                     observed_post_success_steps += 1
-                terminated_or_truncated = _bool_any(terminated) or _bool_any(truncated)
+                terminated_or_truncated = _episode_should_stop(
+                    terminated=terminated,
+                    truncated=truncated,
+                    success=success,
+                )
                 if terminated_or_truncated:
                     break
                 if (
@@ -1265,6 +1290,29 @@ def _env_control_dt(env: Any) -> float:
         if np.isfinite(frequency) and frequency > 0.0:
             return 1.0 / frequency
     raise RuntimeError("ManiSkill environment does not expose a valid control timestep")
+
+
+def _episode_should_stop(*, terminated: Any, truncated: Any, success: bool) -> bool:
+    """Ignore success termination while collecting the required post-success hold."""
+    if _bool_any(truncated):
+        return True
+    return bool(_bool_any(terminated) and not success)
+
+
+def _episode_step_limit(
+    *,
+    max_task_steps: int,
+    post_success_steps: int,
+    first_success_step: int | None,
+) -> int:
+    """Keep the nominal task horizon fixed while allowing a complete hold window."""
+    if max_task_steps <= 0 or post_success_steps < 0:
+        raise ValueError("invalid task or post-success step limit")
+    return (
+        max_task_steps
+        if first_success_step is None
+        else max_task_steps + post_success_steps
+    )
 
 
 def _select_decision(
@@ -1924,6 +1972,8 @@ def _constraints_for_episode(
     args: argparse.Namespace,
     zarr_context: dict[str, Any] | None = None,
 ) -> list[AvoidRegion]:
+    if args.no_constraints:
+        return []
     if args.constraints_dir is not None:
         return load_episode_constraints(_precomputed_constraint_path(args.constraints_dir, spec))
     if policy is None or adapter is None:
@@ -2711,6 +2761,8 @@ def _read_episode_indices_file(path: Path) -> list[int]:
 
 
 def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
+    if args.no_constraints:
+        return {"type": "none"}
     if args.constraints_dir is not None:
         return {
             "type": "precomputed",

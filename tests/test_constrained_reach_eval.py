@@ -53,6 +53,8 @@ from scripts.eval_constrained_reach import (
     _constraints_for_episode,
     _effective_projection_half_extents,
     _episode_policy_seed,
+    _episode_should_stop,
+    _episode_step_limit,
     _local_path_points_xy,
     _obs_windows_to_torch,
     _point_at_arc_fraction_xy,
@@ -224,6 +226,31 @@ def test_episode_policy_seed_is_order_independent_and_episode_specific() -> None
     assert _episode_policy_seed(7, 3) != _episode_policy_seed(7, 4)
     with pytest.raises(ValueError, match="non-negative"):
         _episode_policy_seed(-1, 0)
+
+
+def test_success_termination_does_not_prevent_hold_collection() -> None:
+    assert not _episode_should_stop(terminated=True, truncated=False, success=True)
+    assert _episode_should_stop(terminated=True, truncated=False, success=False)
+    assert _episode_should_stop(terminated=False, truncated=True, success=True)
+
+
+def test_post_success_hold_does_not_reduce_nominal_task_horizon() -> None:
+    assert (
+        _episode_step_limit(
+            max_task_steps=80,
+            post_success_steps=16,
+            first_success_step=None,
+        )
+        == 80
+    )
+    assert (
+        _episode_step_limit(
+            max_task_steps=80,
+            post_success_steps=16,
+            first_success_step=80,
+        )
+        == 96
+    )
 
 
 def test_validate_paired_episode_rows_checks_shared_protocol_identity() -> None:
@@ -576,6 +603,30 @@ def test_artifact_selection_summary_records_episode_indices_and_seeds() -> None:
     assert [row["seed"] for row in summary["rerun"]] == [20003]
 
 
+def test_disabled_artifact_modes_record_empty_selection(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "eval"),
+        ]
+    )
+    specs = [RolloutSpec(output_index=0, seed=1, source="fresh")]
+
+    summary = _artifact_selection_summary(
+        specs,
+        video_episode_indices=set(),
+        rerun_episode_indices=set(),
+        args=args,
+    )
+
+    assert summary["video"] == []
+    assert summary["rerun"] == []
+
+
 def test_eval_artifact_selection_seed_defaults_to_run_seed(tmp_path: Path) -> None:
     args = parse_eval_args(
         [
@@ -747,6 +798,61 @@ def test_dp3_adapter_batches_multiple_windows() -> None:
     assert len(chunks) == 3
     assert policy.batch_sizes == [2, 1]
     assert chunks[0].actions.shape == (2, 7)
+
+
+def test_eval_no_constraints_mode_is_explicit_and_mutually_exclusive(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint.pt"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--no-constraints",
+        ]
+    )
+
+    assert args.no_constraints is True
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        parse_eval_args(
+            [
+                "--dataset",
+                str(tmp_path / "dataset.zarr"),
+                "--checkpoint",
+                str(tmp_path / "checkpoint.pt"),
+                "--output-dir",
+                str(tmp_path / "output"),
+                "--no-constraints",
+                "--constraints-dir",
+                str(tmp_path / "constraints"),
+            ]
+        )
+
+
+def test_no_constraints_mode_returns_empty_program(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint.pt"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--no-constraints",
+        ]
+    )
+    spec = RolloutSpec(output_index=0, seed=1, source="fresh")
+
+    constraints = _constraints_for_episode(
+        None,
+        spec=spec,
+        crop_config=PointCloudCropConfig(num_points=4),
+        args=args,
+    )
+
+    assert constraints == []
+    assert _constraint_source_summary(args) == {"type": "none"}
 
 
 def test_constrained_eval_batch_input_inserts_goal_marker_tail_points() -> None:

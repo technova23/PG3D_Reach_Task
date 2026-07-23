@@ -64,6 +64,12 @@ policy seed per episode, fingerprints serialized constraints, records source/che
 identities, rejects mismatched method pairs, and reports CUDA-synchronized end-to-end
 action-selection latency. A one-step live ManiSkill smoke passed for base, rejection,
 reranking, and ITPS on the same dataset episode and constraint.
+E1 now has an explicit no-constraint evaluator mode and a completed 25-episode nominal gate for
+the 65k checkpoint. It reached 14/25 episodes and stably held 12/25, so it missed the existing
+15/25 interpretation gate by one. Five deterministic MP4/`.rrd` pairs were produced. A separate
+three-episode `K=1`, zero-guidance regression produced bit-identical base/rejection/reranking
+chunks and complete MP4/`.rrd` pairs for all four methods; ITPS appropriately remained different
+because its zero-energy path still uses DDPM/MCMC inference.
 
 ## Current phase
 
@@ -136,13 +142,14 @@ the full point-cloud tensor into memory.
 
 ## Immediate next steps
 
-1. Diagnose why the 20k balanced checkpoint reached only 7/25 held-out balanced validation
-   episodes in the first gate.
-2. Inspect successful and failed base rollouts from the held-out balanced set, then decide whether
-   to continue training, adjust inference settings, or revisit the training distribution.
-3. Rerun the nominal-path constraint builder only after the 25-episode base gate reaches at least
-   15 successes; target the original 25 selected successes for the starter constrained eval.
-4. Run P10 base/rejection/reranking on the fixed base-success subset only after that gate passes.
+1. Inspect the E1 65k-checkpoint failures: it reached 14/25 unique held-out episodes and stably
+   held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
+2. Decide whether inference settings or another existing checkpoint can clear the same fixed
+   25-episode gate without selecting on the final constrained-test outcomes.
+3. Implement and validate E2 realistic camera-visible obstacle actors and matched simulator-known
+   collision geometry; this engineering work does not depend on the nominal gate passing.
+4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
+   the nominal gate.
 
 ## Active risks
 

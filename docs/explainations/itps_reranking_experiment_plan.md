@@ -209,6 +209,14 @@ Franka/Panda reach distribution. Report task metrics and require the predeclared
 success gate before interpreting steering results. Also run ITPS and reranking with
 zero guidance/constraint weight to catch unintended changes to ordinary inference.
 
+Current E1 result (2026-07-23): the 65k checkpoint reached 14/25 unique held-out
+dataset seeds (56%, Wilson 95% CI 37.1–73.3%) and completed the full 16-step stable
+hold on 12/25 (48%, Wilson 95% CI 30.0–66.5%). This misses the predeclared 15/25
+transient-reach gate by one episode, so E3 steering results must not yet be treated as
+definitive. The `K=1`, zero-guidance three-episode regression produced bit-identical
+base/rejection/reranking chunks on every seed; ITPS remained different because its
+zero-energy path still uses the isolated DDPM/MCMC sampler rather than ordinary DDIM.
+
 ### E2 — Realistic obstacle embodiment and observation validation
 
 Replace visual-only floating keep-out spheres with static simulator actors representing
@@ -353,6 +361,10 @@ the run, checkpoint, dataset/source episode, simulator seed, shared policy seed,
 SHA-256 constraint identity; the evaluator rejects incomplete or mismatched method
 pairs. CUDA-synchronized action-selection timing records total, median, p90, and p95
 latency.
+An explicit `--no-constraints` mode supports the E1 nominal gate without fabricating a
+distant or zero-weight obstacle. Success termination is ignored only while collecting
+the configured post-success hold, and that hold extends beyond rather than consumes
+the nominal task-step budget.
 
 Before the paper-scale comparison, add:
 
