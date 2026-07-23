@@ -273,9 +273,12 @@ requested minimum of 32. Rotated boxes are also implemented: yaw is serialized i
 wireframes, and the collidable actor. A 35-degree smoke retained 36 final obstacle
 points and produced its MP4/`.rrd` pair. A named tall-carton family now supplies
 predeclared half-extents `[0.055, 0.08, 0.16]`; its 20-degree smoke retained 46 final
-obstacle points and logs obstacle ID, family, pose, and exact collision geometry. E2
-is not complete: implement cabinet and cylinder families and validate each with the
-same count-and-artifact protocol.
+obstacle points and logs obstacle ID, family, pose, and exact collision geometry. The
+curved family is a true finite `CylinderRegion`, not a box proxy: NumPy metrics, Torch
+guidance, Rerun wireframes, and the collidable actor use the same radius and
+half-length. Its corrected vertical-cylinder smoke retained 36 final points. E2 is not
+complete: implement the composite cabinet family and validate simulator
+contact-versus-clearance agreement.
 
 ### E3 — Primary constrained-reach comparison
 

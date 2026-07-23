@@ -784,6 +784,32 @@ uv run python scripts/eval_constrained_reach.py \
 The carton preset uses half-extents `[0.055, 0.08, 0.16]` metres. Explicit
 `--avoid-box-half-extents` values override the preset.
 
+For the curved-object family:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00065000.pt \
+  --methods base \
+  --source dataset \
+  --episode-indices 0 \
+  --device cuda \
+  --embody-obstacle \
+  --obstacle-family cylinder \
+  --obstacle-point-quota 32 \
+  --max-steps 1 \
+  --post-success-steps 0 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --output-dir artifacts/e2-cylinder-smoke \
+  --allow-failure
+```
+
+The cylinder preset is vertical, with radius `0.055` m and half-length `0.12` m.
+These values are serialized as a `CylinderRegion` and consumed directly by NumPy and
+Torch signed-distance implementations.
+
 Longer multi-chunk planning smoke:
 
 ```bash

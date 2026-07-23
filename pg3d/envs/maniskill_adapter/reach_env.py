@@ -90,19 +90,30 @@ class PG3DReachEnv(BaseEnv):
                 raise ValueError(
                     "pg3d_obstacle_half_extents must contain three positive values"
                 )
-            self.pg3d_obstacle = actors.build_box(
-                self.scene,
-                half_sizes=half_extents.tolist(),
-                color=(
-                    [0.72, 0.50, 0.22, 1.0]
-                    if self.pg3d_obstacle_family == "carton"
-                    else [0.55, 0.32, 0.12, 1.0]
-                ),
-                name="pg3d_obstacle",
-                body_type="kinematic",
-                add_collision=True,
-                initial_pose=sapien.Pose(p=[0.0, 0.0, -10.0]),
-            )
+            common = {
+                "scene": self.scene,
+                "name": "pg3d_obstacle",
+                "body_type": "kinematic",
+                "add_collision": True,
+                "initial_pose": sapien.Pose(p=[0.0, 0.0, -10.0]),
+            }
+            if self.pg3d_obstacle_family == "cylinder":
+                self.pg3d_obstacle = actors.build_cylinder(
+                    radius=float(half_extents[0]),
+                    half_length=float(half_extents[2]),
+                    color=[0.25, 0.45, 0.72, 1.0],
+                    **common,
+                )
+            else:
+                self.pg3d_obstacle = actors.build_box(
+                    half_sizes=half_extents.tolist(),
+                    color=(
+                        [0.72, 0.50, 0.22, 1.0]
+                        if self.pg3d_obstacle_family == "carton"
+                        else [0.55, 0.32, 0.12, 1.0]
+                    ),
+                    **common,
+                )
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict[str, Any]) -> None:
         with torch.device(self.device):
@@ -146,11 +157,19 @@ class PG3DReachEnv(BaseEnv):
                     obstacle_xyz = torch.as_tensor(
                         obstacle_center, dtype=torch.float32
                     ).reshape(1, 3).expand(batch_size, -1)
-                yaw = float(options.get("pg3d_obstacle_yaw", 0.0))
-                obstacle_quat = torch.tensor(
-                    [[np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)]],
-                    dtype=torch.float32,
-                ).expand(batch_size, -1)
+                if self.pg3d_obstacle_family == "cylinder":
+                    # ManiSkill's primitive is X-axis aligned; rotate +X onto +Z
+                    # so it matches CylinderRegion's documented world-Z axis.
+                    obstacle_quat = torch.tensor(
+                        [[np.sqrt(0.5), 0.0, -np.sqrt(0.5), 0.0]],
+                        dtype=torch.float32,
+                    ).expand(batch_size, -1)
+                else:
+                    yaw = float(options.get("pg3d_obstacle_yaw", 0.0))
+                    obstacle_quat = torch.tensor(
+                        [[np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)]],
+                        dtype=torch.float32,
+                    ).expand(batch_size, -1)
                 self.pg3d_obstacle.set_pose(
                     Pose.create_from_pq(obstacle_xyz, obstacle_quat)
                 )

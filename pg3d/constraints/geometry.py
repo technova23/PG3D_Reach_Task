@@ -7,7 +7,7 @@ import numpy as np
 
 from pg3d.world_model.types import Array, as_float_array
 
-RegionType = Literal["sphere", "box", "rect2d"]
+RegionType = Literal["sphere", "box", "cylinder", "rect2d"]
 
 
 class Region(Protocol):
@@ -100,6 +100,48 @@ class BoxRegion:
 
 
 @dataclass(frozen=True)
+class CylinderRegion:
+    """Finite cylinder aligned with the world Z axis."""
+
+    center: Array
+    radius: float
+    half_length: float
+    region_type: RegionType = "cylinder"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "center", _vector3(self.center, name="center"))
+        radius = float(self.radius)
+        half_length = float(self.half_length)
+        if radius <= 0.0 or not np.isfinite(radius):
+            raise ValueError("radius must be a positive finite value")
+        if half_length <= 0.0 or not np.isfinite(half_length):
+            raise ValueError("half_length must be a positive finite value")
+        object.__setattr__(self, "radius", radius)
+        object.__setattr__(self, "half_length", half_length)
+
+    def signed_distance(self, points: Array) -> Array:
+        local = _points(points) - self.center.reshape(1, 3)
+        d = np.stack(
+            [
+                np.linalg.norm(local[:, :2], axis=1) - self.radius,
+                np.abs(local[:, 2]) - self.half_length,
+            ],
+            axis=1,
+        )
+        outside = np.linalg.norm(np.maximum(d, 0.0), axis=1)
+        inside = np.minimum(np.max(d, axis=1), 0.0)
+        return outside + inside
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "type": self.region_type,
+            "center": self.center.tolist(),
+            "radius": self.radius,
+            "half_length": self.half_length,
+        }
+
+
+@dataclass(frozen=True)
 class RectRegion2D:
     """Axis-aligned rectangle keep-out in the XY plane, infinite in Z.
 
@@ -147,6 +189,12 @@ def region_from_json(config: dict[str, Any]) -> Region:
             center=config["center"],
             half_extents=config["half_extents"],
             yaw=float(config.get("yaw", 0.0)),
+        )
+    if region_type == "cylinder":
+        return CylinderRegion(
+            center=config["center"],
+            radius=float(config["radius"]),
+            half_length=float(config["half_length"]),
         )
     if region_type == "rect2d":
         return RectRegion2D(center=config["center"], half_extents=config["half_extents"])

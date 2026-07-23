@@ -34,6 +34,7 @@ from pg3d.constraints import (
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
+    CylinderRegion,
     RectRegion2D,
     SphereRegion,
 )
@@ -111,6 +112,7 @@ EvalMethod = Literal["base", "rejection", "reranking", "itps"]
 GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
 _CARTON_HALF_EXTENTS = (0.055, 0.08, 0.16)
+_CYLINDER_DIMENSIONS = (0.055, 0.055, 0.12)
 
 
 @dataclass(frozen=True)
@@ -691,7 +693,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--avoid-weight", type=float, default=1.0)
     parser.add_argument(
         "--avoid-shape",
-        choices=["sphere", "box", "cuboid"],
+        choices=["sphere", "box", "cuboid", "cylinder"],
         default="sphere",
         help=(
             "Shape of the placed avoid region. Applies to all placement modes. The region "
@@ -839,11 +841,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--obstacle-family",
-        choices=["box", "carton"],
+        choices=["box", "carton", "cylinder"],
         default="box",
         help=(
             "Named embodied-obstacle family. Carton defaults to half-extents "
-            f"{_CARTON_HALF_EXTENTS}; explicit --avoid-box-half-extents overrides them."
+            f"{_CARTON_HALF_EXTENTS}; cylinder uses radius/half-length encoded as "
+            f"{_CYLINDER_DIMENSIONS}. Explicit --avoid-box-half-extents overrides."
         ),
     )
     parser.add_argument("--gripper-open", type=float, default=0.04)
@@ -907,8 +910,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--episodes must be positive")
     if args.no_constraints and args.constraints_dir is not None:
         raise ValueError("--no-constraints and --constraints-dir are mutually exclusive")
-    if args.embody_obstacle and args.avoid_shape not in ("box", "cuboid"):
-        raise ValueError("--embody-obstacle currently requires --avoid-shape box")
+    if args.embody_obstacle and args.obstacle_family == "cylinder":
+        args.avoid_shape = "cylinder"
+        if args.avoid_box_half_extents is None:
+            args.avoid_box_half_extents = list(_CYLINDER_DIMENSIONS)
+    if args.embody_obstacle and args.avoid_shape not in ("box", "cuboid", "cylinder"):
+        raise ValueError(
+            "--embody-obstacle currently requires a box or cylinder avoid shape"
+        )
+    if (
+        args.embody_obstacle
+        and args.obstacle_family != "cylinder"
+        and args.avoid_shape == "cylinder"
+    ):
+        raise ValueError("--avoid-shape cylinder requires --obstacle-family cylinder")
     if args.embody_obstacle and args.constraints_dir is not None:
         raise ValueError(
             "--embody-obstacle does not yet support --constraints-dir because actor "
@@ -1372,7 +1387,11 @@ def run_eval_episode(
                 "obstacle_family": obstacle_family,
                 "obstacle_pose": {
                     "center": constraints[0].region.center.astype(float).tolist(),
-                    "yaw": float(constraints[0].region.yaw),
+                    "yaw": (
+                        float(constraints[0].region.yaw)
+                        if isinstance(constraints[0].region, BoxRegion)
+                        else 0.0
+                    ),
                 },
                 "obstacle_collision_geometry": constraints[0].region.to_json(),
                 "obstacle_points_raw": min(raw_counts, default=0),
@@ -1953,14 +1972,14 @@ def _entry_robot_points(entry: Entry) -> np.ndarray:
 
 
 def _clear_region_from_robot(
-    region: SphereRegion | BoxRegion,
+    region: SphereRegion | BoxRegion | CylinderRegion,
     robot_points: np.ndarray,
     args: argparse.Namespace,
     *,
     clearance: float,
     name: str,
     max_iter: int = 64,
-) -> SphereRegion | BoxRegion:
+) -> SphereRegion | BoxRegion | CylinderRegion:
     """Shrink/translate an avoid region so it does not intersect the robot point cloud.
 
     A sphere is first shrunk toward --avoid-min-radius; if its center is still too close
@@ -1998,6 +2017,32 @@ def _clear_region_from_robot(
             file=sys.stderr,
         )
         return SphereRegion(center=center, radius=max(min_radius, radius))
+    if isinstance(region, CylinderRegion):
+        center = region.center.astype(np.float32).copy()
+        for _ in range(max_iter):
+            candidate = CylinderRegion(
+                center=center,
+                radius=region.radius,
+                half_length=region.half_length,
+            )
+            signed = candidate.signed_distance(pts)
+            min_sd = float(np.min(signed))
+            if min_sd >= clearance:
+                return candidate
+            nearest = pts[int(np.argmin(signed))]
+            direction = center - nearest
+            norm = float(np.linalg.norm(direction))
+            if norm < 1e-6:
+                direction = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+                norm = 1.0
+            center = (
+                center + direction / norm * ((clearance - min_sd) + 1e-3)
+            ).astype(np.float32)
+        return CylinderRegion(
+            center=center,
+            radius=region.radius,
+            half_length=region.half_length,
+        )
     # BoxRegion: translate away from nearest robot point until clear.
     center = region.center.astype(np.float32).copy()
     half_extents = region.half_extents.astype(np.float32)
@@ -2046,7 +2091,9 @@ def _finalize_constraints(
                 half_extents=region.half_extents,
                 yaw=np.deg2rad(float(args.obstacle_yaw_deg)),
             )
-        if enable_clearance and isinstance(region, (SphereRegion, BoxRegion)):
+        if enable_clearance and isinstance(
+            region, (SphereRegion, BoxRegion, CylinderRegion)
+        ):
             region = _clear_region_from_robot(
                 region,
                 robot_points,
@@ -2190,7 +2237,7 @@ def _avoid_region_of_shape(
     center: np.ndarray,
     radius: float,
     args: argparse.Namespace,
-) -> SphereRegion | BoxRegion:
+) -> SphereRegion | BoxRegion | CylinderRegion:
     """Build an avoid-region primitive of the configured shape at the given center.
 
     The center matches exactly where a sphere would be placed; only the shape differs.
@@ -2198,6 +2245,17 @@ def _avoid_region_of_shape(
     equal to the effective sphere radius so it occupies a comparable volume.
     """
     center = np.asarray(center, dtype=np.float32).reshape(3)
+    if getattr(args, "avoid_shape", "sphere") == "cylinder":
+        dimensions = (
+            np.asarray(args.avoid_box_half_extents, dtype=np.float32)
+            if args.avoid_box_half_extents is not None
+            else np.full(3, float(radius), dtype=np.float32)
+        )
+        return CylinderRegion(
+            center=center,
+            radius=float(dimensions[0]),
+            half_length=float(dimensions[2]),
+        )
     if getattr(args, "avoid_shape", "sphere") in ("box", "cuboid"):
         if args.avoid_box_half_extents is not None:
             half_extents = np.asarray(args.avoid_box_half_extents, dtype=np.float32)
@@ -3065,13 +3123,20 @@ def _embodied_obstacle_half_extents(
 def _embodied_obstacle_reset_options(
     constraints: list[AvoidRegion],
 ) -> dict[str, list[float] | float]:
-    if len(constraints) != 1 or not isinstance(constraints[0].region, BoxRegion):
+    if len(constraints) != 1 or not isinstance(
+        constraints[0].region, (BoxRegion, CylinderRegion)
+    ):
         raise ValueError(
-            "embodied obstacle evaluation currently requires exactly one box constraint"
+            "embodied obstacle evaluation requires exactly one box or cylinder constraint"
         )
+    yaw = (
+        float(constraints[0].region.yaw)
+        if isinstance(constraints[0].region, BoxRegion)
+        else 0.0
+    )
     return {
         "pg3d_obstacle_center": constraints[0].region.center.astype(float).tolist(),
-        "pg3d_obstacle_yaw": float(constraints[0].region.yaw),
+        "pg3d_obstacle_yaw": yaw,
     }
 
 
@@ -3085,7 +3150,12 @@ def _validate_embodied_obstacle_geometry(
     )
     if configured is None:
         raise ValueError("control environment has no configured pg3d obstacle actor")
-    expected = np.asarray(constraints[0].region.half_extents, dtype=np.float32)
+    region = constraints[0].region
+    expected = (
+        np.asarray(region.half_extents, dtype=np.float32)
+        if isinstance(region, BoxRegion)
+        else np.asarray([region.radius, region.radius, region.half_length], dtype=np.float32)
+    )
     actual = np.asarray(configured, dtype=np.float32)
     if actual.shape != (3,) or not np.allclose(actual, expected, atol=1e-7, rtol=0.0):
         raise ValueError(
@@ -3193,6 +3263,17 @@ def _add_constraint_overlay_actors(
                     p=region.center.tolist(),
                     q=[math.cos(half_yaw), 0.0, 0.0, math.sin(half_yaw)],
                 ),
+            )
+        elif isinstance(region, CylinderRegion):
+            actors.build_cylinder(
+                scene,
+                radius=float(region.radius),
+                half_length=float(region.half_length),
+                color=rgba,
+                name=name,
+                body_type="kinematic",
+                add_collision=False,
+                initial_pose=sapien.Pose(p=region.center.tolist()),
             )
         elif isinstance(region, RectRegion2D):
             # Render the height-agnostic XY footprint as an extruded box for visibility.

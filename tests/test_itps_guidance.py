@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from pg3d.constraints.geometry import BoxRegion, RectRegion2D, SphereRegion
+from pg3d.constraints.geometry import (
+    BoxRegion,
+    CylinderRegion,
+    RectRegion2D,
+    SphereRegion,
+)
 from pg3d.constraints.programs import AvoidProjection, AvoidRegion
 from pg3d.constraints.torch_geometry import avoidance_energy
 from pg3d.policies.dp3.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
@@ -66,6 +71,19 @@ def test_rotated_box_torch_energy_matches_numpy_geometry() -> None:
 
     # First point is 0.25 m inside; second is outside.
     torch.testing.assert_close(energy, torch.tensor([0.25], dtype=torch.float64))
+
+
+def test_cylinder_torch_energy_matches_numpy_geometry() -> None:
+    region = CylinderRegion(
+        center=[0.0, 0.0, 0.5], radius=0.2, half_length=0.4
+    )
+    points = torch.tensor(
+        [[[0.0, 0.0, 0.5], [0.3, 0.0, 0.5]]], dtype=torch.float64
+    )
+
+    energy = avoidance_energy(points, [AvoidRegion(region)], mode="hinge")
+
+    torch.testing.assert_close(energy, torch.tensor([0.2], dtype=torch.float64))
 
 
 def test_avoidance_energy_validates_inputs_and_target() -> None:

@@ -11,6 +11,7 @@ from pg3d.constraints import (
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
+    CylinderRegion,
     RectRegion2D,
     SmoothnessCost,
     SphereRegion,
@@ -60,6 +61,23 @@ def test_rotated_box_signed_distance_and_json_round_trip() -> None:
     assert isinstance(restored, BoxRegion)
     assert restored.yaw == pytest.approx(np.pi / 2)
     np.testing.assert_allclose(restored.signed_distance([[0.0, 0.75, 0.0]]), [-0.25])
+
+
+def test_cylinder_signed_distance_and_json_round_trip() -> None:
+    cylinder = CylinderRegion(
+        center=[0.0, 0.0, 0.5], radius=0.2, half_length=0.4
+    )
+    distances = cylinder.signed_distance(
+        np.asarray(
+            [[0.0, 0.0, 0.5], [0.3, 0.0, 0.5], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+    )
+
+    np.testing.assert_allclose(distances, [-0.2, 0.1, 0.1], atol=1e-6)
+    restored = region_from_json(cylinder.to_json())
+    assert isinstance(restored, CylinderRegion)
+    np.testing.assert_allclose(restored.signed_distance([[0.3, 0.0, 0.5]]), [0.1])
 
 
 def test_rect2d_signed_distance_ignores_height() -> None:

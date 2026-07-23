@@ -15,6 +15,7 @@ from pg3d.constraints import (
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
+    CylinderRegion,
     SceneContext,
     SphereRegion,
     constraints_from_json,
@@ -45,7 +46,7 @@ class AvoidOverlayConfig:
     tolerance: float = 1e-6
     name: str = "direct_path_avoid_region"
     path_fraction: float = 0.5
-    shape: Literal["sphere", "box", "cuboid"] = "sphere"
+    shape: Literal["sphere", "box", "cuboid", "cylinder"] = "sphere"
     box_half_extents: tuple[float, float, float] | None = None
     target: Literal["eef", "robot"] = "eef"
 
@@ -206,7 +207,18 @@ def direct_path_avoid_region(
             half_extents = np.asarray(cfg.box_half_extents, dtype=np.float32)
         else:
             half_extents = np.full(3, float(effective_radius), dtype=np.float32)
-        region: SphereRegion | BoxRegion = BoxRegion(center=center, half_extents=half_extents)
+        region: SphereRegion | BoxRegion | CylinderRegion = BoxRegion(
+            center=center, half_extents=half_extents
+        )
+    elif cfg.shape == "cylinder":
+        if cfg.box_half_extents is not None:
+            dimensions = np.asarray(cfg.box_half_extents, dtype=np.float32)
+            radius = float(dimensions[0])
+            half_length = float(dimensions[2])
+        else:
+            radius = float(effective_radius)
+            half_length = float(effective_radius)
+        region = CylinderRegion(center=center, radius=radius, half_length=half_length)
     else:
         region = SphereRegion(center=center, radius=effective_radius)
     return AvoidRegion(

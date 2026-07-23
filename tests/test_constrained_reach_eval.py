@@ -899,7 +899,7 @@ def test_embodied_obstacle_rejects_unsupported_geometry(tmp_path: Path) -> None:
         str(tmp_path / "output"),
         "--embody-obstacle",
     ]
-    with pytest.raises(ValueError, match="requires --avoid-shape box"):
+    with pytest.raises(ValueError, match="requires a box or cylinder"):
         parse_eval_args(common)
     with pytest.raises(ValueError, match="exactly one avoid region"):
         parse_eval_args(
@@ -934,6 +934,27 @@ def test_carton_family_has_reproducible_default_geometry(tmp_path: Path) -> None
     assert args.avoid_box_half_extents == pytest.approx([0.055, 0.08, 0.16])
     assert _embodied_obstacle_half_extents(args) == pytest.approx(
         (0.055, 0.08, 0.16)
+    )
+
+
+def test_cylinder_family_has_reproducible_default_geometry(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint.pt"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--embody-obstacle",
+            "--obstacle-family",
+            "cylinder",
+        ]
+    )
+
+    assert args.avoid_shape == "cylinder"
+    assert _embodied_obstacle_half_extents(args) == pytest.approx(
+        (0.055, 0.055, 0.12)
     )
 
 

@@ -6,10 +6,16 @@ import sys
 import numpy as np
 import pytest
 
-from pg3d.constraints import AvoidRegion, BoxRegion, SmoothnessCost, SphereRegion
+from pg3d.constraints import (
+    AvoidRegion,
+    BoxRegion,
+    SmoothnessCost,
+    SphereRegion,
+)
 from pg3d.viz.constraints import (
     avoid_region_line_visuals,
     box_wireframe,
+    cylinder_wireframe,
     sphere_wireframe,
 )
 
@@ -52,6 +58,20 @@ def test_rotated_box_wireframe_rotates_xy_extents() -> None:
     np.testing.assert_allclose(vertices[:, 0].max(), 0.3, atol=1e-6)
     np.testing.assert_allclose(vertices[:, 1].min(), -0.1, atol=1e-6)
     np.testing.assert_allclose(vertices[:, 1].max(), 0.1, atol=1e-6)
+
+
+def test_cylinder_wireframe_matches_radius_and_height() -> None:
+    strips = cylinder_wireframe(
+        np.asarray([0.1, -0.2, 0.5]),
+        radius=0.2,
+        half_length=0.3,
+        segments=16,
+    )
+    vertices = np.concatenate(strips, axis=0)
+
+    assert len(strips) == 6
+    np.testing.assert_allclose(vertices[:, 2].min(), 0.2, atol=1e-6)
+    np.testing.assert_allclose(vertices[:, 2].max(), 0.8, atol=1e-6)
 
 
 def test_avoid_region_line_visuals_ignore_non_avoid_constraints() -> None:

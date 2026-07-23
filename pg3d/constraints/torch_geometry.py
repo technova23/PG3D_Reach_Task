@@ -6,7 +6,12 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 
-from pg3d.constraints.geometry import BoxRegion, RectRegion2D, SphereRegion
+from pg3d.constraints.geometry import (
+    BoxRegion,
+    CylinderRegion,
+    RectRegion2D,
+    SphereRegion,
+)
 from pg3d.constraints.programs import AvoidProjection, AvoidRegion
 
 AvoidanceEnergyMode = Literal["smooth", "hinge"]
@@ -44,7 +49,7 @@ def avoidance_energy(
 
 def _signed_distance(
     points: torch.Tensor,
-    region: SphereRegion | BoxRegion | RectRegion2D,
+    region: SphereRegion | BoxRegion | CylinderRegion | RectRegion2D,
 ) -> torch.Tensor:
     if isinstance(region, SphereRegion):
         center = torch.as_tensor(region.center, device=points.device, dtype=points.dtype)
@@ -66,6 +71,15 @@ def _signed_distance(
         q = torch.abs(local) - half_extents.view(1, 1, 3)
         outside = torch.linalg.norm(torch.clamp(q, min=0.0), dim=-1)
         inside = torch.minimum(torch.amax(q, dim=-1), torch.zeros_like(outside))
+        return outside + inside
+    if isinstance(region, CylinderRegion):
+        center = torch.as_tensor(region.center, device=points.device, dtype=points.dtype)
+        local = points - center.view(1, 1, 3)
+        radial = torch.linalg.norm(local[..., :2], dim=-1) - float(region.radius)
+        axial = torch.abs(local[..., 2]) - float(region.half_length)
+        d = torch.stack([radial, axial], dim=-1)
+        outside = torch.linalg.norm(torch.clamp(d, min=0.0), dim=-1)
+        inside = torch.minimum(torch.amax(d, dim=-1), torch.zeros_like(outside))
         return outside + inside
     if isinstance(region, RectRegion2D):
         center = torch.as_tensor(region.center, device=points.device, dtype=points.dtype)

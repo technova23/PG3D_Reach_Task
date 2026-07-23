@@ -1,6 +1,7 @@
 from pg3d.constraints.core import Constraint, SceneContext
 from pg3d.constraints.geometry import (
     BoxRegion,
+    CylinderRegion,
     RectRegion2D,
     Region,
     SphereRegion,
@@ -21,6 +22,7 @@ __all__ = [
     "AvoidRegion",
     "BoxRegion",
     "Constraint",
+    "CylinderRegion",
     "RectRegion2D",
     "Region",
     "SceneContext",

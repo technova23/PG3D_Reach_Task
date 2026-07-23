@@ -85,6 +85,10 @@ valid MP4/`.rrd` artifacts.
 A named tall-carton family is also live with predeclared dimensions, distinct visual
 material, and schema-complete obstacle ID/family/pose/collision fields. Its 20-degree
 smoke observed 457 raw points and retained 46 in the final policy input.
+The curved-object family now uses a finite vertical cylinder with matched collidable,
+serialized, NumPy, Torch, and Rerun geometry. Visual inspection caught and corrected
+ManiSkill's native X-axis cylinder orientation. The corrected smoke observed 218 raw
+points and retained 36 in the final policy input.
 
 ## Current phase
 
@@ -161,8 +165,8 @@ the full point-cloud tensor into memory.
    held 12/25, narrowly missing the predeclared 15/25 transient-reach gate.
 2. Decide whether inference settings or another existing checkpoint can clear the same fixed
    25-episode gate without selecting on the final constrained-test outcomes.
-3. Extend E2 from the validated box and carton families to cabinet and cylinder
-   actors.
+3. Implement the composite cabinet actor/constraint family and validate
+   simulator-contact versus signed-clearance agreement for every E2 family.
 4. Do not interpret the definitive E3 ITPS-versus-reranking comparison until a checkpoint clears
    the nominal gate.
 

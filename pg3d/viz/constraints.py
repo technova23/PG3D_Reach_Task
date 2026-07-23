@@ -5,7 +5,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pg3d.constraints import AvoidProjection, AvoidRegion, BoxRegion, SphereRegion
+from pg3d.constraints import (
+    AvoidProjection,
+    AvoidRegion,
+    BoxRegion,
+    CylinderRegion,
+    SphereRegion,
+)
 
 DEFAULT_AVOID_COLOR = (255, 64, 16)
 # Z range used to render the (height-agnostic) avoid_projection footprint as a
@@ -70,6 +76,18 @@ def avoid_region_line_visuals(
                     name=name,
                     line_strips=box_wireframe(
                         region.center, region.half_extents, yaw=region.yaw
+                    ),
+                )
+            )
+        elif isinstance(region, CylinderRegion):
+            visuals.append(
+                ConstraintLineVisual(
+                    name=name,
+                    line_strips=cylinder_wireframe(
+                        region.center,
+                        region.radius,
+                        region.half_length,
+                        segments=sphere_segments,
                     ),
                 )
             )
@@ -157,6 +175,47 @@ def box_wireframe(
         (3, 7),
     ]
     return [corners[list(edge)].astype(np.float32) for edge in edge_indices]
+
+
+def cylinder_wireframe(
+    center: np.ndarray,
+    radius: float,
+    half_length: float,
+    *,
+    segments: int = 64,
+) -> list[np.ndarray]:
+    """Return top/bottom circles and four vertical edges for a Z-axis cylinder."""
+    center_array = _vector3(center, name="center")
+    radius = float(radius)
+    half_length = float(half_length)
+    if radius <= 0.0 or half_length <= 0.0:
+        raise ValueError("radius and half_length must be positive")
+    if segments < 8:
+        raise ValueError("segments must be at least 8")
+    theta = np.linspace(0.0, 2.0 * np.pi, segments + 1, dtype=np.float32)
+    xy = np.stack([np.cos(theta) * radius, np.sin(theta) * radius], axis=1)
+    circles = [
+        np.concatenate(
+            [xy, np.full((segments + 1, 1), z, dtype=np.float32)], axis=1
+        )
+        + center_array
+        for z in (-half_length, half_length)
+    ]
+    verticals = []
+    for theta_value in np.linspace(0.0, 2.0 * np.pi, 4, endpoint=False):
+        offset = np.asarray(
+            [np.cos(theta_value) * radius, np.sin(theta_value) * radius, 0.0],
+            dtype=np.float32,
+        )
+        verticals.append(
+            np.stack(
+                [
+                    center_array + offset + [0.0, 0.0, -half_length],
+                    center_array + offset + [0.0, 0.0, half_length],
+                ]
+            ).astype(np.float32)
+        )
+    return [*circles, *verticals]
 
 
 def _vector3(value: object, *, name: str) -> np.ndarray:
