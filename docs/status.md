@@ -340,6 +340,10 @@ the full point-cloud tensor into memory.
   launcher covers both populations, resolves actor geometry from the builder manifest,
   refuses accidental output overwrite, and requires a labeled MP4/native-Rerun pair
   for every method/episode in addition to aggregate plots.
+- The first definitive v1 attempt was stopped and excluded after an initial-geometry
+  audit found one tall box already intersecting the sampled robot by 4.26 cm. Protocol
+  v2 deterministically searches only demonstration-path-intersecting placements with
+  at least 2 cm initial robot clearance, then recomputes that gate before method execution.
 - Constrained-evaluation MP4s now burn method/episode/seed, obstacle family, outcome,
   clearance, and contact state into every frame. The identical payload is embedded in
   native Rerun recordings and verified against the metrics row by the artifact manifest.

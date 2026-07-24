@@ -50,6 +50,7 @@ from pg3d.eval import (
 )
 from pg3d.world_model import ActionChunk, ImaginedRollout
 from scripts.build_nominal_path_constraints import (
+    _build_constraint,
     _dataset_demo_episode,
     _resolve_shared_grounded_geometry,
 )
@@ -88,6 +89,7 @@ from scripts.eval_constrained_reach import (
     _select_decision,
     _termination_reason,
     _validate_embodied_obstacle_geometry,
+    _validate_precomputed_initial_clearance,
     _write_artifact_manifest,
     validate_artifact_manifest,
 )
@@ -1341,6 +1343,9 @@ def test_dataset_demo_path_source_loads_complete_selected_episode() -> None:
                 [False, False, True, False, False, True, True],
                 dtype=bool,
             ),
+            "point_cloud": np.zeros((7, 4, 3), dtype=np.float32),
+            "robot_mask": np.asarray([[True, False, False, False]] * 7, dtype=bool),
+            "point_valid_mask": np.ones((7, 4), dtype=bool),
         },
     }
     spec = RolloutSpec(
@@ -1356,6 +1361,7 @@ def test_dataset_demo_path_source_loads_complete_selected_episode() -> None:
     assert row["success"] is True
     assert row["first_success_step"] == 2
     assert row["tcp_positions"].shape == (4, 3)
+    assert row["initial_robot_points"].shape == (1, 3)
     np.testing.assert_allclose(row["tcp_positions"][0], [0.0, 0.0, 0.4])
 
 
@@ -1368,6 +1374,7 @@ def test_shared_grounded_geometry_covers_highest_path_anchor() -> None:
         support_plane_z=0.0,
         path_height_margin=0.02,
         path_fraction=0.5,
+        initial_robot_clearance_margin=None,
     )
     rows = [
         {
@@ -1384,6 +1391,74 @@ def test_shared_grounded_geometry_covers_highest_path_anchor() -> None:
 
     assert resolved["box_half_extents"] == pytest.approx((0.055, 0.08, 0.31))
     assert resolved["cylinder_half_length"] is None
+
+
+def test_clearance_safe_builder_keeps_path_intersection() -> None:
+    args = SimpleNamespace(
+        avoid_radius=0.03,
+        path_fraction=0.5,
+        avoid_margin=0.0,
+        avoid_weight=1.0,
+        avoid_tolerance=1e-6,
+        avoid_shape="box",
+        obstacle_yaw_deg=0.0,
+        support_plane_z=0.0,
+        initial_robot_clearance_margin=0.02,
+        path_fraction_search_min=0.2,
+        path_fraction_search_max=0.8,
+        path_fraction_search_step=0.05,
+        anchor_offset_max_fraction=0.9,
+        anchor_offset_step_fraction=0.15,
+    )
+    path = np.stack(
+        [
+            np.linspace(0.0, 1.0, 101),
+            np.zeros(101),
+            np.full(101, 0.4),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    row = {
+        "dataset_episode_index": 7,
+        "initial_robot_points": np.asarray([[0.5, 0.0, 0.3]], dtype=np.float32),
+    }
+
+    constraint, placement = _build_constraint(
+        args,
+        row=row,
+        tcp_path=path,
+        resolved_geometry={
+            "box_half_extents": (0.05, 0.05, 0.21),
+            "cylinder_half_length": None,
+        },
+    )
+
+    assert placement["initial_robot_clearance"] >= 0.02
+    assert min_constraint_clearance(path, [constraint]) < 0.0
+
+
+def test_precomputed_initial_clearance_gate_rejects_impossible_episode() -> None:
+    constraint = AvoidRegion(
+        region=BoxRegion(
+            center=np.asarray([0.0, 0.0, 0.2], dtype=np.float32),
+            half_extents=np.asarray([0.1, 0.1, 0.2], dtype=np.float32),
+        )
+    )
+    context = {
+        "point_cloud": np.asarray(
+            [[0.0, 0.0, 0.2], [0.5, 0.5, 0.5]],
+            dtype=np.float32,
+        ),
+        "robot_mask": np.asarray([True, False]),
+        "point_valid_mask": np.asarray([True, True]),
+    }
+
+    with pytest.raises(ValueError, match="violates initial robot clearance"):
+        _validate_precomputed_initial_clearance(
+            [constraint],
+            zarr_context=context,
+            minimum_clearance=0.02,
+        )
 
 
 def test_locked_e3_protocol_requires_all_labeled_video_rerun_pairs() -> None:
@@ -1434,6 +1509,7 @@ def test_locked_e3_commands_resolve_manifest_geometry(tmp_path: Path) -> None:
     assert "--robot-clearance-metric" in evaluate
     assert "--terminate-on-obstacle-contact" in evaluate
     assert evaluate[evaluate.index("--obstacle-support-plane-z") + 1] == "0.0"
+    assert evaluate[evaluate.index("--precomputed-initial-clearance-margin") + 1] == "0.02"
     assert "--video" in evaluate
     assert "--rerun" in evaluate
     assert evaluate[evaluate.index("--artifact-selection") + 1] == "all"
@@ -1454,8 +1530,16 @@ def test_locked_e3_manifest_validation_checks_exact_episode_order(
             {"dataset_episode_index": 411},
         ],
         "selected": [
-            {"dataset_episode_index": 399},
-            {"dataset_episode_index": 411},
+            {
+                "dataset_episode_index": 399,
+                "initial_robot_clearance": 0.02,
+                "discrete_min_clearance": -0.01,
+            },
+            {
+                "dataset_episode_index": 411,
+                "initial_robot_clearance": 0.03,
+                "discrete_min_clearance": -0.02,
+            },
         ],
         "constraint_config": {
             "resolved_box_half_extents": [0.055, 0.08, 0.321],
@@ -1474,6 +1558,7 @@ def test_locked_e3_manifest_validation_checks_exact_episode_order(
         expected_path_source="dataset_demo",
         minimum_selected=2,
         expected_episode_indices=expected_indices,
+        minimum_initial_clearance=0.02,
     )
 
     assert loaded == manifest

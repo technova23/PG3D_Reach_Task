@@ -872,6 +872,13 @@ explicitly. For each comparison it saves `protocol_snapshot.json`, requests plot
 profiling, and sets `artifact-selection=all`: every method/episode row must therefore
 have a labeled MP4 plus its corresponding native Rerun point-cloud timeline.
 
+Protocol v2 also passes `--initial-robot-clearance-margin 0.02` to the builder and
+`--precomputed-initial-clearance-margin 0.02` to the evaluator. The builder searches
+only declared path-intersecting placements; the evaluator recomputes the signed
+clearance from the stored initial robot mask and fails before any method runs if a
+serialized obstacle starts too close to the robot. Do not use the partial v1
+comparison directory for results.
+
 With `--embody-obstacle`, this command terminates by default on the first raw PhysX
 contact between any robot link and an embodied-obstacle actor. The contact frame is
 saved, and the episode row records the collision step/body pairs and forces

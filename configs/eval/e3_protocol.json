@@ -1,6 +1,6 @@
 {
   "schema_version": "pg3d.e3_protocol.v1",
-  "protocol_id": "e3-grounded-carton-test-v1",
+  "protocol_id": "e3-grounded-carton-test-v2",
   "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
   "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
   "checkpoint_model": "ema",
@@ -16,6 +16,12 @@
     "obstacle_yaw_deg": 20.0,
     "path_fraction": 0.5,
     "path_height_margin": 0.02,
+    "initial_robot_clearance_margin": 0.02,
+    "path_fraction_search_min": 0.2,
+    "path_fraction_search_max": 0.8,
+    "path_fraction_search_step": 0.05,
+    "anchor_offset_max_fraction": 0.9,
+    "anchor_offset_step_fraction": 0.15,
     "support_plane_z": 0.0,
     "max_steps": 150,
     "post_success_steps": 16
@@ -67,14 +73,14 @@
     "full_distribution": {
       "path_source": "dataset_demo",
       "minimum_selected_episodes": 50,
-      "constraints_output_dir": "artifacts/e3-test-full-distribution-constraints-v1",
-      "evaluation_output_dir": "artifacts/e3-test-full-distribution-comparison-v1"
+      "constraints_output_dir": "artifacts/e3-test-full-distribution-constraints-v2",
+      "evaluation_output_dir": "artifacts/e3-test-full-distribution-comparison-v2"
     },
     "nominal_base_success": {
       "path_source": "policy_success",
       "minimum_selected_episodes": 1,
-      "constraints_output_dir": "artifacts/e3-test-nominal-base-success-constraints-v1",
-      "evaluation_output_dir": "artifacts/e3-test-nominal-base-success-comparison-v1"
+      "constraints_output_dir": "artifacts/e3-test-nominal-base-success-constraints-v2",
+      "evaluation_output_dir": "artifacts/e3-test-nominal-base-success-comparison-v2"
     }
   }
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ import numpy as np
 import torch
 import zarr
 
+from pg3d.constraints import BoxRegion
 from pg3d.envs.maniskill_adapter import register_pg3d_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import load_reach_metadata
 from pg3d.eval import (
@@ -72,10 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[dict[str, Any]] = []
     if args.path_source == "dataset_demo":
         root = zarr.open_group(str(args.dataset), mode="r")
-        rows = [
-            _dataset_demo_episode(root, spec=spec)
-            for spec in specs
-        ]
+        rows = [_dataset_demo_episode(root, spec=spec) for spec in specs]
     else:
         try:
             import gymnasium as gym
@@ -152,20 +151,11 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             selected_output_index = len(selected)
             tcp_path = _constraint_path(row)
-            constraint = nominal_path_avoid_region(
-                tcp_path,
-                config=NominalPathAvoidConfig(
-                    radius=args.avoid_radius,
-                    path_fraction=args.path_fraction,
-                    margin=args.avoid_margin,
-                    weight=args.avoid_weight,
-                    tolerance=args.avoid_tolerance,
-                    shape=args.avoid_shape,
-                    box_half_extents=resolved_geometry["box_half_extents"],
-                    yaw=np.deg2rad(float(args.obstacle_yaw_deg)),
-                    cylinder_half_length=resolved_geometry["cylinder_half_length"],
-                    support_plane_z=args.support_plane_z,
-                ),
+            constraint, placement = _build_constraint(
+                args,
+                row=row,
+                tcp_path=tcp_path,
+                resolved_geometry=resolved_geometry,
             )
             constraint_path = constraints_dir / f"episode_{selected_output_index:03d}.json"
             save_episode_constraints(constraint_path, [constraint])
@@ -188,6 +178,9 @@ def main(argv: list[str] | None = None) -> int:
                     "min_distance": row["min_distance"],
                     "first_success_step": row["first_success_step"],
                     "path_source": args.path_source,
+                    "resolved_path_fraction": placement["path_fraction"],
+                    "anchor_local_offset_fraction": placement["anchor_local_offset_fraction"],
+                    "initial_robot_clearance": placement["initial_robot_clearance"],
                 }
             )
     except Exception as exc:
@@ -228,10 +221,14 @@ def main(argv: list[str] | None = None) -> int:
             "obstacle_yaw_deg": args.obstacle_yaw_deg,
             "support_plane_z": args.support_plane_z,
             "path_height_margin": args.path_height_margin,
+            "initial_robot_clearance_margin": args.initial_robot_clearance_margin,
+            "path_fraction_search_min": args.path_fraction_search_min,
+            "path_fraction_search_max": args.path_fraction_search_max,
+            "path_fraction_search_step": args.path_fraction_search_step,
+            "anchor_offset_max_fraction": args.anchor_offset_max_fraction,
+            "anchor_offset_step_fraction": args.anchor_offset_step_fraction,
             "resolved_box_half_extents": resolved_geometry["box_half_extents"],
-            "resolved_cylinder_half_length": resolved_geometry[
-                "cylinder_half_length"
-            ],
+            "resolved_cylinder_half_length": resolved_geometry["cylinder_half_length"],
         },
         "attempts": attempts,
         "selected": selected,
@@ -310,15 +307,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "above the highest selected path anchor."
         ),
     )
+    parser.add_argument(
+        "--initial-robot-clearance-margin",
+        type=float,
+        default=None,
+        help=(
+            "When set, move the path-intersecting anchor deterministically until the "
+            "stored initial robot cloud has at least this signed clearance."
+        ),
+    )
+    parser.add_argument("--path-fraction-search-min", type=float, default=0.2)
+    parser.add_argument("--path-fraction-search-max", type=float, default=0.8)
+    parser.add_argument("--path-fraction-search-step", type=float, default=0.05)
+    parser.add_argument("--anchor-offset-max-fraction", type=float, default=0.9)
+    parser.add_argument("--anchor-offset-step-fraction", type=float, default=0.15)
     parser.add_argument("--min-successes", type=int, default=15)
     parser.add_argument("--allow-too-few-successes", action="store_true")
     args = parser.parse_args(argv)
     if args.episodes <= 0:
         raise ValueError("--episodes must be positive")
     if args.episode_indices is not None and args.episode_indices_file is not None:
-        raise ValueError(
-            "--episode-indices and --episode-indices-file are mutually exclusive"
-        )
+        raise ValueError("--episode-indices and --episode-indices-file are mutually exclusive")
     if args.max_steps <= 0:
         raise ValueError("--max-steps must be positive")
     if args.replan_stride is not None and args.replan_stride <= 0:
@@ -338,12 +347,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         or np.any(np.asarray(args.avoid_box_half_extents) <= 0.0)
     ):
         raise ValueError("--avoid-box-half-extents must contain three positive values")
-    if (
-        args.avoid_cylinder_half_length is not None
-        and (
-            not np.isfinite(args.avoid_cylinder_half_length)
-            or args.avoid_cylinder_half_length <= 0.0
-        )
+    if args.avoid_cylinder_half_length is not None and (
+        not np.isfinite(args.avoid_cylinder_half_length) or args.avoid_cylinder_half_length <= 0.0
     ):
         raise ValueError("--avoid-cylinder-half-length must be positive")
     if not np.isfinite(args.obstacle_yaw_deg):
@@ -352,6 +357,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--support-plane-z must be finite")
     if not np.isfinite(args.path_height_margin) or args.path_height_margin < 0.0:
         raise ValueError("--path-height-margin must be finite and non-negative")
+    if args.initial_robot_clearance_margin is not None and (
+        not np.isfinite(args.initial_robot_clearance_margin)
+        or args.initial_robot_clearance_margin < 0.0
+    ):
+        raise ValueError("--initial-robot-clearance-margin must be finite and non-negative")
+    if not (
+        0.0
+        <= args.path_fraction_search_min
+        <= args.path_fraction
+        <= args.path_fraction_search_max
+        <= 1.0
+    ):
+        raise ValueError("path fraction search bounds must contain --path-fraction within [0, 1]")
+    if args.path_fraction_search_step <= 0.0:
+        raise ValueError("--path-fraction-search-step must be positive")
+    if not 0.0 <= args.anchor_offset_max_fraction < 1.0:
+        raise ValueError("--anchor-offset-max-fraction must be in [0, 1)")
+    if args.anchor_offset_step_fraction <= 0.0:
+        raise ValueError("--anchor-offset-step-fraction must be positive")
     if args.min_successes < 0:
         raise ValueError("--min-successes must be non-negative")
     return args
@@ -385,31 +409,40 @@ def _dataset_demo_episode(root: Any, *, spec: RolloutSpec) -> dict[str, Any]:
     episode_ends = np.asarray(root["meta"]["episode_ends"][:], dtype=np.int64)
     episode_index = int(spec.dataset_episode_index)
     if not 0 <= episode_index < episode_ends.size:
-        raise IndexError(
-            f"dataset episode index {episode_index} outside [0, {episode_ends.size})"
-        )
+        raise IndexError(f"dataset episode index {episode_index} outside [0, {episode_ends.size})")
     start = 0 if episode_index == 0 else int(episode_ends[episode_index - 1])
     end = int(episode_ends[episode_index])
     tcp = np.asarray(root["data"]["tcp_pose"][start:end, :3], dtype=np.float32)
     target = np.asarray(root["data"]["target_position"][start:end], dtype=np.float32)
     success = np.asarray(root["data"]["success"][start:end], dtype=bool).reshape(-1)
+    point_cloud = np.asarray(root["data"]["point_cloud"][start], dtype=np.float32)
+    robot_mask = np.asarray(root["data"]["robot_mask"][start], dtype=bool).reshape(-1)
+    point_valid_mask = np.asarray(
+        root["data"]["point_valid_mask"][start],
+        dtype=bool,
+    ).reshape(-1)
     if tcp.ndim != 2 or tcp.shape[1] != 3 or tcp.shape[0] < 2:
-        raise ValueError(
-            f"dataset episode {episode_index} has invalid TCP path shape {tcp.shape}"
-        )
+        raise ValueError(f"dataset episode {episode_index} has invalid TCP path shape {tcp.shape}")
     if target.shape != tcp.shape:
         raise ValueError(
             f"dataset episode {episode_index} target shape {target.shape} != {tcp.shape}"
         )
     if success.shape != (tcp.shape[0],):
         raise ValueError(
-            f"dataset episode {episode_index} success shape {success.shape} "
-            f"!= {(tcp.shape[0],)}"
+            f"dataset episode {episode_index} success shape {success.shape} != {(tcp.shape[0],)}"
+        )
+    if point_cloud.ndim != 2 or point_cloud.shape[1] != 3:
+        raise ValueError(
+            f"dataset episode {episode_index} point cloud has invalid shape {point_cloud.shape}"
+        )
+    if robot_mask.shape != (point_cloud.shape[0],) or point_valid_mask.shape != (
+        point_cloud.shape[0],
+    ):
+        raise ValueError(
+            f"dataset episode {episode_index} robot/valid masks do not match {point_cloud.shape}"
         )
     first_success_indices = np.flatnonzero(success)
-    first_success_step = (
-        int(first_success_indices[0]) if first_success_indices.size else None
-    )
+    first_success_step = int(first_success_indices[0]) if first_success_indices.size else None
     distances = np.linalg.norm(tcp - target, axis=1)
     return {
         "spec": spec,
@@ -424,6 +457,7 @@ def _dataset_demo_episode(root: Any, *, spec: RolloutSpec) -> dict[str, Any]:
         "min_distance": float(np.min(distances)),
         "target_position": target[0],
         "tcp_positions": tcp,
+        "initial_robot_points": point_cloud[robot_mask & point_valid_mask],
     }
 
 
@@ -449,19 +483,18 @@ def _resolve_shared_grounded_geometry(
         }
     if not rows:
         raise ValueError("cannot resolve grounded geometry without selected paths")
+    fractions = (
+        _candidate_path_fractions(args)
+        if args.initial_robot_clearance_margin is not None
+        else [float(args.path_fraction)]
+    )
     anchor_heights = [
-        float(
-            _point_at_arc_fraction(
-                _constraint_path(row),
-                fraction=float(args.path_fraction),
-            )[2]
-        )
+        float(_point_at_arc_fraction(_constraint_path(row), fraction=fraction)[2])
         for row in rows
+        for fraction in fractions
     ]
     required_half_height = 0.5 * (
-        max(anchor_heights)
-        + float(args.path_height_margin)
-        - float(args.support_plane_z)
+        max(anchor_heights) + float(args.path_height_margin) - float(args.support_plane_z)
     )
     if required_half_height <= 0.0:
         raise ValueError("resolved grounded obstacle height must be positive")
@@ -485,6 +518,117 @@ def _resolve_shared_grounded_geometry(
     }
 
 
+def _build_constraint(
+    args: argparse.Namespace,
+    *,
+    row: dict[str, Any],
+    tcp_path: np.ndarray,
+    resolved_geometry: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    config = NominalPathAvoidConfig(
+        radius=args.avoid_radius,
+        path_fraction=args.path_fraction,
+        margin=args.avoid_margin,
+        weight=args.avoid_weight,
+        tolerance=args.avoid_tolerance,
+        shape=args.avoid_shape,
+        box_half_extents=resolved_geometry["box_half_extents"],
+        yaw=np.deg2rad(float(args.obstacle_yaw_deg)),
+        cylinder_half_length=resolved_geometry["cylinder_half_length"],
+        support_plane_z=args.support_plane_z,
+    )
+    if args.initial_robot_clearance_margin is None:
+        constraint = nominal_path_avoid_region(tcp_path, config=config)
+        return constraint, {
+            "path_fraction": float(args.path_fraction),
+            "anchor_local_offset_fraction": [0.0, 0.0],
+            "initial_robot_clearance": None,
+        }
+    if args.avoid_shape not in ("box", "cuboid") or args.support_plane_z is None:
+        raise ValueError("initial robot clearance placement currently requires a grounded box")
+    robot_points = np.asarray(row.get("initial_robot_points"), dtype=np.float32)
+    if robot_points.ndim != 2 or robot_points.shape[1] != 3 or not len(robot_points):
+        raise ValueError("initial robot clearance placement requires robot points")
+    yaw = np.deg2rad(float(args.obstacle_yaw_deg))
+    rotation = np.asarray(
+        [[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]],
+        dtype=np.float32,
+    )
+    for fraction in _candidate_path_fractions(args):
+        base = nominal_path_avoid_region(
+            tcp_path,
+            config=replace(config, path_fraction=fraction),
+        )
+        if not isinstance(base.region, BoxRegion):
+            raise TypeError("clearance-aware placement expected a BoxRegion")
+        half_extents = np.asarray(base.region.half_extents, dtype=np.float32)
+        for local_offset in _candidate_anchor_offsets(args):
+            center = np.asarray(base.region.center, dtype=np.float32).copy()
+            scaled_offset = np.asarray(local_offset, dtype=np.float32) * half_extents[:2]
+            center[:2] += rotation @ scaled_offset
+            candidate = replace(
+                base,
+                region=BoxRegion(
+                    center=center,
+                    half_extents=half_extents,
+                    yaw=base.region.yaw,
+                ),
+            )
+            clearance = min_constraint_clearance(robot_points, [candidate])
+            if clearance < float(args.initial_robot_clearance_margin):
+                continue
+            path_clearance = min_constraint_clearance(tcp_path, [candidate])
+            if path_clearance >= -float(args.avoid_tolerance):
+                continue
+            return candidate, {
+                "path_fraction": float(fraction),
+                "anchor_local_offset_fraction": [
+                    float(local_offset[0]),
+                    float(local_offset[1]),
+                ],
+                "initial_robot_clearance": float(clearance),
+            }
+    raise ValueError(
+        f"episode {row['dataset_episode_index']} has no path-intersecting placement "
+        f"with {float(args.initial_robot_clearance_margin):.3f} m initial clearance"
+    )
+
+
+def _candidate_path_fractions(args: argparse.Namespace) -> list[float]:
+    preferred = float(args.path_fraction)
+    step = float(args.path_fraction_search_step)
+    lower = float(args.path_fraction_search_min)
+    upper = float(args.path_fraction_search_max)
+    fractions = [preferred]
+    index = 1
+    while preferred + index * step <= upper + 1e-9 or preferred - index * step >= lower - 1e-9:
+        high = preferred + index * step
+        low = preferred - index * step
+        if high <= upper + 1e-9:
+            fractions.append(float(round(high, 10)))
+        if low >= lower - 1e-9:
+            fractions.append(float(round(low, 10)))
+        index += 1
+    return fractions
+
+
+def _candidate_anchor_offsets(args: argparse.Namespace) -> list[tuple[float, float]]:
+    maximum = float(args.anchor_offset_max_fraction)
+    step = float(args.anchor_offset_step_fraction)
+    count = int(np.floor(maximum / step + 1e-9))
+    values = [index * step for index in range(-count, count + 1)]
+    offsets = [(x, y) for x in values for y in values]
+    return sorted(
+        offsets,
+        key=lambda offset: (
+            round(offset[0] ** 2 + offset[1] ** 2, 10),
+            abs(offset[0]) + abs(offset[1]),
+            offset[0],
+            offset[1],
+        ),
+    )
+
+
 def _point_at_arc_fraction(points: Any, *, fraction: float) -> np.ndarray:
     path = np.asarray(points, dtype=np.float32)
     if path.ndim != 2 or path.shape[1] != 3 or path.shape[0] == 0:
@@ -498,9 +642,7 @@ def _point_at_arc_fraction(points: Any, *, fraction: float) -> np.ndarray:
     if total <= 1e-8:
         return path[0].copy()
     target = fraction * total
-    cumulative = np.concatenate(
-        [np.zeros((1,), dtype=np.float32), np.cumsum(segment_lengths)]
-    )
+    cumulative = np.concatenate([np.zeros((1,), dtype=np.float32), np.cumsum(segment_lengths)])
     upper = min(int(np.searchsorted(cumulative, target, side="right")), path.shape[0] - 1)
     lower = max(0, upper - 1)
     span = float(cumulative[upper] - cumulative[lower])
@@ -611,7 +753,19 @@ def _rollout_base_episode(
         "min_distance": min_distance if np.isfinite(min_distance) else None,
         "target_position": target_position,
         "tcp_positions": np.stack(tcp_positions, axis=0).astype(np.float32, copy=False),
+        "initial_robot_points": _entry_robot_points(first_entry),
     }
+
+
+def _entry_robot_points(entry: dict[str, Any]) -> np.ndarray:
+    points = np.asarray(entry["point_cloud"], dtype=np.float32).reshape(-1, 3)
+    mask = np.asarray(entry["robot_mask"], dtype=bool).reshape(-1)
+    valid = entry.get("point_valid_mask")
+    if valid is not None:
+        mask = mask & np.asarray(valid, dtype=bool).reshape(-1)
+    if mask.shape != (points.shape[0],):
+        raise ValueError("initial robot mask does not match point cloud")
+    return points[mask].astype(np.float32, copy=False)
 
 
 def _constraint_path(row: dict[str, Any]) -> np.ndarray:

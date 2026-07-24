@@ -350,7 +350,7 @@ the compared methods, serialize the exact constraints, and preserve the locked
 episode order.
 
 Grounded precomputed actors require one geometry shared across the run. The builder
-therefore resolves the common half-height from the highest selected path anchor plus
+therefore resolves the common half-height from the highest eligible path anchor plus
 a fixed 2 cm top margin, writes it to the manifest, and uses it in every constraint.
 The evaluator must receive those resolved half-extents when constructing the actor.
 On the 10 pilot episodes, `dataset_demo` selected 10/10, resolved a `0.6423` m total
@@ -416,6 +416,16 @@ method hyperparameters, whole-robot executed grading, physical-contact terminati
 and full MP4/Rerun artifact coverage. The launcher refuses nonempty output directories
 by default, reads the shared resolved obstacle geometry from the constraint manifest,
 and writes a hashed protocol snapshot beside each comparison.
+
+The initial v1 definitive attempt was stopped after 11 partial rows and is excluded:
+episode 2 began with the sampled whole-robot geometry 4.26 cm inside its precomputed
+box even though the TCP and PhysX contact checks were clear. Protocol v2 corrects
+this validity defect without using method outcomes. For each stored source path, it
+searches fractions symmetrically around `0.5` within `[0.2, 0.8]` and permits a
+deterministic in-footprint offset, so the path still intersects the box. A constraint
+is accepted only with at least 2 cm initial robot-cloud clearance. The evaluator
+independently recomputes this gate before running the first method; invalid geometry
+aborts the episode rather than producing an impossible safety denominator.
 
 ### E4 — Constraint difficulty sweep
 

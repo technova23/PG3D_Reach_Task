@@ -65,6 +65,7 @@ from pg3d.eval import (
     direct_path_avoid_region,
     episode_metric_row,
     load_episode_constraints,
+    min_constraint_clearance,
     paired_method_comparisons,
     progress_series,
     save_episode_constraints,
@@ -551,6 +552,11 @@ def main(argv: list[str] | None = None) -> int:
                     args=args,
                     zarr_context=zarr_context,
                 )
+                _validate_precomputed_initial_clearance(
+                    constraints,
+                    zarr_context=zarr_context,
+                    minimum_clearance=args.precomputed_initial_clearance_margin,
+                )
                 constraint_path = (
                     args.output_dir / "constraints" / f"episode_{spec.output_index:03d}.json"
                 )
@@ -1012,6 +1018,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Directory containing precomputed constraints/episode_XXX.json files.",
     )
     parser.add_argument(
+        "--precomputed-initial-clearance-margin",
+        type=float,
+        default=None,
+        help=(
+            "Fail before method execution when a precomputed constraint is closer "
+            "than this margin to the stored initial robot point cloud."
+        ),
+    )
+    parser.add_argument(
         "--no-constraints",
         action="store_true",
         help=(
@@ -1266,6 +1281,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--robot-clearance-stride must be positive")
     if args.robot_clearance_placement_margin < 0.0:
         raise ValueError("--robot-clearance-placement-margin must be non-negative")
+    if args.precomputed_initial_clearance_margin is not None and (
+        not np.isfinite(args.precomputed_initial_clearance_margin)
+        or args.precomputed_initial_clearance_margin < 0.0
+    ):
+        raise ValueError("--precomputed-initial-clearance-margin must be finite and non-negative")
     if args.constraint_target == "robot" and "itps" in args.methods:
         raise ValueError("--methods itps supports only --constraint-target eef")
     guidance_methods = {"rejection", "reranking"}
@@ -2835,6 +2855,34 @@ def _validate_precomputed_constraints(
         if env is None:
             raise ValueError("embodied precomputed constraints require a live environment")
         _validate_embodied_obstacle_geometry(env, constraints)
+
+
+def _validate_precomputed_initial_clearance(
+    constraints: list[AvoidRegion],
+    *,
+    zarr_context: dict[str, Any] | None,
+    minimum_clearance: float | None,
+) -> float | None:
+    """Reject impossible precomputed episodes before any compared method runs."""
+    if minimum_clearance is None or not constraints:
+        return None
+    if zarr_context is None:
+        raise ValueError("precomputed initial-clearance validation requires a dataset episode")
+    points = np.asarray(zarr_context["point_cloud"], dtype=np.float32).reshape(-1, 3)
+    robot_mask = np.asarray(zarr_context["robot_mask"], dtype=bool).reshape(-1)
+    valid_mask = np.asarray(zarr_context["point_valid_mask"], dtype=bool).reshape(-1)
+    if robot_mask.shape != (points.shape[0],) or valid_mask.shape != (points.shape[0],):
+        raise ValueError("initial robot/valid masks do not match the point cloud")
+    robot_points = points[robot_mask & valid_mask]
+    if not len(robot_points):
+        raise ValueError("initial robot point cloud is empty")
+    clearance = float(min_constraint_clearance(robot_points, constraints))
+    if clearance + 1e-8 < float(minimum_clearance):
+        raise ValueError(
+            "precomputed obstacle violates initial robot clearance: "
+            f"{clearance:.6f} < {float(minimum_clearance):.6f} m"
+        )
+    return clearance
 
 
 def _precomputed_constraint_path(constraints_dir: Path, spec: RolloutSpec) -> Path:

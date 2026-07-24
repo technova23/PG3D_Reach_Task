@@ -59,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
                 expected_path_source=str(population["path_source"]),
                 minimum_selected=int(population["minimum_selected_episodes"]),
                 expected_episode_indices=locked_episode_indices,
+                minimum_initial_clearance=float(
+                    config["constraint_builder"]["initial_robot_clearance_margin"]
+                ),
             )
         ensure_output_available(
             evaluation_output,
@@ -161,6 +164,18 @@ def builder_command(
         str(settings["path_fraction"]),
         "--path-height-margin",
         str(settings["path_height_margin"]),
+        "--initial-robot-clearance-margin",
+        str(settings["initial_robot_clearance_margin"]),
+        "--path-fraction-search-min",
+        str(settings["path_fraction_search_min"]),
+        "--path-fraction-search-max",
+        str(settings["path_fraction_search_max"]),
+        "--path-fraction-search-step",
+        str(settings["path_fraction_search_step"]),
+        "--anchor-offset-max-fraction",
+        str(settings["anchor_offset_max_fraction"]),
+        "--anchor-offset-step-fraction",
+        str(settings["anchor_offset_step_fraction"]),
         "--avoid-shape",
         str(settings["avoid_shape"]),
         "--avoid-box-half-extents",
@@ -248,6 +263,8 @@ def evaluation_command(
         str(settings["obstacle_point_quota"]),
         "--robot-clearance-stride",
         str(settings["robot_clearance_stride"]),
+        "--precomputed-initial-clearance-margin",
+        str(builder["initial_robot_clearance_margin"]),
         "--paired-bootstrap-samples",
         str(settings["paired_bootstrap_samples"]),
         "--paired-bootstrap-seed",
@@ -278,6 +295,7 @@ def load_constraint_manifest(
     expected_path_source: str,
     minimum_selected: int,
     expected_episode_indices: list[int],
+    minimum_initial_clearance: float,
 ) -> dict[str, Any]:
     manifest_path = output_dir / "manifest.json"
     if not manifest_path.is_file():
@@ -296,6 +314,16 @@ def load_constraint_manifest(
     selected = list(manifest.get("selected", []))
     if len(selected) != selected_count:
         raise ValueError("constraint manifest selected rows are incomplete")
+    invalid_clearances = [
+        float(row.get("initial_robot_clearance", float("-inf")))
+        for row in selected
+        if float(row.get("initial_robot_clearance", float("-inf"))) + 1e-8
+        < minimum_initial_clearance
+    ]
+    if invalid_clearances:
+        raise ValueError("constraint manifest violates the initial robot clearance gate")
+    if any(float(row["discrete_min_clearance"]) >= 0.0 for row in selected):
+        raise ValueError("constraint manifest contains an obstacle that misses its source path")
     remapped_indices = read_episode_indices(output_dir / "episode_indices.txt")
     selected_indices = [int(row["dataset_episode_index"]) for row in selected]
     if remapped_indices != selected_indices:

@@ -70,3 +70,17 @@ highest selected path anchor plus the predeclared top margin. Every serialized
 constraint uses those same half-extents, so the single ManiSkill actor constructed
 for the run exactly matches all episode constraints. Demonstration paths determine
 obstacle placement only; no compared method outcome is inspected.
+
+The first definitive full-distribution attempt exposed a validity defect before it
+completed: a tall grounded midpoint box could overlap the robot at the initial
+configuration, making whole-robot constraint success impossible at time zero even
+without a PhysX contact pair. Those partial method rows are excluded.
+
+Protocol v2 retains a path-intersecting carton but adds a geometry-only placement
+gate. Candidate fractions are searched symmetrically around `0.5`, bounded to
+`[0.2, 0.8]`. The center may move within 90% of the box footprint in deterministic
+local-coordinate increments, which keeps the source path inside the box. The first
+candidate with at least 2 cm signed clearance from the stored initial robot cloud is
+serialized. An evaluator preflight recomputes that clearance and fails before any
+compared method runs if the constraint is invalid. This repair uses only stored
+demonstration and initial-geometry data, never compared-method outcomes.
