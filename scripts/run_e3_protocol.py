@@ -265,6 +265,8 @@ def evaluation_command(
         str(settings["robot_clearance_stride"]),
         "--precomputed-initial-clearance-margin",
         str(builder["initial_robot_clearance_margin"]),
+        "--geometric-contact-threshold",
+        str(settings["geometric_contact_threshold"]),
         "--paired-bootstrap-samples",
         str(settings["paired_bootstrap_samples"]),
         "--paired-bootstrap-seed",

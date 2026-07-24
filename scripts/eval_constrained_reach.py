@@ -612,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
                         embody_obstacle=args.embody_obstacle,
                         obstacle_family=args.obstacle_family,
                         terminate_on_obstacle_contact=args.terminate_on_obstacle_contact,
+                        geometric_contact_threshold=args.geometric_contact_threshold,
                         directional_sign=_steer_sign(args.steer),
                         directional_weight=args.steer_weight,
                         itps_config=itps_config,
@@ -725,6 +726,14 @@ def main(argv: list[str] | None = None) -> int:
         "constraint_overlay_video": bool(args.constraint_overlay_video),
         "constraint_overlay_alpha": float(args.constraint_overlay_alpha),
         "constraint_overlay_color": list(args.constraint_overlay_color),
+        "contact_termination": {
+            "enabled": bool(args.terminate_on_obstacle_contact),
+            "sources": ["physx", "whole_robot_signed_clearance"],
+            "geometric_contact_threshold_m": float(
+                args.geometric_contact_threshold
+            ),
+            "keeps_first_contact_frame": True,
+        },
         "timing": timer.summary(),
         "episodes": rows,
         "by_method": summarize_metrics(rows),
@@ -1104,8 +1113,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "End an embodied-obstacle episode immediately when a robot link has a "
-            "PhysX contact pair with the obstacle (default: enabled)."
+            "End an embodied-obstacle episode on the first PhysX contact or non-positive "
+            "whole-robot geometric clearance (default: enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--geometric-contact-threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "Signed whole-robot clearance at or below which obstacle contact terminates "
+            "the episode (default: 0 m)."
         ),
     )
     parser.add_argument("--gripper-open", type=float, default=0.04)
@@ -1204,6 +1222,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--obstacle-support-plane-z must be finite")
     if args.obstacle_path_height_margin < 0.0:
         raise ValueError("--obstacle-path-height-margin must be non-negative")
+    if not np.isfinite(args.geometric_contact_threshold):
+        raise ValueError("--geometric-contact-threshold must be finite")
     if args.obstacle_top_z is not None and (
         not np.isfinite(args.obstacle_top_z) or args.obstacle_top_z <= args.obstacle_support_plane_z
     ):
@@ -1358,6 +1378,7 @@ def run_eval_episode(
     embody_obstacle: bool = False,
     obstacle_family: str = "box",
     terminate_on_obstacle_contact: bool = True,
+    geometric_contact_threshold: float = 0.0,
     artifact_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if embody_obstacle:
@@ -1414,7 +1435,12 @@ def run_eval_episode(
             frames.append(_frame_to_numpy(_render_video_frame(sim_env, video_env)))
     provider: ManiSkillGhostPandaGeometryProvider | None = None
     world_model: GeometricWorldModel | None = None
-    if method != "base" or robot_clearance_metric or rerun:
+    if (
+        method != "base"
+        or robot_clearance_metric
+        or rerun
+        or (embody_obstacle and terminate_on_obstacle_contact)
+    ):
         provider = ManiSkillGhostPandaGeometryProvider(
             ghost_env,
             task_name=_env_task_name(sim_env),
@@ -1423,6 +1449,23 @@ def run_eval_episode(
         provider.reset(seed=spec.seed, options={"reconfigure": True})
         if method != "base":
             world_model = GeometricWorldModel(provider)
+    contact_provider: ManiSkillGhostPandaGeometryProvider | None = None
+    online_robot_clouds: list[np.ndarray] = []
+    if embody_obstacle and terminate_on_obstacle_contact and constraints:
+        contact_provider = ManiSkillGhostPandaGeometryProvider(
+            ghost_env,
+            task_name=_env_task_name(sim_env),
+            crop_bounds=crop_config.bounds,
+        )
+        contact_provider.reset(seed=spec.seed, options={"reconfigure": True})
+        online_robot_clouds.append(
+            np.asarray(
+                contact_provider.robot_point_cloud(
+                    np.asarray(sim_entry["agent_pos"], dtype=np.float32)
+                ),
+                dtype=np.float32,
+            )
+        )
 
     steps = 0
     replans = 0
@@ -1439,6 +1482,9 @@ def run_eval_episode(
     physical_collision = False
     physical_collision_step: int | None = None
     physical_collision_pairs: list[list[str]] = []
+    geometric_collision = False
+    geometric_collision_step: int | None = None
+    geometric_collision_clearance: float | None = None
     was_training = policy.training
     policy.eval()
     compute_counts.start_denoiser_tracking(policy.model)
@@ -1573,6 +1619,16 @@ def run_eval_episode(
                 )
                 _append_path(path, sim_entry)
                 timeline.append(sim_entry.copy())
+                current_robot_cloud: np.ndarray | None = None
+                if contact_provider is not None:
+                    with timer.time("online_robot_contact_points", method=method):
+                        current_robot_cloud = np.asarray(
+                            contact_provider.robot_point_cloud(
+                                np.asarray(sim_entry["agent_pos"], dtype=np.float32)
+                            ),
+                            dtype=np.float32,
+                        )
+                    online_robot_clouds.append(current_robot_cloud)
                 if video:
                     if video_env is not None:
                         try:
@@ -1601,7 +1657,18 @@ def run_eval_episode(
                     physical_collision = True
                     physical_collision_step = steps
                     physical_collision_pairs = contact_pairs
-                terminated_or_truncated = physical_collision or _episode_should_stop(
+                if (
+                    current_robot_cloud is not None
+                    and not geometric_collision
+                    and len(current_robot_cloud)
+                ):
+                    clearance = float(min_constraint_clearance(current_robot_cloud, constraints))
+                    if clearance <= float(geometric_contact_threshold):
+                        geometric_collision = True
+                        geometric_collision_step = steps
+                        geometric_collision_clearance = clearance
+                obstacle_contact = physical_collision or geometric_collision
+                terminated_or_truncated = obstacle_contact or _episode_should_stop(
                     terminated=terminated,
                     truncated=truncated,
                     success=success,
@@ -1657,18 +1724,24 @@ def run_eval_episode(
     control_dt = _env_control_dt(sim_env)
     robot_clearance_point_clouds: list[np.ndarray] | None = None
     if robot_clearance_metric and constraints and provider is not None:
-        try:
-            with timer.time("robot_clearance_points", method=method):
-                robot_clearance_point_clouds = _whole_robot_clearance_point_clouds(
-                    path, provider, stride=robot_clearance_stride
-                )
-        except Exception as exc:
-            print(
-                "warning: whole-robot clearance metric failed, falling back to TCP-only: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
+        if online_robot_clouds:
+            robot_clearance_point_clouds = _subsample_robot_clouds(
+                online_robot_clouds,
+                stride=robot_clearance_stride,
             )
-            robot_clearance_point_clouds = None
+        else:
+            try:
+                with timer.time("robot_clearance_points", method=method):
+                    robot_clearance_point_clouds = _whole_robot_clearance_point_clouds(
+                        path, provider, stride=robot_clearance_stride
+                    )
+            except Exception as exc:
+                print(
+                    "warning: whole-robot clearance metric failed, falling back to TCP-only: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                robot_clearance_point_clouds = None
     row = episode_metric_row(
         method=method,
         episode=spec.output_index,
@@ -1701,8 +1774,28 @@ def run_eval_episode(
             "physical_collision": physical_collision,
             "physical_collision_step": physical_collision_step,
             "physical_collision_pairs": physical_collision_pairs,
+            "geometric_collision": geometric_collision,
+            "geometric_collision_step": geometric_collision_step,
+            "geometric_collision_clearance": geometric_collision_clearance,
+            "geometric_contact_threshold": float(geometric_contact_threshold),
+            "terminate_on_obstacle_contact": bool(terminate_on_obstacle_contact),
+            "obstacle_contact": physical_collision or geometric_collision,
+            "obstacle_contact_step": (
+                min(
+                    step
+                    for step in (physical_collision_step, geometric_collision_step)
+                    if step is not None
+                )
+                if physical_collision_step is not None or geometric_collision_step is not None
+                else None
+            ),
+            "obstacle_contact_source": _obstacle_contact_source(
+                physical_collision=physical_collision,
+                geometric_collision=geometric_collision,
+            ),
             "termination_reason": _termination_reason(
                 physical_collision=physical_collision,
+                geometric_collision=geometric_collision,
                 terminated_or_truncated=terminated_or_truncated,
                 first_success_step=first_success_step,
                 observed_post_success_steps=observed_post_success_steps,
@@ -1712,7 +1805,7 @@ def run_eval_episode(
             ),
         }
     )
-    if physical_collision:
+    if physical_collision or geometric_collision:
         row["constraint_satisfied"] = False
         row["combined_success"] = False
         row["stable_combined_success"] = False
@@ -1805,6 +1898,8 @@ def _episode_artifact_identity(
             "combined_success": bool(row["combined_success"]),
             "stable_combined_success": bool(row["stable_combined_success"]),
             "physical_collision": bool(row.get("physical_collision", False)),
+            "geometric_collision": bool(row.get("geometric_collision", False)),
+            "obstacle_contact": bool(row.get("obstacle_contact", False)),
             "termination_reason": row.get("termination_reason"),
             "min_clearance_m": row.get("min_clearance"),
             "steps": int(row["steps"]),
@@ -1832,7 +1927,7 @@ def _annotate_episode_video_frames(
     reach = "YES" if identity.get("reach_success") else "NO"
     stable = "YES" if identity.get("stable_combined_success") else "NO"
     safe = "YES" if identity.get("constraint_satisfied") else "NO"
-    collision = "YES" if identity.get("physical_collision") else "NO"
+    collision = "YES" if identity.get("obstacle_contact") else "NO"
     clearance = identity.get("min_clearance_m")
     clearance_text = (
         "n/a"
@@ -1852,22 +1947,22 @@ def _annotate_episode_video_frames(
                 "video annotation requires uint8 RGB/RGBA frames, "
                 f"got dtype={array.dtype} shape={array.shape}"
             )
-        image = Image.fromarray(array).convert("RGBA")
-        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
+        image = Image.fromarray(array).convert("RGB")
         line_height = 19
-        panel_height = 8 + line_height * len(lines)
-        draw.rectangle((0, 0, image.width, panel_height), fill=(0, 0, 0, 190))
+        # Keep the total 512+64 height codec-aligned so FFmpeg never rescales the
+        # untouched simulator image.
+        panel_height = 64
+        canvas = Image.new("RGB", (image.width, image.height + panel_height), (0, 0, 0))
+        canvas.paste(image, (0, panel_height))
+        draw = ImageDraw.Draw(canvas)
         for line_index, line in enumerate(lines):
             draw.text(
-                (8, 4 + line_index * line_height),
+                (8, 3 + line_index * line_height),
                 line,
                 fill=(255, 255, 255, 255),
                 font=font,
             )
-        annotated.append(
-            np.asarray(Image.alpha_composite(image, overlay).convert("RGB"))
-        )
+        annotated.append(np.asarray(canvas))
     return annotated
 
 
@@ -1936,9 +2031,12 @@ def _termination_reason(
     post_success_steps: int,
     steps: int,
     max_steps: int,
+    geometric_collision: bool = False,
 ) -> str:
     if physical_collision:
         return "physical_obstacle_collision"
+    if geometric_collision:
+        return "geometric_obstacle_collision"
     if first_success_step is not None and observed_post_success_steps >= post_success_steps:
         return "stable_success"
     if terminated_or_truncated:
@@ -1946,6 +2044,20 @@ def _termination_reason(
     if steps >= max_steps:
         return "task_horizon"
     return "stopped"
+
+
+def _obstacle_contact_source(
+    *,
+    physical_collision: bool,
+    geometric_collision: bool,
+) -> str | None:
+    if physical_collision and geometric_collision:
+        return "physx+geometry"
+    if physical_collision:
+        return "physx"
+    if geometric_collision:
+        return "geometry"
+    return None
 
 
 def _episode_step_limit(
@@ -3792,6 +3904,24 @@ def _whole_robot_clearance_point_clouds(
         else:
             clouds.append(np.zeros((0, 3), dtype=np.float32))
     return clouds
+
+
+def _subsample_robot_clouds(
+    clouds: list[np.ndarray],
+    *,
+    stride: int,
+) -> list[np.ndarray]:
+    """Subsample online contact clouds with the same endpoint rule as path grading."""
+    if not clouds:
+        return []
+    stride = max(1, int(stride))
+    indices = list(range(0, len(clouds), stride))
+    if indices[-1] != len(clouds) - 1:
+        indices.append(len(clouds) - 1)
+    return [
+        np.asarray(clouds[index], dtype=np.float32).reshape(-1, 3)
+        for index in indices
+    ]
 
 
 def _env_kwargs(

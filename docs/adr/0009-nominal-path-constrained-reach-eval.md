@@ -84,3 +84,15 @@ candidate with at least 2 cm signed clearance from the stored initial robot clou
 serialized. An evaluator preflight recomputes that clearance and fails before any
 compared method runs if the constraint is invalid. This repair uses only stored
 demonstration and initial-geometry data, never compared-method outcomes.
+
+## 2026-07-24 contact/artifact amendment
+
+The v2 definitive attempt is also partial and excluded. PhysX contact-pair reporting
+alone missed a visually apparent shallow robot/box penetration, so videos continued
+after the intended terminal event. Protocol v3 checks whole-robot signed clearance
+online after every simulator step and terminates when either that clearance is
+non-positive or PhysX reports contact. It keeps the first contact frame and no later
+frames.
+
+MP4 identity remains mandatory, but it is rendered in a new canvas header above the
+original camera frame. No simulator pixel may be covered by status text.

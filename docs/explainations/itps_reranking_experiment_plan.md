@@ -372,14 +372,15 @@ never reaches receives all 150 task steps. This horizon was locked from pilot-si
 qualitative evidence before definitive-test evaluation: several grounded-obstacle
 rollouts first reached after step 80.
 
-Physical robot-obstacle contact is an immediate terminal failure. After every
-simulator step, evaluation inspects the raw PhysX contact pairs for any robot link
-and embodied-obstacle actor. The first-contact frame is retained in the MP4/Rerun
-timeline, but no later motion contributes to clearance, path, or smoothness metrics.
-Metrics record `physical_collision`, `physical_collision_step`, the contacting body
-pairs, and `termination_reason=physical_obstacle_collision`; constraint and combined
-success are forced false. `--no-terminate-on-obstacle-contact` exists only for an
-explicit ablation.
+Robot-obstacle contact is an immediate terminal failure. After every simulator step,
+evaluation takes the union of raw PhysX contact pairs and non-positive signed
+clearance from the rendered whole-robot geometry. This catches visible arm/obstacle
+touches even when PhysX does not emit a named contact pair. The first-contact frame is
+retained in the MP4/Rerun timeline, but no later motion contributes to clearance,
+path, or smoothness metrics. Metrics retain the PhysX-specific fields and also record
+`geometric_collision`, `obstacle_contact`, its step/source, and the geometric
+clearance. Constraint and combined success are forced false.
+`--no-terminate-on-obstacle-contact` exists only for an explicit ablation.
 
 E3 pilot integration now uses a fixed, physically supported realistic obstacle
 protocol: a collidable tall carton with half-extents `[0.055, 0.08, 0.16]` m, 20-degree
@@ -403,8 +404,9 @@ MP4/`.rrd` pairs, 2,467 decoded 512x512 video frames, 22 graphs, and no episode
 errors. Every final DP3 tensor retained at least 32 ordinary-camera obstacle points.
 The camera videos visibly show the grounded carton, robot, and goal, while the RRDs
 contain the semantic point cloud and planning/execution overlays. Subsequent
-constrained-evaluation captures burn method, episode, simulator seed, obstacle family,
-goal/stable/safety outcomes, clearance, and contact state into every MP4 frame. The
+constrained-evaluation captures put method, episode, simulator seed, obstacle family,
+goal/stable/safety outcomes, clearance, and contact state in a dedicated header above
+every MP4 frame, leaving every camera pixel unobscured. The
 same full identity/outcome payload is stored under `/recording/identity` in the native
 Rerun 0.35 file and in its neutral metadata sidecar. Manifest validation rejects a
 missing label/identity flag or any RRD-sidecar/metrics identity mismatch.
@@ -426,6 +428,12 @@ deterministic in-footprint offset, so the path still intersects the box. A const
 is accepted only with at least 2 cm initial robot-cloud clearance. The evaluator
 independently recomputes this gate before running the first method; invalid geometry
 aborts the episode rather than producing an impossible safety denominator.
+
+The v2 definitive attempt was also stopped after 11 partial rows and is excluded from
+all results. Visual inspection showed that relying on PhysX pairs alone allowed a
+small whole-robot geometric penetration to continue to the 150-step horizon, and its
+black identity banner covered useful camera pixels. Protocol v3 terminates online on
+the union contact rule above and places the identity header outside the camera image.
 
 ### E4 — Constraint difficulty sweep
 

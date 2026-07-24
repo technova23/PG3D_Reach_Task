@@ -872,19 +872,19 @@ explicitly. For each comparison it saves `protocol_snapshot.json`, requests plot
 profiling, and sets `artifact-selection=all`: every method/episode row must therefore
 have a labeled MP4 plus its corresponding native Rerun point-cloud timeline.
 
-Protocol v2 also passes `--initial-robot-clearance-margin 0.02` to the builder and
+Protocol v3 also passes `--initial-robot-clearance-margin 0.02` to the builder and
 `--precomputed-initial-clearance-margin 0.02` to the evaluator. The builder searches
 only declared path-intersecting placements; the evaluator recomputes the signed
 clearance from the stored initial robot mask and fails before any method runs if a
-serialized obstacle starts too close to the robot. Do not use the partial v1
-comparison directory for results.
+serialized obstacle starts too close to the robot. Do not use the partial v1 or v2
+comparison directories for results.
 
 With `--embody-obstacle`, this command terminates by default on the first raw PhysX
-contact between any robot link and an embodied-obstacle actor. The contact frame is
-saved, and the episode row records the collision step/body pairs and forces
-constraint/combined success to false. Use `--no-terminate-on-obstacle-contact` only
-for a deliberate non-terminal-contact ablation; otherwise later motion would
-contaminate trajectory and clearance metrics.
+contact or the first non-positive whole-robot signed clearance. The contact frame is
+saved, no later frame is rendered, and the episode row records PhysX, geometric, and
+union contact fields while forcing constraint/combined success false. Use
+`--no-terminate-on-obstacle-contact` only for a deliberate non-terminal-contact
+ablation; otherwise later motion would contaminate trajectory and clearance metrics.
 
 For large runs, replace `--artifact-selection all` with a predeclared deterministic
 subset. Manifest validation recomputes hashes, decodes every selected MP4 frame, and
@@ -1035,8 +1035,9 @@ Every constrained-evaluation command using `--video --rerun` writes
 `artifact_manifest.json` in its output directory. The evaluator validates non-empty
 files, SHA-256 records, metrics-row selectors, paired seeds, and constraint
 fingerprints before completing. `--video` without `--rerun` is intentionally rejected.
-Each MP4 frame includes a burned-in method/episode/simulator-seed and final outcome
-banner. The same identity is stored in the neutral
+Each MP4 frame includes a method/episode/simulator-seed and final outcome header above
+the original camera image; the header does not cover simulator pixels. The same
+identity is stored in the neutral
 `episode_NNN.policy_input.json` sidecar and as `/recording/identity` in the native
 Rerun file; manifest validation fails if the sidecar and metrics row disagree.
 

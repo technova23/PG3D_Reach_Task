@@ -80,6 +80,7 @@ from scripts.eval_constrained_reach import (
     _ground_embodied_region,
     _local_path_points_xy,
     _obs_windows_to_torch,
+    _obstacle_contact_source,
     _point_at_arc_fraction_xy,
     _policy_obstacle_point_count,
     _read_episode_indices_file,
@@ -153,6 +154,26 @@ def test_termination_reason_prioritizes_physical_collision() -> None:
             max_steps=150,
         )
         == "task_horizon"
+    )
+    assert (
+        _termination_reason(
+            physical_collision=False,
+            geometric_collision=True,
+            terminated_or_truncated=True,
+            first_success_step=None,
+            observed_post_success_steps=0,
+            post_success_steps=16,
+            steps=9,
+            max_steps=150,
+        )
+        == "geometric_obstacle_collision"
+    )
+    assert (
+        _obstacle_contact_source(
+            physical_collision=True,
+            geometric_collision=True,
+        )
+        == "physx+geometry"
     )
 
 
@@ -977,11 +998,16 @@ def test_episode_video_annotation_burns_identity_and_outcome() -> None:
     annotated = _annotate_episode_video_frames([frame], identity=identity)
 
     assert len(annotated) == 1
-    assert annotated[0].shape == frame.shape
+    assert annotated[0].shape[0] > frame.shape[0]
+    assert annotated[0].shape[1:] == frame.shape[1:]
     assert annotated[0].dtype == np.uint8
     assert np.array_equal(frame, np.full_like(frame, 220))
-    assert not np.array_equal(annotated[0][:65], frame[:65])
-    np.testing.assert_array_equal(annotated[0][70:], frame[70:])
+    panel_height = annotated[0].shape[0] - frame.shape[0]
+    assert not np.array_equal(
+        annotated[0][:panel_height],
+        np.full_like(annotated[0][:panel_height], 220),
+    )
+    np.testing.assert_array_equal(annotated[0][panel_height:], frame)
     assert identity["method"] == "reranking"
     assert identity["stable_combined_success"] is True
 
@@ -1508,6 +1534,7 @@ def test_locked_e3_commands_resolve_manifest_geometry(tmp_path: Path) -> None:
     ]
     assert "--robot-clearance-metric" in evaluate
     assert "--terminate-on-obstacle-contact" in evaluate
+    assert evaluate[evaluate.index("--geometric-contact-threshold") + 1] == "0.0"
     assert evaluate[evaluate.index("--obstacle-support-plane-z") + 1] == "0.0"
     assert evaluate[evaluate.index("--precomputed-initial-clearance-margin") + 1] == "0.02"
     assert "--video" in evaluate
