@@ -29,12 +29,14 @@ from pg3d.composition.scoring import (
     trajectory_smoothness,
 )
 from pg3d.constraints import (
+    OBSTACLE_SCENE_NAMES,
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
     CartesianPoseConstraint,
     RectRegion2D,
     SphereRegion,
+    build_obstacle_scene,
 )
 from pg3d.envs.maniskill_adapter import (
     ManiSkillGhostPandaGeometryProvider,
@@ -72,6 +74,11 @@ from pg3d.policies.dp3.goal_markers import (
     DEFAULT_GOAL_MARKER_RADIUS,
     insert_goal_marker_points,
 )
+from pg3d.policies.dp3.obstacle_markers import (
+    DEFAULT_OBSTACLE_POINTS_PER_REGION,
+    avoid_region_surface_points,
+    insert_real_obstacle_points,
+)
 from pg3d.utils.arrays import bool_any as _bool_any
 from pg3d.utils.arrays import bool_info as _bool_info
 from pg3d.utils.arrays import frame_to_numpy as _frame_to_numpy
@@ -105,6 +112,7 @@ from scripts.rollout_dp3_reach_policy import (
 
 EvalMethod = Literal["base", "rejection", "reranking"]
 GeometryMode = Literal["fast", "exact"]
+ObstacleRealism = Literal["virtual", "real"]
 Entry = dict[str, np.ndarray | bool | float]
 # Z range used to extrude the height-agnostic avoid_projection footprint for the
 # overlay video. Display-only; the constraint itself penalizes XY at any height.
@@ -266,11 +274,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.goal_thresh is not None
         else float(dict(metadata.get("env_kwargs", {})).get("goal_thresh", 0.025))
     )
+    # Raw-Zarr-row-aligned: keep every episode's slot (None where there's no recorded
+    # seed, e.g. real-captured episodes in a mixed real+sim dataset) rather than
+    # dropping/compacting them. dataset_idx values derived from this list (unique-seed
+    # selection, direct --episode-indices) are used directly as raw Zarr rows elsewhere
+    # (_zarr_episode_context, dataset_episode_index) -- compacting would silently shift
+    # every sim episode's index and could alias into the real-episode row range.
     dataset_episode_seeds = [
-        int(episode["seed"]) for episode in metadata.get("episodes", []) if "seed" in episode
+        int(episode["seed"]) if "seed" in episode else None
+        for episode in metadata.get("episodes", [])
     ]
     zarr_root = (
         zarr.open_group(str(args.dataset), mode="r") if args.source == "dataset" else None
+    )
+    mask_source_root = (
+        zarr.open_group(str(args.mask_source_dataset), mode="r")
+        if args.mask_source_dataset is not None
+        else None
     )
     episode_indices = _episode_indices_from_args(
         args,
@@ -286,10 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     if not specs:
         raise RuntimeError("no constrained-reach episodes selected")
     if args.unique_dataset_seeds:
+        seeded_rows = [seed for seed in dataset_episode_seeds if seed is not None]
         print(
             "unique dataset seed selection: "
-            f"selected={len(specs)} available_unique={len(set(dataset_episode_seeds))} "
-            f"dataset_rows={len(dataset_episode_seeds)}",
+            f"selected={len(specs)} available_unique={len(set(seeded_rows))} "
+            f"seeded_rows={len(seeded_rows)} dataset_rows={len(dataset_episode_seeds)}",
             flush=True,
         )
     artifact_seed = args.artifact_selection_seed
@@ -354,7 +375,11 @@ def main(argv: list[str] | None = None) -> int:
         ):
             for spec in specs:
                 zarr_context = (
-                    _zarr_episode_context_with_paths(zarr_root, spec.dataset_episode_index)
+                    _zarr_episode_context_with_paths(
+                        zarr_root,
+                        spec.dataset_episode_index,
+                        mask_source_root=mask_source_root,
+                    )
                     if zarr_root is not None and spec.dataset_episode_index is not None
                     else None
                 )
@@ -424,6 +449,8 @@ def main(argv: list[str] | None = None) -> int:
                         robot_clearance_metric=args.robot_clearance_metric,
                         robot_clearance_stride=args.robot_clearance_stride,
                         zarr_context=zarr_context,
+                        obstacle_realism=args.obstacle_realism,
+                        obstacle_points_per_region=args.obstacle_points_per_region,
                     )
                     rows.append(row)
                     with timer.time("json_write", artifact="metrics"):
@@ -491,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
         "constraint_overlay_video": bool(args.constraint_overlay_video),
         "constraint_overlay_alpha": float(args.constraint_overlay_alpha),
         "constraint_overlay_color": list(args.constraint_overlay_color),
+        "obstacle_realism": args.obstacle_realism,
+        "obstacle_points_per_region": int(args.obstacle_points_per_region),
         "metrics_jsonl": str(metrics_path),
         "decisions_jsonl": str(decisions_path),
         "step_traces_jsonl": str(step_traces_path),
@@ -549,6 +578,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     checkpoint_group.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument("--checkpoint-model", choices=["ema", "raw"], default="ema")
     parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument(
+        "--mask-source-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Zarr dataset to pull robot_mask/point_valid_mask from when --dataset "
+            "doesn't have them (e.g. a mixed real+sim dataset whose sim episodes were copied "
+            "from a sim-only dataset that does). Matched per-episode by an exact point_cloud "
+            "match at the episode's start row -- real episodes with no sim-computed match "
+            "still fail clearly, since there is no real segmentation ground truth to fall "
+            "back to."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--source", choices=["dataset", "fresh"], default="fresh")
@@ -567,6 +609,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "With --source dataset, evaluate only the first dataset row for each unique "
             "episode seed, capped by --episodes. This avoids repeated env resets when "
             "the dataset contains multiple rows with the same seed."
+        ),
+    )
+    parser.add_argument(
+        "--unique-dataset-seeds-start-index",
+        type=int,
+        default=0,
+        help=(
+            "With --unique-dataset-seeds, skip this many unique seeds (in dataset order) "
+            "before selecting --episodes of them. Indexes into the de-duplicated-by-seed "
+            "list, not raw Zarr rows -- e.g. on a dataset whose real episodes are excluded "
+            "from that list (no recorded seed), unique-seed index 0 is the first sim "
+            "episode's row, not raw row 0."
         ),
     )
     parser.add_argument("--seed-start", type=int, default=10000)
@@ -694,6 +748,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--avoid-radius", type=float, default=0.08)
     parser.add_argument("--avoid-min-radius", type=float, default=0.025)
+    parser.add_argument(
+        "--avoid-radius-window",
+        type=float,
+        default=0.15,
+        help=(
+            "Arc-length window (fraction of each candidate path's total length, on each "
+            "side of the obstacle's placement fraction) used when computing the sphere's "
+            "spread-based radius. Only points within this window of the placement fraction "
+            "contribute to the 37.5th-percentile radius -- without windowing, points near "
+            "the shared start pose and the scattered goal region (which have nothing to do "
+            "with how much the candidate paths actually spread out at the obstacle's "
+            "location) inflate the radius by roughly 2x. Falls back to all points if the "
+            "window is empty for a given path."
+        ),
+    )
     parser.add_argument("--avoid-margin", type=float, default=0.0)
     parser.add_argument("--avoid-weight", type=float, default=1.0)
     parser.add_argument(
@@ -727,6 +796,101 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Fraction(s) along the direct start-to-goal line at which to place avoid-region "
             "sphere(s) (direct_path mode only). Each value in [0, 1] places one sphere. "
             "E.g. --avoid-path-fractions 0.4 0.8 places two spheres at 40%% and 80%% of the path."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-scene",
+        choices=list(OBSTACLE_SCENE_NAMES),
+        default="none",
+        help=(
+            "Build a hand-authored or procedural non-convex obstacle layout instead of the "
+            "direct-path/candidate-midpath single-region placement above. 'none' (default) "
+            "leaves --constraint-placement in charge, unchanged. Each non-'none' scene is a "
+            "small cluster of sphere/cylinder AvoidRegion constraints positioned relative to "
+            "the episode's start->goal direction, whose *union* forms a non-convex keep-out "
+            "shape (a greedy locally-lowest-cost path can get trapped in it, unlike a single "
+            "convex region): 'wall_gap' blocks the direct line except for an off-center gap; "
+            "'l_corner' is a wall plus a perpendicular arm closing off the near detour; "
+            "'u_pocket' is a pocket with its mouth facing the start (drives a greedy policy "
+            "into a dead end); 'pillar_cluster' scatters vertical cylinder pillars; "
+            "'cluttered_field' procedurally scatters --clutter-num-objects sphere/cylinder "
+            "obstacles with basic clearance checks. When set, bypasses the "
+            "--constraint-placement dispatch entirely and does not require a policy rollout, "
+            "so it works with any --constraint-placement value (ignored)."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-scene-object-radius",
+        type=float,
+        default=0.05,
+        help="Radius (meters) of each convex primitive making up a --obstacle-scene layout.",
+    )
+    parser.add_argument(
+        "--obstacle-scene-arm-segments",
+        type=int,
+        default=3,
+        help=(
+            "Number of spheres per wall/arm segment for --obstacle-scene "
+            "wall_gap/l_corner/u_pocket. Larger values make longer, harder-to-skirt walls."
+        ),
+    )
+    parser.add_argument(
+        "--clutter-num-objects",
+        type=int,
+        default=6,
+        help="Number of objects for --obstacle-scene pillar_cluster/cluttered_field.",
+    )
+    parser.add_argument(
+        "--clutter-seed",
+        type=int,
+        default=None,
+        help=(
+            "RNG seed for --obstacle-scene pillar_cluster/cluttered_field placement. "
+            "Defaults to the episode's own seed (so scenes are reproducible per-episode "
+            "without needing a separate seed argument)."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-realism",
+        choices=["virtual", "real"],
+        default="virtual",
+        help=(
+            "How avoid-region obstacles are exposed to the policy. 'virtual' (default; "
+            "existing behavior, unchanged) keeps avoid regions as a guidance/video-only "
+            "construct -- the physics engine can't host an unattached floating collision "
+            "body, so no sim object ever exists and the policy's point cloud never sees "
+            "one; only rejection/reranking guidance and the --constraint-overlay-video "
+            "sphere know about it. 'real' additionally samples synthetic points on each "
+            "avoid-region sphere's surface every step and mixes them into the scene "
+            "point cloud *before* the normal crop/downsample pass, so they compete for "
+            "the fixed point budget under the same quota logic as every other point (see "
+            "--obstacle-points-per-region) -- the policy sees them as ordinary "
+            "non-robot scene points, not a specially flagged token, and how many survive "
+            "depends on scene density just like a real scanned object. Exception: for a "
+            "checkpoint baked with robot_point_fraction=1.0 (robot-only point clouds, no "
+            "scene points ever seen in training -- e.g. the xArm7-gripper reach dataset), "
+            "the normal crop would drop every obstacle point unconditionally before it "
+            "could ever compete, so that regime instead reserves exactly "
+            "--obstacle-points-per-region slots to force the obstacle to survive; this is "
+            "knowingly out-of-distribution input for such a checkpoint, since it has never "
+            "seen a non-robot point during training. This also propagates into the "
+            "rejection/reranking world-model imagination used for replanning, since that "
+            "imagination extends forward from this same observed scene. The rendered video "
+            "is unchanged in both modes (same overlay geometry). Supports sphere, box, and "
+            "cylinder AvoidRegion primitives (see --avoid-shape and --obstacle-scene); other "
+            "constraint/region types are silently skipped when injecting points."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-points-per-region",
+        type=int,
+        default=DEFAULT_OBSTACLE_POINTS_PER_REGION,
+        help=(
+            "Number of synthetic points sampled on each avoid-region sphere's surface "
+            "and offered as candidates to the crop/downsample pass when --obstacle-"
+            "realism real. This is the candidate count, not a guarantee -- like any "
+            "other scene points, some may be dropped by the point-budget quota if the "
+            "scene is dense."
         ),
     )
     parser.add_argument(
@@ -892,6 +1056,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             raise ValueError("--cartesian-pose-rotation-tolerance must be non-negative")
         if not math.isfinite(float(args.cartesian_pose_weight)):
             raise ValueError("--cartesian-pose-weight must be finite")
+    if args.obstacle_scene_object_radius <= 0.0:
+        raise ValueError("--obstacle-scene-object-radius must be positive")
+    if args.obstacle_scene_arm_segments <= 0:
+        raise ValueError("--obstacle-scene-arm-segments must be positive")
+    if args.clutter_num_objects < 0:
+        raise ValueError("--clutter-num-objects must be non-negative")
+    if args.obstacle_scene != "none" and args.constraint_type == "cartesian_pose":
+        raise ValueError(
+            "--obstacle-scene cannot be combined with --constraint-type cartesian_pose "
+            "(the cartesian_pose branch is checked first in _constraints_for_episode, so "
+            "the obstacle scene would silently never be built)"
+        )
+    if args.obstacle_scene != "none" and args.constraints_dir is not None:
+        raise ValueError(
+            "--obstacle-scene cannot be combined with --constraints-dir "
+            "(precomputed constraints take priority and the scene would never be built)"
+        )
+    if args.obstacle_realism == "real":
+        if args.constraint_type != "region" and args.obstacle_scene == "none":
+            raise ValueError(
+                "--obstacle-realism real requires --constraint-type region or "
+                "--obstacle-scene (avoid-region constraints only, for now)"
+            )
+        if args.obstacle_points_per_region <= 0:
+            raise ValueError("--obstacle-points-per-region must be positive")
     if args.avoid_box_half_extents is not None and any(
         h <= 0.0 for h in args.avoid_box_half_extents
     ):
@@ -952,6 +1141,48 @@ def resolve_checkpoint_path(checkpoint: Path | None, checkpoint_dir: Path | None
     return latest_reach_checkpoint(checkpoint_dir)
 
 
+def _apply_real_obstacle_points(
+    entry: Entry,
+    *,
+    constraints: list[Any],
+    obstacle_realism: ObstacleRealism,
+    obstacle_points_per_region: int,
+    crop_config: PointCloudCropConfig,
+) -> Entry:
+    """Inject real-obstacle point-cloud points for --obstacle-realism real.
+
+    No-op (returns ``entry`` unchanged) under the default 'virtual' mode, and
+    when there are no spherical AvoidRegion constraints active yet (e.g. the
+    obstacle_spawning second obstacle hasn't triggered). See --obstacle-realism
+    help for why this exists: the avoid-region sphere has no physics body, so
+    the policy's real point cloud never contains it unless we synthesize it
+    here. The synthesized points are mixed into the scene and re-cropped with
+    the same ``crop_point_cloud`` quota/downsample logic every real camera
+    point goes through -- see ``insert_real_obstacle_points`` -- so the
+    obstacle is exposed to the policy the same way any other object would be,
+    not force-written into reserved slots.
+    """
+    if obstacle_realism != "real":
+        return entry
+    obstacle_points = avoid_region_surface_points(
+        constraints, num_points_per_region=obstacle_points_per_region
+    )
+    if obstacle_points.shape[0] == 0:
+        return entry
+    point_cloud, robot_mask, point_valid_mask = insert_real_obstacle_points(
+        entry["point_cloud"],
+        entry["robot_mask"],
+        entry["point_valid_mask"],
+        obstacle_points,
+        crop_config=crop_config,
+    )
+    updated = dict(entry)
+    updated["point_cloud"] = point_cloud
+    updated["robot_mask"] = robot_mask
+    updated["point_valid_mask"] = point_valid_mask
+    return updated
+
+
 def run_eval_episode(
     *,
     sim_env: Any,
@@ -987,6 +1218,8 @@ def run_eval_episode(
     robot_clearance_metric: bool = False,
     robot_clearance_stride: int = 4,
     zarr_context: dict[str, Any] | None = None,
+    obstacle_realism: ObstacleRealism = "virtual",
+    obstacle_points_per_region: int = DEFAULT_OBSTACLE_POINTS_PER_REGION,
 ) -> dict[str, Any]:
     # Defensive copy: obstacle_spawning appends to `constraints` as the episode
     # progresses, and the caller reuses the same initial list/pending_spawn across
@@ -1011,6 +1244,13 @@ def run_eval_episode(
         )
     if zarr_context is not None:
         sim_entry = _apply_zarr_initial_entry(sim_entry, zarr_context)
+    sim_entry = _apply_real_obstacle_points(
+        sim_entry,
+        constraints=constraints,
+        obstacle_realism=obstacle_realism,
+        obstacle_points_per_region=obstacle_points_per_region,
+        crop_config=crop_config,
+    )
     obs_window = make_initial_obs_window(sim_entry, n_obs_steps=int(policy.n_obs_steps))
     target = np.asarray(sim_entry["target_position"], dtype=np.float32).reshape(3)
     scene = scene_context_for_constraints(
@@ -1042,6 +1282,7 @@ def run_eval_episode(
             constraints=constraints,
             color=constraint_overlay_color,
             alpha=constraint_overlay_alpha,
+            zarr_context=zarr_context,
         )
         with timer.time("video_frame_render", method=method):
             frames.append(_frame_to_numpy(_render_video_frame(sim_env, video_env)))
@@ -1141,6 +1382,13 @@ def run_eval_episode(
                         env=sim_env,
                         crop_config=crop_config,
                     )
+                sim_entry = _apply_real_obstacle_points(
+                    sim_entry,
+                    constraints=constraints,
+                    obstacle_realism=obstacle_realism,
+                    obstacle_points_per_region=obstacle_points_per_region,
+                    crop_config=crop_config,
+                )
                 obs_window = append_obs_window(
                     obs_window,
                     sim_entry,
@@ -1956,9 +2204,14 @@ def _episode_start_robot_points(
     return _entry_robot_points(entry)
 
 
-def _zarr_episode_context_with_paths(zarr_root: Any, episode_index: int) -> dict[str, Any]:
+def _zarr_episode_context_with_paths(
+    zarr_root: Any,
+    episode_index: int,
+    *,
+    mask_source_root: Any = None,
+) -> dict[str, Any]:
     """Return reset context plus full per-step arrays needed for dataset-derived constraints."""
-    context = _zarr_episode_context(zarr_root, episode_index)
+    context = _zarr_episode_context(zarr_root, episode_index, mask_source_root=mask_source_root)
     episode_ends = np.asarray(zarr_root["meta"]["episode_ends"][:], dtype=np.int64)
     episode_start = int(context["episode_start"])
     episode_end = int(episode_ends[episode_index])
@@ -2028,6 +2281,44 @@ def _cartesian_pose_constraint_from_zarr_path(
     )
 
 
+def _obstacle_scene_constraints(
+    env: Any,
+    *,
+    spec: RolloutSpec,
+    crop_config: PointCloudCropConfig,
+    args: argparse.Namespace,
+    zarr_context: dict[str, Any] | None = None,
+) -> list[AvoidRegion]:
+    """Build a hand-authored/procedural non-convex obstacle layout for --obstacle-scene.
+
+    Needs only the episode's start TCP and target position, so (unlike
+    candidate_midpath/widest_trajectory/obstacle_spawning) this requires no
+    policy rollout context and can be used with any --constraint-placement.
+    """
+    if zarr_context is not None:
+        obs, info = _reset_to_zarr_episode(env, rollout_seed=spec.seed, zarr_context=zarr_context)
+    else:
+        obs, info = env.reset(seed=spec.seed, options={"reconfigure": True})
+    entry = rollout_observation_entry(obs, info, env=env, crop_config=crop_config)
+    if zarr_context is not None:
+        entry = _apply_zarr_initial_entry(entry, zarr_context)
+    start_tcp = np.asarray(entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3]
+    target = np.asarray(entry["target_position"], dtype=np.float32).reshape(3)
+    seed_value = args.clutter_seed if args.clutter_seed is not None else spec.seed
+    rng = np.random.default_rng(int(seed_value) if seed_value is not None else None)
+    return build_obstacle_scene(
+        args.obstacle_scene,
+        start=start_tcp,
+        goal=target,
+        object_radius=float(args.obstacle_scene_object_radius),
+        arm_segments=int(args.obstacle_scene_arm_segments),
+        weight=float(args.avoid_weight),
+        margin=float(args.avoid_margin),
+        num_clutter_objects=int(args.clutter_num_objects),
+        rng=rng,
+    )
+
+
 def _constraints_for_episode(
     env: Any,
     *,
@@ -2058,6 +2349,16 @@ def _constraints_for_episode(
                 args=args,
             )
         ], None
+    if getattr(args, "obstacle_scene", "none") != "none":
+        constraints = _obstacle_scene_constraints(
+            env, spec=spec, crop_config=crop_config, args=args, zarr_context=zarr_context
+        )
+        robot_points = None
+        if args.robot_clearance_placement:
+            robot_points = _episode_start_robot_points(
+                env, spec=spec, crop_config=crop_config, zarr_context=zarr_context
+            )
+        return _finalize_constraints(constraints, robot_points=robot_points, args=args), None
     if policy is None or adapter is None or action_mode is None or goal_thresh is None:
         raise ValueError("generated avoid/projection constraints require policy rollout context")
     pending_raw: AvoidRegion | None = None
@@ -2492,12 +2793,16 @@ def _obstacle_spawning_constraints(
         paths=selected_paths,
         requested_radius=float(args.avoid_radius),
         min_radius=float(args.avoid_min_radius),
+        fraction=first_fraction,
+        window=float(args.avoid_radius_window),
     )
     second_radius = _effective_avoid_radius(
         center=second_center,
         paths=selected_paths,
         requested_radius=float(args.avoid_radius),
         min_radius=float(args.avoid_min_radius),
+        fraction=second_fraction,
+        window=float(args.avoid_radius_window),
     )
     print(
         "obstacle-spawning constraint placement: "
@@ -2609,6 +2914,8 @@ def _candidate_midpath_constraints(
             paths=selected_paths,
             requested_radius=float(args.avoid_radius),
             min_radius=float(args.avoid_min_radius),
+            fraction=frac,
+            window=float(args.avoid_radius_window),
         )
         name = _placed_constraint_name("candidate_midpath", i, multi=multi, args=args)
         projection_half_extents: np.ndarray | None = None
@@ -2731,16 +3038,46 @@ def _point_at_arc_fraction(path: np.ndarray, *, fraction: float) -> np.ndarray:
     return ((1.0 - alpha) * points[idx] + alpha * points[idx + 1]).astype(np.float32)
 
 
+def _arc_length_window_points(
+    path: np.ndarray,
+    *,
+    fraction: float,
+    window: float,
+) -> np.ndarray:
+    """Return only the points within ``window`` arc-length-fraction of ``fraction``.
+
+    Falls back to all of ``path``'s points if the window is empty (degenerate/short
+    path) so callers never lose a path entirely to windowing.
+    """
+    points = np.asarray(path, dtype=np.float32).reshape(-1, 3)
+    if points.shape[0] < 2:
+        return points
+    segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    total = float(np.sum(segment_lengths))
+    if total <= 1e-8:
+        return points
+    cumulative_fraction = np.concatenate([[0.0], np.cumsum(segment_lengths)]) / total
+    mask = np.abs(cumulative_fraction - fraction) <= window
+    return points[mask] if np.any(mask) else points
+
+
 def _effective_avoid_radius(
     *,
     center: np.ndarray,
     paths: list[np.ndarray],
     requested_radius: float,
     min_radius: float,
+    fraction: float | None = None,
+    window: float | None = None,
 ) -> float:
     if requested_radius <= 0.0 or min_radius <= 0.0:
         raise ValueError("avoid radii must be positive")
-    points = np.concatenate([np.asarray(path, dtype=np.float32).reshape(-1, 3) for path in paths])
+    if fraction is not None and window is not None:
+        points = np.concatenate(
+            [_arc_length_window_points(path, fraction=fraction, window=window) for path in paths]
+        )
+    else:
+        points = np.concatenate([np.asarray(path, dtype=np.float32).reshape(-1, 3) for path in paths])
     if points.size == 0:
         return float(max(min_radius, requested_radius))
     distances = np.linalg.norm(points - center.reshape(1, 3), axis=1)
@@ -2988,12 +3325,13 @@ def _plot_candidate_paths(
 def _episode_indices_from_args(
     args: argparse.Namespace,
     *,
-    dataset_episode_seeds: list[int],
+    dataset_episode_seeds: list[int | None],
 ) -> list[int] | None:
     if args.unique_dataset_seeds:
         return _unique_seed_episode_indices(
             dataset_episode_seeds,
             max_count=int(args.episodes),
+            start_index=int(args.unique_dataset_seeds_start_index),
         )
     if args.episode_indices_file is None:
         return args.episode_indices
@@ -3001,24 +3339,29 @@ def _episode_indices_from_args(
 
 
 def _unique_seed_episode_indices(
-    dataset_episode_seeds: list[int],
+    dataset_episode_seeds: list[int | None],
     *,
     max_count: int,
+    start_index: int = 0,
 ) -> list[int]:
     if max_count <= 0:
         raise ValueError("max_count must be positive")
+    if start_index < 0:
+        raise ValueError("start_index must be non-negative")
     seen: set[int] = set()
     indices: list[int] = []
     for dataset_idx, seed in enumerate(dataset_episode_seeds):
-        if seed in seen:
+        if seed is None or seed in seen:
             continue
         seen.add(seed)
         indices.append(dataset_idx)
-        if len(indices) >= max_count:
-            break
-    if not indices:
-        raise ValueError("dataset metadata did not contain any episode seeds")
-    return indices
+    selected = indices[start_index : start_index + max_count]
+    if not selected:
+        raise ValueError(
+            f"no unique-seed dataset episodes selected: start_index={start_index} "
+            f"max_count={max_count} but only {len(indices)} unique seeds exist"
+        )
+    return selected
 
 
 def _read_episode_indices_file(path: Path) -> list[int]:
@@ -3047,6 +3390,17 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
             "episode_indices_file": (
                 str(args.episode_indices_file) if args.episode_indices_file is not None else None
             ),
+        }
+    if getattr(args, "obstacle_scene", "none") != "none":
+        return {
+            "type": "obstacle_scene",
+            "obstacle_scene": str(args.obstacle_scene),
+            "obstacle_scene_object_radius": float(args.obstacle_scene_object_radius),
+            "obstacle_scene_arm_segments": int(args.obstacle_scene_arm_segments),
+            "clutter_num_objects": int(args.clutter_num_objects),
+            "clutter_seed": (None if args.clutter_seed is None else int(args.clutter_seed)),
+            "avoid_margin": float(args.avoid_margin),
+            "avoid_weight": float(args.avoid_weight),
         }
     if args.constraint_type == "cartesian_pose":
         return {
@@ -3244,13 +3598,22 @@ def _maybe_create_overlay_video_env(
     constraints: list[Any],
     color: tuple[float, float, float],
     alpha: float,
+    zarr_context: dict[str, Any] | None = None,
 ) -> Any | None:
     if video_env_factory is None:
         return None
     video_env = None
     try:
         video_env = video_env_factory()
-        video_env.reset(seed=spec.seed, options={"reconfigure": True})
+        if zarr_context is not None:
+            # Match sim_env's exact recorded start state -- otherwise this render-only
+            # env starts from an unrelated random pose and has to "catch up" to the
+            # sim_action sequence (computed relative to sim_env's trajectory), which
+            # shows up as a jerky, diverging overlay video even though the actually
+            # evaluated rollout (sim_env, scored in metrics/step_traces) is smooth.
+            _reset_to_zarr_episode(video_env, rollout_seed=spec.seed, zarr_context=zarr_context)
+        else:
+            video_env.reset(seed=spec.seed, options={"reconfigure": True})
         _add_constraint_overlay_actors(
             video_env,
             constraints=constraints,
@@ -3537,6 +3900,8 @@ def _init_wandb(
                 "constraint_overlay_video": bool(args.constraint_overlay_video),
                 "constraint_overlay_alpha": float(args.constraint_overlay_alpha),
                 "constraint_overlay_color": list(args.constraint_overlay_color),
+                "obstacle_realism": args.obstacle_realism,
+                "obstacle_points_per_region": int(args.obstacle_points_per_region),
                 "command": "scripts/eval_constrained_reach.py",
             },
         )

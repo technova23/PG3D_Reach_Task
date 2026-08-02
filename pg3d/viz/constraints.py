@@ -10,6 +10,7 @@ from pg3d.constraints import (
     AvoidRegion,
     BoxRegion,
     CartesianPoseConstraint,
+    CylinderRegion,
     SphereRegion,
 )
 
@@ -75,6 +76,18 @@ def avoid_region_line_visuals(
                 ConstraintLineVisual(
                     name=name,
                     line_strips=box_wireframe(region.center, region.half_extents),
+                )
+            )
+        elif isinstance(region, CylinderRegion):
+            visuals.append(
+                ConstraintLineVisual(
+                    name=name,
+                    line_strips=cylinder_wireframe(
+                        region.center,
+                        region.axis,
+                        region.radius,
+                        region.length,
+                    ),
                 )
             )
         else:
@@ -186,6 +199,53 @@ def box_wireframe(center: np.ndarray, half_extents: np.ndarray) -> list[np.ndarr
         (3, 7),
     ]
     return [corners[list(edge)].astype(np.float32) for edge in edge_indices]
+
+
+def cylinder_wireframe(
+    center: np.ndarray,
+    axis: np.ndarray,
+    radius: float,
+    length: float,
+    *,
+    segments: int = 32,
+) -> list[np.ndarray]:
+    """Return line strips for a finite cylinder: two end-cap circles plus side rails."""
+    center_array = _vector3(center, name="center")
+    axis_array = _vector3(axis, name="axis")
+    axis_norm = float(np.linalg.norm(axis_array))
+    if axis_norm <= 0.0 or not np.isfinite(axis_norm):
+        raise ValueError("axis must be a non-zero finite vector")
+    axis_array = axis_array / axis_norm
+    radius = float(radius)
+    if radius <= 0.0 or not np.isfinite(radius):
+        raise ValueError("radius must be a positive finite value")
+    length = float(length)
+    if length <= 0.0 or not np.isfinite(length):
+        raise ValueError("length must be a positive finite value")
+    if segments < 8:
+        raise ValueError("segments must be at least 8")
+
+    reference = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    if abs(float(np.dot(reference, axis_array))) > 0.9:
+        reference = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    u_axis = np.cross(axis_array, reference)
+    u_axis = (u_axis / np.linalg.norm(u_axis)).astype(np.float32)
+    v_axis = np.cross(axis_array, u_axis).astype(np.float32)
+
+    half_length = length * 0.5
+    theta = np.linspace(0.0, 2.0 * np.pi, segments + 1, dtype=np.float32)
+    ring = radius * np.cos(theta)[:, None] * u_axis.reshape(1, 3) + radius * np.sin(theta)[:, None] * v_axis.reshape(
+        1, 3
+    )
+    top = center_array.reshape(1, 3) + ring + half_length * axis_array.reshape(1, 3)
+    bottom = center_array.reshape(1, 3) + ring - half_length * axis_array.reshape(1, 3)
+
+    num_rails = 4
+    rail_indices = np.linspace(0, segments, num_rails, endpoint=False, dtype=int)
+    rails = [
+        np.stack([bottom[idx], top[idx]], axis=0).astype(np.float32) for idx in rail_indices
+    ]
+    return [top.astype(np.float32), bottom.astype(np.float32), *rails]
 
 
 def _vector3(value: object, *, name: str) -> np.ndarray:

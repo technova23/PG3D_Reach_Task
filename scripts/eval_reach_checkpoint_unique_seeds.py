@@ -108,8 +108,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.goal_thresh is not None
         else float(dict(metadata.get("env_kwargs", {})).get("goal_thresh", 0.025))
     )
+    # Raw-Zarr-row-aligned: keep every episode's slot (None where there's no recorded
+    # seed, e.g. real-captured episodes in a mixed real+sim dataset) rather than
+    # dropping/compacting them. dataset_idx values derived from this list are used
+    # directly as raw Zarr rows elsewhere (_zarr_episode_context, dataset_episode_index)
+    # -- compacting would silently shift every sim episode's index and could alias into
+    # the real-episode row range.
     dataset_episode_seeds = [
-        int(episode["seed"]) for episode in metadata.get("episodes", []) if "seed" in episode
+        int(episode["seed"]) if "seed" in episode else None
+        for episode in metadata.get("episodes", [])
     ]
     if args.source == "dataset":
         unique_indices = _unique_seed_indices(
@@ -136,6 +143,11 @@ def main(argv: list[str] | None = None) -> int:
 
     zarr_root = (
         zarr.open_group(str(args.dataset), mode="r") if args.source == "dataset" else None
+    )
+    mask_source_root = (
+        zarr.open_group(str(args.mask_source_dataset), mode="r")
+        if args.mask_source_dataset is not None
+        else None
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
@@ -180,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
                             policy=policy,
                             spec=spec,
                             zarr_root=zarr_root,
+                            mask_source_root=mask_source_root,
                             action_mode=action_mode,
                             crop_config=crop_config,
                             goal_thresh=goal_thresh,
@@ -414,6 +427,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to reach zarr dataset. Required when --source dataset.",
     )
     parser.add_argument(
+        "--mask-source-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Zarr dataset to pull robot_mask/point_valid_mask from when --dataset "
+            "doesn't have them (e.g. a mixed real+sim dataset whose sim episodes were copied "
+            "from a sim-only dataset that does). Matched per-episode by an exact point_cloud "
+            "match at the episode's start row -- real episodes with no sim-computed match "
+            "still fail clearly, since there is no real segmentation ground truth to fall "
+            "back to."
+        ),
+    )
+    parser.add_argument(
         "--env-id",
         type=str,
         default=None,
@@ -617,6 +643,7 @@ def run_reach_episode(
     policy: Any,
     spec: RolloutSpec,
     zarr_root: Any,
+    mask_source_root: Any = None,
     action_mode: ActionMode,
     crop_config: Any,
     goal_thresh: float,
@@ -631,7 +658,9 @@ def run_reach_episode(
 ) -> dict[str, Any]:
     if spec.dataset_episode_index is None:
         raise ValueError("run_reach_episode requires a dataset_episode_index to restore Zarr state")
-    zarr_context = _zarr_episode_context(zarr_root, spec.dataset_episode_index)
+    zarr_context = _zarr_episode_context(
+        zarr_root, spec.dataset_episode_index, mask_source_root=mask_source_root
+    )
     obs, info = _reset_to_zarr_episode(env, rollout_seed=spec.seed, zarr_context=zarr_context)
     frames: list[np.ndarray] | None = (
         [_frame_to_numpy(env.render())] if video_path is not None else None
@@ -742,7 +771,53 @@ def run_reach_episode(
     }
 
 
-def _zarr_episode_context(zarr_root: Any, episode_index: int) -> dict[str, Any]:
+_MASK_SOURCE_INDEX_CACHE: dict[int, dict[bytes, int]] = {}
+
+
+def _mask_source_index(mask_source_root: Any) -> dict[bytes, int]:
+    """Build (and cache) a point_cloud-bytes -> episode-start-row index for mask lookup."""
+    cache_key = id(mask_source_root)
+    cached = _MASK_SOURCE_INDEX_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    ends = np.asarray(mask_source_root["meta"]["episode_ends"][:], dtype=np.int64)
+    starts = np.concatenate([[0], ends[:-1]])
+    point_cloud = mask_source_root["data"]["point_cloud"]
+    index = {
+        np.asarray(point_cloud[start], dtype=np.float32).tobytes(): int(start)
+        for start in starts
+    }
+    _MASK_SOURCE_INDEX_CACHE[cache_key] = index
+    return index
+
+
+def _lookup_masks_from_source(
+    mask_source_root: Any,
+    point_cloud: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Find robot_mask/point_valid_mask in ``mask_source_root`` for an identical point_cloud.
+
+    Matches by exact byte equality at each source episode's start row (e.g. sim episodes
+    copied verbatim into a downstream mixed dataset). Returns None if no exact match is
+    found -- real-captured episodes have no sim-computed counterpart to match against.
+    """
+    index = _mask_source_index(mask_source_root)
+    start = index.get(np.asarray(point_cloud, dtype=np.float32).tobytes())
+    if start is None:
+        return None
+    data = mask_source_root["data"]
+    return (
+        np.asarray(data["robot_mask"][start], dtype=bool).copy(),
+        np.asarray(data["point_valid_mask"][start], dtype=bool).copy(),
+    )
+
+
+def _zarr_episode_context(
+    zarr_root: Any,
+    episode_index: int,
+    *,
+    mask_source_root: Any = None,
+) -> dict[str, Any]:
     episode_ends = np.asarray(zarr_root["meta"]["episode_ends"][:], dtype=np.int64)
     if episode_index < 0 or episode_index >= len(episode_ends):
         raise IndexError(
@@ -753,13 +828,31 @@ def _zarr_episode_context(zarr_root: Any, episode_index: int) -> dict[str, Any]:
     if episode_start >= episode_end:
         raise ValueError(f"Zarr episode {episode_index} is empty")
     data = zarr_root["data"]
-    required = (
-        "state", "target_position", "tcp_pose", "point_cloud", "robot_mask", "point_valid_mask"
-    )
+    required = ("state", "target_position", "tcp_pose", "point_cloud")
     missing = [key for key in required if key not in data]
     if missing:
         raise ValueError(f"dataset missing required Zarr arrays: {missing}")
     row = episode_start
+
+    point_cloud = np.asarray(data["point_cloud"][row], dtype=np.float32).copy()
+    if "robot_mask" in data and "point_valid_mask" in data:
+        robot_mask = np.asarray(data["robot_mask"][row], dtype=bool).copy()
+        point_valid_mask = np.asarray(data["point_valid_mask"][row], dtype=bool).copy()
+    elif mask_source_root is not None:
+        found = _lookup_masks_from_source(mask_source_root, point_cloud)
+        if found is None:
+            raise ValueError(
+                f"episode {episode_index} has no robot_mask/point_valid_mask in --dataset "
+                "and no exact point_cloud match in --mask-source-dataset (expected for "
+                "real-captured episodes, which have no sim-computed counterpart)"
+            )
+        robot_mask, point_valid_mask = found
+    else:
+        raise ValueError(
+            "dataset is missing required Zarr arrays: ['robot_mask', 'point_valid_mask'] "
+            "(pass --mask-source-dataset to backfill sim-sourced episodes from a dataset "
+            "that has them)"
+        )
     return {
         "episode_index": int(episode_index),
         "episode_start": episode_start,
@@ -768,9 +861,9 @@ def _zarr_episode_context(zarr_root: Any, episode_index: int) -> dict[str, Any]:
             data["target_position"][row], dtype=np.float32
         ).reshape(3).copy(),
         "tcp_pose": np.asarray(data["tcp_pose"][row], dtype=np.float32).copy(),
-        "point_cloud": np.asarray(data["point_cloud"][row], dtype=np.float32).copy(),
-        "robot_mask": np.asarray(data["robot_mask"][row], dtype=bool).copy(),
-        "point_valid_mask": np.asarray(data["point_valid_mask"][row], dtype=bool).copy(),
+        "point_cloud": point_cloud,
+        "robot_mask": robot_mask,
+        "point_valid_mask": point_valid_mask,
     }
 
 
@@ -1265,7 +1358,7 @@ def _to_numpy_safe(x: Any) -> np.ndarray:
 
 
 def _unique_seed_indices(
-    dataset_episode_seeds: list[int],
+    dataset_episode_seeds: list[int | None],
     *,
     count: int,
     start_index: int,
@@ -1274,7 +1367,7 @@ def _unique_seed_indices(
     seen: set[int] = set()
     unique_indices: list[int] = []
     for dataset_idx, seed in enumerate(dataset_episode_seeds):
-        if seed in seen:
+        if seed is None or seed in seen:
             continue
         seen.add(seed)
         unique_indices.append(dataset_idx)

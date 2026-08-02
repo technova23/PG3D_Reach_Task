@@ -61,9 +61,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--checkpoint-model", choices=["ema", "raw"], default="ema")
     parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument(
+        "--mask-source-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Zarr dataset to pull robot_mask/point_valid_mask from when --dataset "
+            "doesn't have them (e.g. a mixed real+sim dataset). Same as "
+            "eval_constrained_reach.py's flag of the same name."
+        ),
+    )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--episode-indices", type=int, nargs="+", default=[0, 1, 2])
-    parser.add_argument("--k", type=int, default=32, help="candidates sampled per replan")
+    parser.add_argument(
+        "--k-schedule",
+        type=int,
+        nargs="+",
+        default=[16, 32, 64],
+        help=(
+            "Escalating candidate counts sampled per replan, same semantics as "
+            "eval_constrained_reach.py's --k-schedule: each stage's candidates are added "
+            "to the pool and reranking stops as soon as any stage yields a feasible "
+            "candidate, falling back to least-bad only after every stage is exhausted. "
+            "Must match production's schedule for the visualized replans to be exact."
+        ),
+    )
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument(
         "--max-episode-steps",
@@ -116,8 +138,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="frames each replan step is held for (at --video-fps) so it's readable",
     )
     args = parser.parse_args(argv)
-    if args.k <= 0:
-        raise ValueError("--k must be positive")
+    if not args.k_schedule or any(k <= 0 for k in args.k_schedule):
+        raise ValueError("--k-schedule values must be positive")
     if args.max_steps <= 0:
         raise ValueError("--max-steps must be positive")
     if args.max_episode_steps is not None and args.max_episode_steps <= 0:
@@ -149,7 +171,7 @@ def _build_eval_args(args: argparse.Namespace, *, scratch_dir: Path) -> argparse
         "--max-steps", str(args.max_steps),
         "--planning-horizon-chunks", "1",
         "--geometry-mode", "fast",
-        "--k-schedule", str(args.k),
+        "--k-schedule", *[str(k) for k in args.k_schedule],
         "--constraint-placement", args.constraint_placement,
         "--constraint-type", args.constraint_type,
         "--projection-half-extents", str(args.projection_half_extents[0]), str(args.projection_half_extents[1]),
@@ -159,6 +181,8 @@ def _build_eval_args(args: argparse.Namespace, *, scratch_dir: Path) -> argparse
     ]
     if args.max_episode_steps is not None:
         argv += ["--max-episode-steps", str(args.max_episode_steps)]
+    if args.mask_source_dataset is not None:
+        argv += ["--mask-source-dataset", str(args.mask_source_dataset)]
     return parse_eval_args(argv)
 
 
@@ -198,10 +222,19 @@ def main(argv: list[str] | None = None) -> int:
     action_mode = _action_mode(str(metadata.get("action_mode", "abs_joint")))
     crop_config = crop_config_from_metadata(metadata)
     goal_thresh = float(dict(metadata.get("env_kwargs", {})).get("goal_thresh", 0.025))
+    # Raw-Zarr-row-aligned: keep every episode's slot (None where there's no recorded
+    # seed, e.g. real-captured episodes in a mixed real+sim dataset) -- see the same
+    # fix in eval_constrained_reach.py / eval_reach_checkpoint_unique_seeds.py.
     dataset_episode_seeds = [
-        int(episode["seed"]) for episode in metadata.get("episodes", []) if "seed" in episode
+        int(episode["seed"]) if "seed" in episode else None
+        for episode in metadata.get("episodes", [])
     ]
     zarr_root = zarr.open_group(str(args.dataset), mode="r")
+    mask_source_root = (
+        zarr.open_group(str(args.mask_source_dataset), mode="r")
+        if args.mask_source_dataset is not None
+        else None
+    )
     specs = select_rollout_specs(
         source="dataset",
         dataset_episode_seeds=dataset_episode_seeds,
@@ -228,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         for spec in specs:
-            zarr_context = _zarr_episode_context(zarr_root, spec.dataset_episode_index)
+            zarr_context = _zarr_episode_context(
+                zarr_root, spec.dataset_episode_index, mask_source_root=mask_source_root
+            )
             constraints, pending_spawn = _constraints_for_episode(
                 sim_env,
                 spec=spec,
@@ -263,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
                 crop_config=crop_config,
                 goal_thresh=goal_thresh,
                 zarr_context=zarr_context,
-                k=args.k,
+                k_schedule=tuple(args.k_schedule),
                 max_steps=args.max_steps,
                 gripper_open=args.gripper_open,
                 rng=rng,
@@ -298,7 +333,7 @@ def _run_episode(
     crop_config: Any,
     goal_thresh: float,
     zarr_context: dict[str, Any],
-    k: int,
+    k_schedule: tuple[int, ...],
     max_steps: int,
     gripper_open: float,
     rng: np.random.Generator,
@@ -343,7 +378,7 @@ def _run_episode(
                 goal_thresh=goal_thresh,
                 planning_horizon_chunks=1,
                 geometry_mode="fast",
-                k_schedule=(k,),
+                k_schedule=k_schedule,
                 rng=rng,
                 timer=timer,
             )

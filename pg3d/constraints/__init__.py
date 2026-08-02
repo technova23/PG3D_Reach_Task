@@ -18,8 +18,18 @@ from pg3d.constraints.programs import (
     constraints_to_json,
     make_obstructing_avoid_region,
 )
+from pg3d.constraints.scenes import (
+    OBSTACLE_SCENE_NAMES,
+    build_obstacle_scene,
+    cluttered_field_scene,
+    l_corner_scene,
+    pillar_cluster_scene,
+    u_pocket_scene,
+    wall_gap_scene,
+)
 
 __all__ = [
+    "OBSTACLE_SCENE_NAMES",
     "AvoidProjection",
     "AvoidRegion",
     "BoxRegion",
@@ -32,9 +42,15 @@ __all__ = [
     "SceneContext",
     "SmoothnessCost",
     "SphereRegion",
+    "build_obstacle_scene",
+    "cluttered_field_scene",
     "constraint_from_json",
     "constraints_from_json",
     "constraints_to_json",
+    "l_corner_scene",
     "make_obstructing_avoid_region",
+    "pillar_cluster_scene",
     "region_from_json",
+    "u_pocket_scene",
+    "wall_gap_scene",
 ]

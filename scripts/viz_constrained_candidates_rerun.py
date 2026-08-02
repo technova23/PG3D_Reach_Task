@@ -66,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
 
     metadata = load_reach_metadata(args.dataset)
     zarr_root = zarr.open_group(str(args.dataset), mode="r")
+    mask_source_root = (
+        zarr.open_group(str(args.mask_source_dataset), mode="r")
+        if args.mask_source_dataset is not None
+        else None
+    )
     episode_seeds = _resolve_episode_seeds(metadata)
     _validate_episode_index(args.episode_index, episode_seeds)
     crop_config = crop_config_from_metadata(metadata)
@@ -88,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
             crop_config=crop_config,
             device=device,
             zarr_root=zarr_root,
+            mask_source_root=mask_source_root,
         )
     finally:
         if env is not None:
@@ -167,6 +173,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     )
     parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument(
+        "--mask-source-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Zarr dataset to pull robot_mask/point_valid_mask from when --dataset "
+            "doesn't have them (e.g. a mixed real+sim dataset whose sim episodes were copied "
+            "from a sim-only dataset that does). Matched per-episode by an exact point_cloud "
+            "match at the episode's start row -- real episodes with no sim-computed match "
+            "still fail clearly, since there is no real segmentation ground truth to fall "
+            "back to."
+        ),
+    )
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--checkpoint-model", choices=["ema", "raw"], default="ema")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
@@ -427,6 +446,22 @@ def _resolve_episode_seeds(metadata: dict[str, Any]) -> list[int]:
 
     collection = metadata.get("collection", {})
     seed_start = collection.get("seed_start", metadata.get("seed_start"))
+
+    if episodes and any(isinstance(episode, dict) and "seed" in episode for episode in episodes):
+        # Mixed dataset (e.g. real + sim episodes): real episodes were physically
+        # executed and have no simulator seed. Use each episode's own seed where
+        # present; for the rest, fall back to seed_start+index if available, else
+        # the episode index itself. This is safe because _zarr_episode_context
+        # fully overwrites the reset state/point-cloud/target from the recorded
+        # Zarr row afterward -- the seed here only bootstraps the initial
+        # env.reset() call, it doesn't need to be the "true" recorded seed.
+        return [
+            int(episode["seed"])
+            if isinstance(episode, dict) and "seed" in episode
+            else (int(seed_start) + idx if seed_start is not None else idx)
+            for idx, episode in enumerate(episodes)
+        ]
+
     if seed_start is None:
         raise ValueError("dataset metadata has no episode seeds and no seed_start fallback")
 
@@ -441,7 +476,53 @@ def _resolve_episode_seeds(metadata: dict[str, Any]) -> list[int]:
     return [int(seed_start) + idx for idx in range(int(num_episodes))]
 
 
-def _zarr_episode_context(zarr_root: Any, episode_index: int) -> dict[str, Any]:
+_MASK_SOURCE_INDEX_CACHE: dict[int, dict[bytes, int]] = {}
+
+
+def _mask_source_index(mask_source_root: Any) -> dict[bytes, int]:
+    """Build (and cache) a point_cloud-bytes -> episode-start-row index for mask lookup."""
+    cache_key = id(mask_source_root)
+    cached = _MASK_SOURCE_INDEX_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    ends = np.asarray(mask_source_root["meta"]["episode_ends"][:], dtype=np.int64)
+    starts = np.concatenate([[0], ends[:-1]])
+    point_cloud = mask_source_root["data"]["point_cloud"]
+    index = {
+        np.asarray(point_cloud[start], dtype=np.float32).tobytes(): int(start)
+        for start in starts
+    }
+    _MASK_SOURCE_INDEX_CACHE[cache_key] = index
+    return index
+
+
+def _lookup_masks_from_source(
+    mask_source_root: Any,
+    point_cloud: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Find robot_mask/point_valid_mask in ``mask_source_root`` for an identical point_cloud.
+
+    Matches by exact byte equality at each source episode's start row (e.g. sim episodes
+    copied verbatim into a downstream mixed dataset). Returns None if no exact match is
+    found -- real-captured episodes have no sim-computed counterpart to match against.
+    """
+    index = _mask_source_index(mask_source_root)
+    start = index.get(np.asarray(point_cloud, dtype=np.float32).tobytes())
+    if start is None:
+        return None
+    data = mask_source_root["data"]
+    return (
+        np.asarray(data["robot_mask"][start], dtype=bool).copy(),
+        np.asarray(data["point_valid_mask"][start], dtype=bool).copy(),
+    )
+
+
+def _zarr_episode_context(
+    zarr_root: Any,
+    episode_index: int,
+    *,
+    mask_source_root: Any = None,
+) -> dict[str, Any]:
     """Read the exact initial state and goal for one Zarr episode."""
     episode_ends = np.asarray(zarr_root["meta"]["episode_ends"][:], dtype=np.int64)
     if episode_index < 0 or episode_index >= len(episode_ends):
@@ -455,17 +536,30 @@ def _zarr_episode_context(zarr_root: Any, episode_index: int) -> dict[str, Any]:
         raise ValueError(f"Zarr episode {episode_index} is empty")
 
     data = zarr_root["data"]
-    required = (
-        "state",
-        "target_position",
-        "tcp_pose",
-        "point_cloud",
-        "robot_mask",
-        "point_valid_mask",
-    )
+    required = ("state", "target_position", "tcp_pose", "point_cloud")
     missing = [key for key in required if key not in data]
     if missing:
         raise ValueError(f"dataset is missing required Zarr arrays: {missing}")
+
+    point_cloud = np.asarray(data["point_cloud"][episode_start], dtype=np.float32).copy()
+    if "robot_mask" in data and "point_valid_mask" in data:
+        robot_mask = np.asarray(data["robot_mask"][episode_start], dtype=bool).copy()
+        point_valid_mask = np.asarray(data["point_valid_mask"][episode_start], dtype=bool).copy()
+    elif mask_source_root is not None:
+        found = _lookup_masks_from_source(mask_source_root, point_cloud)
+        if found is None:
+            raise ValueError(
+                f"episode {episode_index} has no robot_mask/point_valid_mask in --dataset "
+                "and no exact point_cloud match in --mask-source-dataset (expected for "
+                "real-captured episodes, which have no sim-computed counterpart)"
+            )
+        robot_mask, point_valid_mask = found
+    else:
+        raise ValueError(
+            "dataset is missing required Zarr arrays: ['robot_mask', 'point_valid_mask'] "
+            "(pass --mask-source-dataset to backfill sim-sourced episodes from a dataset "
+            "that has them)"
+        )
     return {
         "episode_index": int(episode_index),
         "episode_start": episode_start,
@@ -475,11 +569,9 @@ def _zarr_episode_context(zarr_root: Any, episode_index: int) -> dict[str, Any]:
             data["target_position"][episode_start], dtype=np.float32
         ).reshape(3).copy(),
         "tcp_pose": np.asarray(data["tcp_pose"][episode_start], dtype=np.float32).copy(),
-        "point_cloud": np.asarray(data["point_cloud"][episode_start], dtype=np.float32).copy(),
-        "robot_mask": np.asarray(data["robot_mask"][episode_start], dtype=bool).copy(),
-        "point_valid_mask": np.asarray(
-            data["point_valid_mask"][episode_start], dtype=bool
-        ).copy(),
+        "point_cloud": point_cloud,
+        "robot_mask": robot_mask,
+        "point_valid_mask": point_valid_mask,
     }
 
 
@@ -565,11 +657,14 @@ def _evaluate_episode_range(
     crop_config: Any,
     device: torch.device,
     zarr_root: Any,
+    mask_source_root: Any = None,
 ) -> dict[str, Any]:
     end_index = min(args.episode_index + args.search_episodes, len(episode_seeds))
     episode_results: list[dict[str, Any]] = []
     for episode_index in range(args.episode_index, end_index):
-        zarr_context = _zarr_episode_context(zarr_root, episode_index)
+        zarr_context = _zarr_episode_context(
+            zarr_root, episode_index, mask_source_root=mask_source_root
+        )
         result = _evaluate_episode_candidates(
             env=env,
             policy=policy,
