@@ -75,7 +75,9 @@ def avoid_region_line_visuals(
             visuals.append(
                 ConstraintLineVisual(
                     name=name,
-                    line_strips=box_wireframe(region.center, region.half_extents),
+                    line_strips=box_wireframe(
+                        region.center, region.half_extents, rotation=region.rotation
+                    ),
                 )
             )
         elif isinstance(region, CylinderRegion):
@@ -164,8 +166,18 @@ def sphere_wireframe(
     return [(circle + center_array.reshape(1, 3)).astype(np.float32) for circle in circles]
 
 
-def box_wireframe(center: np.ndarray, half_extents: np.ndarray) -> list[np.ndarray]:
-    """Return twelve edge line strips for an axis-aligned box."""
+def box_wireframe(
+    center: np.ndarray,
+    half_extents: np.ndarray,
+    *,
+    rotation: np.ndarray | None = None,
+) -> list[np.ndarray]:
+    """Return twelve edge line strips for a box, axis-aligned unless ``rotation`` is given.
+
+    ``rotation``, when given, is a ``(3, 3)`` matrix whose columns are the
+    box's local axes in world coordinates -- same convention as
+    ``BoxRegion.rotation``.
+    """
     center_array = _vector3(center, name="center")
     half_extents_array = _vector3(half_extents, name="half_extents")
     if np.any(half_extents_array <= 0.0) or not np.all(np.isfinite(half_extents_array)):
@@ -183,7 +195,11 @@ def box_wireframe(center: np.ndarray, half_extents: np.ndarray) -> list[np.ndarr
         ],
         dtype=np.float32,
     )
-    corners = center_array.reshape(1, 3) + signs * half_extents_array.reshape(1, 3)
+    offsets = signs * half_extents_array.reshape(1, 3)
+    if rotation is not None:
+        rotation_array = _matrix3(rotation, name="rotation")
+        offsets = offsets @ rotation_array.T
+    corners = center_array.reshape(1, 3) + offsets
     edge_indices = [
         (0, 1),
         (1, 2),
@@ -252,6 +268,17 @@ def _vector3(value: object, *, name: str) -> np.ndarray:
     array = np.asarray(value, dtype=np.float32)
     if array.shape != (3,):
         raise ValueError(f"{name} must have shape (3,), got {array.shape}")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    return array
+
+
+def _matrix3(value: object, *, name: str) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float32)
+    if array.shape == (9,):
+        array = array.reshape(3, 3)
+    if array.shape != (3, 3):
+        raise ValueError(f"{name} must have shape (3, 3) or (9,), got {array.shape}")
     if not np.all(np.isfinite(array)):
         raise ValueError(f"{name} must contain only finite values")
     return array

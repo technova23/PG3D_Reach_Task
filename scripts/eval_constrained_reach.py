@@ -29,6 +29,7 @@ from pg3d.composition.scoring import (
     trajectory_smoothness,
 )
 from pg3d.constraints import (
+    DEFAULT_WALL_HEIGHT,
     OBSTACLE_SCENE_NAMES,
     AvoidProjection,
     AvoidRegion,
@@ -37,6 +38,7 @@ from pg3d.constraints import (
     RectRegion2D,
     SphereRegion,
     build_obstacle_scene,
+    wall_gap_at,
 )
 from pg3d.envs.maniskill_adapter import (
     ManiSkillGhostPandaGeometryProvider,
@@ -662,13 +664,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "and places the region in the middle of their natural path bundle; "
             "widest_trajectory rolls out candidates, selects the single path that bows out "
             "the most from the straight start-goal line, and plants one region per "
-            "--avoid-path-fractions value along that widest path. obstacle_spawning also "
-            "selects the widest candidate path and places a first obstacle at "
-            "--avoid-path-fractions' first value, but it is not the only obstacle: a second "
-            "one is placed at a random arc-length fraction further along the same path "
-            "(see --obstacle-spawn-fraction-margin) and stays hidden from guidance/video "
-            "until the live rollout's TCP crosses the first obstacle's fraction, at which "
-            "point it spawns for the remainder of that episode."
+            "--avoid-path-fractions value along that widest path. obstacle_spawning instead "
+            "aggregates the *whole* candidate-path bundle into a median reference path "
+            "(candidate_midpath's approach, generalized across a dense fraction grid -- "
+            "i.e. where the majority of trajectories actually go, not one extreme outlier) "
+            "and places a first obstacle on it at --avoid-path-fractions' first value, "
+            "sized to the bundle's own local spread there (same windowed-percentile radius "
+            "as --avoid-radius-window). It is not the only obstacle: a second one is placed "
+            "at a random arc-length fraction further along the same median path (see "
+            "--obstacle-spawn-fraction-margin) and stays fully hidden from guidance/video/"
+            "every replan's imagined rollout until the live rollout's TCP physically crosses "
+            "the first obstacle's fraction, at which point it spawns for the remainder of "
+            "that episode -- so avoiding it can only be discovered causally, across the "
+            "sequence of replans as the episode actually progresses, never by a single "
+            "replan's upfront lookahead (the information plainly does not exist yet when "
+            "any earlier replan runs). See --obstacle-spawn-first-shape to make the first "
+            "obstacle a wall_gap (forces a committed detour through a specific gap in the "
+            "bundle's own path) instead of a single blob."
         ),
     )
     parser.add_argument("--constraint-placement-candidates", type=int, default=10)
@@ -683,6 +695,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "first is crossed. The second obstacle's fraction is sampled uniformly from "
             "[first_fraction + margin, 0.98], clamped to always land strictly ahead of "
             "the first and short of the goal."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-spawn-first-shape",
+        choices=["blob", "wall_gap"],
+        default="blob",
+        help=(
+            "For --constraint-placement obstacle_spawning: shape of the FIRST (always-"
+            "visible) obstacle. 'blob' (default) is a single sphere/box per --avoid-shape, "
+            "as before. 'wall_gap' instead builds a two-piece wall (see "
+            "pg3d.constraints.scenes.wall_gap_at) oriented to the median candidate-path "
+            "bundle's own local tangent at --avoid-path-fractions' first value, with a gap "
+            "centered on the bundle and sized to its local spread there (2x the same "
+            "windowed-percentile radius the 'blob' shape would have used) -- i.e. a real "
+            "committed gap the bundle is meant to actually fit through, not a single "
+            "avoidable point obstacle. The (always-hidden-until-crossed) second obstacle "
+            "stays a single blob either way, placed further along the same median path -- "
+            "so the tested structure is: thread a specific gap, then discover a blocking "
+            "obstacle just past it that no earlier replan could have seen. Uses "
+            "--obstacle-scene-object-radius/--obstacle-scene-arm-segments/"
+            "--obstacle-scene-primitive/--obstacle-scene-wall-height for sizing, same as "
+            "--obstacle-scene's wall-shaped scenes."
         ),
     )
     parser.add_argument(
@@ -806,17 +840,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Build a hand-authored or procedural non-convex obstacle layout instead of the "
             "direct-path/candidate-midpath single-region placement above. 'none' (default) "
             "leaves --constraint-placement in charge, unchanged. Each non-'none' scene is a "
-            "small cluster of sphere/cylinder AvoidRegion constraints positioned relative to "
-            "the episode's start->goal direction, whose *union* forms a non-convex keep-out "
+            "small cluster of sphere/box/cylinder AvoidRegion constraints positioned relative "
+            "to the episode's start->goal direction, whose *union* forms a non-convex keep-out "
             "shape (a greedy locally-lowest-cost path can get trapped in it, unlike a single "
             "convex region): 'wall_gap' blocks the direct line except for an off-center gap; "
             "'l_corner' is a wall plus a perpendicular arm closing off the near detour; "
             "'u_pocket' is a pocket with its mouth facing the start (drives a greedy policy "
-            "into a dead end); 'pillar_cluster' scatters vertical cylinder pillars; "
+            "into a dead end); 'shortcut_trap' is the same wall-plus-closing-arm shape as "
+            "'l_corner' but placed near the start by default (see "
+            "--obstacle-scene-placement-fraction) rather than the path midpoint, so a greedy "
+            "policy commits to it almost immediately, with most of the path still ahead when "
+            "it hits the dead end; 'pillar_cluster' scatters vertical cylinder pillars; "
             "'cluttered_field' procedurally scatters --clutter-num-objects sphere/cylinder "
-            "obstacles with basic clearance checks. When set, bypasses the "
-            "--constraint-placement dispatch entirely and does not require a policy rollout, "
-            "so it works with any --constraint-placement value (ignored)."
+            "obstacles with basic clearance checks. The four wall-shaped scenes "
+            "(wall_gap/l_corner/u_pocket/shortcut_trap) default to solid oriented "
+            "--obstacle-scene-primitive box walls -- see that flag and "
+            "--obstacle-scene-wall-height for why (gap-free, and tall enough that hopping "
+            "over isn't a cheap escape). When set, bypasses the --constraint-placement "
+            "dispatch entirely and does not require a policy rollout, so it works with any "
+            "--constraint-placement value (ignored)."
         ),
     )
     parser.add_argument(
@@ -830,8 +872,51 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=3,
         help=(
-            "Number of spheres per wall/arm segment for --obstacle-scene "
-            "wall_gap/l_corner/u_pocket. Larger values make longer, harder-to-skirt walls."
+            "Wall/arm segment length for --obstacle-scene wall_gap/l_corner/u_pocket/"
+            "shortcut_trap, in units of --obstacle-scene-object-radius-sized steps. Larger "
+            "values make longer, harder-to-skirt-around walls. With the default "
+            "--obstacle-scene-primitive box this sizes one solid box's length (not a literal "
+            "sphere count); with --obstacle-scene-primitive sphere it is the literal number "
+            "of chained spheres, as before."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-scene-primitive",
+        choices=["sphere", "box"],
+        default="box",
+        help=(
+            "Convex primitive used to build wall-shaped --obstacle-scene layouts "
+            "(wall_gap/l_corner/u_pocket/shortcut_trap only -- ignored by "
+            "pillar_cluster/cluttered_field, which are always cylinder/sphere). "
+            "'box' (default) builds each straight wall/arm segment as a single solid "
+            "oriented BoxRegion -- gap-free, unlike 'sphere' (legacy), which chains "
+            "spheres along the segment and can leave thin cusps between them for a "
+            "candidate path to clip through cheaply."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-scene-wall-height",
+        type=float,
+        default=DEFAULT_WALL_HEIGHT,
+        help=(
+            "Height (meters) of box-primitive walls in wall-shaped --obstacle-scene "
+            "layouts. Deliberately much taller than a single --obstacle-scene-object-radius "
+            "so hopping over the top isn't a trivially cheap escape; lower it for a "
+            "shorter/easier wall. Ignored by --obstacle-scene-primitive sphere (sphere "
+            "walls are always 2 * --obstacle-scene-object-radius tall, unchanged)."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-scene-placement-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Where along the start->goal line to place a wall-shaped --obstacle-scene "
+            "obstacle, in [0, 1] (0=start, 1=goal). Default (unset) uses each scene's own "
+            "default: 0.5 (midpoint) for wall_gap/l_corner/u_pocket, 0.25 (near start) for "
+            "shortcut_trap. Placing closer to start means a greedy policy commits to "
+            "heading at the obstacle almost immediately, with most of the path still "
+            "ahead when it discovers the dead end."
         ),
     )
     parser.add_argument(
@@ -1060,6 +1145,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--obstacle-scene-object-radius must be positive")
     if args.obstacle_scene_arm_segments <= 0:
         raise ValueError("--obstacle-scene-arm-segments must be positive")
+    if args.obstacle_scene_wall_height <= 0.0:
+        raise ValueError("--obstacle-scene-wall-height must be positive")
+    if args.obstacle_scene_placement_fraction is not None and not (
+        0.0 <= args.obstacle_scene_placement_fraction <= 1.0
+    ):
+        raise ValueError("--obstacle-scene-placement-fraction must be in [0, 1]")
     if args.clutter_num_objects < 0:
         raise ValueError("--clutter-num-objects must be non-negative")
     if args.obstacle_scene != "none" and args.constraint_type == "cartesian_pose":
@@ -2135,10 +2226,14 @@ def _clear_region_from_robot(
         )
         return SphereRegion(center=center, radius=max(min_radius, radius))
     # BoxRegion: translate away from nearest robot point until clear.
+    # rotation is preserved across every reconstruction below -- otherwise an
+    # oriented wall (see pg3d/constraints/scenes.py) would silently flatten
+    # back to axis-aligned the moment this clearance pass touches it.
     center = region.center.astype(np.float32).copy()
     half_extents = region.half_extents.astype(np.float32)
+    rotation = region.rotation
     for _ in range(max_iter):
-        candidate = BoxRegion(center=center, half_extents=half_extents)
+        candidate = BoxRegion(center=center, half_extents=half_extents, rotation=rotation)
         signed = candidate.signed_distance(pts)
         min_sd = float(np.min(signed))
         if min_sd >= clearance:
@@ -2156,7 +2251,7 @@ def _clear_region_from_robot(
         f"(min clearance still < {clearance:.3f} m after {max_iter} iters)",
         file=sys.stderr,
     )
-    return BoxRegion(center=center, half_extents=half_extents)
+    return BoxRegion(center=center, half_extents=half_extents, rotation=rotation)
 
 
 def _finalize_constraints(
@@ -2316,6 +2411,13 @@ def _obstacle_scene_constraints(
         margin=float(args.avoid_margin),
         num_clutter_objects=int(args.clutter_num_objects),
         rng=rng,
+        primitive=args.obstacle_scene_primitive,
+        wall_height=float(args.obstacle_scene_wall_height),
+        placement_fraction=(
+            float(args.obstacle_scene_placement_fraction)
+            if args.obstacle_scene_placement_fraction is not None
+            else None
+        ),
     )
 
 
@@ -2721,6 +2823,39 @@ def _median_candidate_path(paths: list[np.ndarray], *, num_samples: int = 101) -
     return centers.astype(np.float32)
 
 
+def _local_tangent_frame(
+    path: np.ndarray,
+    *,
+    fraction: float,
+    eps: float = 0.02,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (forward_unit, lateral_unit) at ``fraction`` along a (possibly curved) path.
+
+    Finite-differences two nearby points (``fraction`` +/- ``eps``, clamped to
+    [0, 1]) to get a local tangent, then derives ``lateral`` the same way
+    ``pg3d.constraints.scenes._direct_frame`` does for a straight chord
+    (perpendicular to both ``forward`` and world-up, so it stays horizontal).
+    Used to orient a wall_gap on a curved median candidate-path instead of
+    the raw straight-line start->goal chord.
+    """
+    lo = max(0.0, float(fraction) - eps)
+    hi = min(1.0, float(fraction) + eps)
+    p_before = _point_at_arc_fraction(path, fraction=lo)
+    p_after = _point_at_arc_fraction(path, fraction=hi)
+    delta = p_after - p_before
+    norm = float(np.linalg.norm(delta))
+    forward = (delta / norm).astype(np.float32) if norm > 1e-6 else np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    world_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    lateral = np.cross(forward, world_up)
+    lateral_norm = float(np.linalg.norm(lateral))
+    lateral = (
+        (lateral / lateral_norm).astype(np.float32)
+        if lateral_norm > 1e-6
+        else np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    )
+    return forward, lateral
+
+
 def _obstacle_spawning_constraints(
     env: Any,
     *,
@@ -2742,15 +2877,21 @@ def _obstacle_spawning_constraints(
     fraction grid via _median_candidate_path so the result is a full polyline --
     needed as a progress-tracking reference path during the live rollout, not just
     a single point. The first obstacle is placed at --avoid-path-fractions' first
-    value. The second is placed at a random fraction sampled from
+    value -- by default a single blob (--obstacle-spawn-first-shape blob), or a
+    two-piece wall_gap oriented to the median path's own local tangent there
+    (--obstacle-spawn-first-shape wall_gap), gap centered/sized to the bundle's
+    local spread so the "majority" of candidates are meant to actually fit
+    through it. The second is placed at a random fraction sampled from
     [first_fraction + --obstacle-spawn-fraction-margin, 0.98] (clamped to stay
     strictly ahead of the first and short of the goal) -- it is returned raw so
     the caller can finalize (robot-clearance placement) it alongside the first,
     but it must NOT be added to the live constraints list until the rollout
-    crosses the first obstacle (see PendingObstacleSpawn / run_eval_episode).
+    crosses the first obstacle (see PendingObstacleSpawn / run_eval_episode) --
+    i.e. it is unavoidable-by-upfront-lookahead by construction, since no
+    replan before that crossing has this obstacle in its scored scene at all.
 
-    Returns (initial_constraints=[first], second_raw, reference_path=median_path,
-    trigger_fraction=first_fraction).
+    Returns (initial_constraints=first [1 region for blob, 2 for wall_gap],
+    second_raw, reference_path=median_path, trigger_fraction=first_fraction).
     """
     first_fraction = float(args.avoid_path_fractions[0])
     paths, successful_paths = _collect_candidate_paths(
@@ -2804,9 +2945,11 @@ def _obstacle_spawning_constraints(
         fraction=second_fraction,
         window=float(args.avoid_radius_window),
     )
+    first_shape = getattr(args, "obstacle_spawn_first_shape", "blob")
     print(
         "obstacle-spawning constraint placement: "
-        f"episode={spec.output_index} first_frac={first_fraction:.3f} "
+        f"episode={spec.output_index} first_shape={first_shape} "
+        f"first_frac={first_fraction:.3f} "
         f"second_frac={second_fraction:.3f} sampled={len(paths)} "
         f"successful={len(successful_paths)} used={len(selected_paths)} "
         f"first_center={first_center.tolist()} "
@@ -2827,19 +2970,40 @@ def _obstacle_spawning_constraints(
             constraint_index=0,
             projection_half_extents=None,
         )
-    first_constraint = AvoidRegion(
-        region=_avoid_region_of_shape(first_center, first_radius, args),
-        margin=float(args.avoid_margin),
-        weight=float(args.avoid_weight),
-        name="obstacle_spawning_avoid_region_0",
-    )
+    if first_shape == "wall_gap":
+        forward_local, lateral_local = _local_tangent_frame(median_path, fraction=first_fraction)
+        first_constraints = wall_gap_at(
+            center=first_center,
+            forward=forward_local,
+            lateral=lateral_local,
+            object_radius=float(args.obstacle_scene_object_radius),
+            arm_segments=int(args.obstacle_scene_arm_segments),
+            # 2x the same windowed-percentile spread radius the 'blob' shape would
+            # have used, so the gap is sized to actually admit the bundle rather
+            # than being an arbitrary width.
+            gap_width=2.0 * first_radius,
+            weight=float(args.avoid_weight),
+            margin=float(args.avoid_margin),
+            primitive=args.obstacle_scene_primitive,
+            wall_height=float(args.obstacle_scene_wall_height),
+            name_prefix="obstacle_spawning_wall_gap",
+        )
+    else:
+        first_constraints = [
+            AvoidRegion(
+                region=_avoid_region_of_shape(first_center, first_radius, args),
+                margin=float(args.avoid_margin),
+                weight=float(args.avoid_weight),
+                name="obstacle_spawning_avoid_region_0",
+            )
+        ]
     second_constraint = AvoidRegion(
         region=_avoid_region_of_shape(second_center, second_radius, args),
         margin=float(args.avoid_margin),
         weight=float(args.avoid_weight),
         name="obstacle_spawning_avoid_region_1",
     )
-    return [first_constraint], second_constraint, median_path, first_fraction
+    return first_constraints, second_constraint, median_path, first_fraction
 
 
 def _progress_fraction_along_path(path: np.ndarray, point: np.ndarray) -> float:
@@ -3397,6 +3561,13 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
             "obstacle_scene": str(args.obstacle_scene),
             "obstacle_scene_object_radius": float(args.obstacle_scene_object_radius),
             "obstacle_scene_arm_segments": int(args.obstacle_scene_arm_segments),
+            "obstacle_scene_primitive": str(args.obstacle_scene_primitive),
+            "obstacle_scene_wall_height": float(args.obstacle_scene_wall_height),
+            "obstacle_scene_placement_fraction": (
+                None
+                if args.obstacle_scene_placement_fraction is None
+                else float(args.obstacle_scene_placement_fraction)
+            ),
             "clutter_num_objects": int(args.clutter_num_objects),
             "clutter_seed": (None if args.clutter_seed is None else int(args.clutter_seed)),
             "avoid_margin": float(args.avoid_margin),

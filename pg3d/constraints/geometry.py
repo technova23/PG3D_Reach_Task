@@ -53,10 +53,18 @@ class SphereRegion:
 
 @dataclass(frozen=True)
 class BoxRegion:
-    """Axis-aligned box keep-out region."""
+    """Box keep-out region; axis-aligned unless ``rotation`` is given.
+
+    ``rotation``, when set, is a ``(3, 3)`` matrix whose *columns* are the
+    box's local x/y/z axes expressed in world coordinates (same convention
+    as ``CylinderRegion.axis``, generalized to three axes). ``None`` means
+    axis-aligned (identity rotation), matching all prior callers/serialized
+    configs exactly.
+    """
 
     center: Array
     half_extents: Array
+    rotation: Array | None = None
     region_type: RegionType = "box"
 
     def __post_init__(self) -> None:
@@ -65,20 +73,30 @@ class BoxRegion:
         if np.any(half_extents <= 0.0):
             raise ValueError("half_extents must be positive")
         object.__setattr__(self, "half_extents", half_extents)
+        if self.rotation is not None:
+            object.__setattr__(self, "rotation", _matrix3(self.rotation, name="rotation"))
 
     def signed_distance(self, points: Array) -> Array:
         points = _points(points)
-        q = np.abs(points - self.center.reshape(1, 3)) - self.half_extents.reshape(1, 3)
+        rel = points - self.center.reshape(1, 3)
+        if self.rotation is not None:
+            # World-frame offsets projected onto the box's local axes (the
+            # rotation's columns) give box-local coordinates.
+            rel = rel @ self.rotation
+        q = np.abs(rel) - self.half_extents.reshape(1, 3)
         outside = np.linalg.norm(np.maximum(q, 0.0), axis=1)
         inside = np.minimum(np.max(q, axis=1), 0.0)
         return outside + inside
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "type": self.region_type,
             "center": self.center.tolist(),
             "half_extents": self.half_extents.tolist(),
         }
+        if self.rotation is not None:
+            payload["rotation"] = self.rotation.tolist()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -186,7 +204,11 @@ def region_from_json(config: dict[str, Any]) -> Region:
     if region_type == "sphere":
         return SphereRegion(center=config["center"], radius=float(config["radius"]))
     if region_type == "box":
-        return BoxRegion(center=config["center"], half_extents=config["half_extents"])
+        return BoxRegion(
+            center=config["center"],
+            half_extents=config["half_extents"],
+            rotation=config.get("rotation"),
+        )
     if region_type == "rect2d":
         return RectRegion2D(center=config["center"], half_extents=config["half_extents"])
     if region_type == "cylinder":
@@ -203,6 +225,15 @@ def _vector3(value: Any, *, name: str) -> Array:
     array = as_float_array(value, name=name, ndim=1)
     if array.shape != (3,):
         raise ValueError(f"{name} must have shape (3,), got {array.shape}")
+    return array
+
+
+def _matrix3(value: Any, *, name: str) -> Array:
+    array = as_float_array(value, name=name, ndim=None)
+    if array.shape == (9,):
+        array = array.reshape(3, 3)
+    if array.shape != (3, 3):
+        raise ValueError(f"{name} must have shape (3, 3) or (9,), got {array.shape}")
     return array
 
 

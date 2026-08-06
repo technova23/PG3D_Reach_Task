@@ -42,15 +42,23 @@ def sphere_surface_points(center: Array, radius: float, num_points: int) -> Arra
     return center.reshape(1, 3) + offsets
 
 
-def box_surface_points(center: Array, half_extents: Array, num_points: int) -> Array:
-    """Deterministic points spread over an axis-aligned box's six faces.
+def box_surface_points(
+    center: Array,
+    half_extents: Array,
+    num_points: int,
+    *,
+    rotation: Array | None = None,
+) -> Array:
+    """Deterministic points spread over a box's six faces.
 
     Stands in for what a depth camera would return for a real box obstacle,
     for the same reason as ``sphere_surface_points`` -- the physics engine
     can't host an unattached floating collision body for the avoid-region
     box itself. Points per face are allocated proportional to face area and
     drawn from a fixed-seed RNG so the output is deterministic given the
-    inputs.
+    inputs. Faces are sampled in the box's local frame (axis-aligned) and
+    then rotated into world coordinates by ``rotation`` if given -- same
+    ``(3, 3)``, columns-are-local-axes convention as ``BoxRegion.rotation``.
     """
     center = np.asarray(center, dtype=np.float32).reshape(3)
     half_extents = np.asarray(half_extents, dtype=np.float32).reshape(3)
@@ -92,6 +100,9 @@ def box_surface_points(center: Array, half_extents: Array, num_points: int) -> A
         face_points[:, v_axis] = rng.uniform(-half_extents[v_axis], half_extents[v_axis], size=count)
         batches.append(face_points)
     combined = np.concatenate(batches, axis=0) if batches else np.zeros((0, 3), dtype=np.float32)
+    if rotation is not None:
+        rotation = np.asarray(rotation, dtype=np.float32).reshape(3, 3)
+        combined = combined @ rotation.T
     return center.reshape(1, 3) + combined
 
 
@@ -184,7 +195,12 @@ def avoid_region_surface_points(
             batches.append(sphere_surface_points(region.center, region.radius, num_points_per_region))
         elif isinstance(region, BoxRegion):
             batches.append(
-                box_surface_points(region.center, region.half_extents, num_points_per_region)
+                box_surface_points(
+                    region.center,
+                    region.half_extents,
+                    num_points_per_region,
+                    rotation=region.rotation,
+                )
             )
         elif isinstance(region, CylinderRegion):
             batches.append(

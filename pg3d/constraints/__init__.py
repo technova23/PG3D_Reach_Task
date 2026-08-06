@@ -19,16 +19,20 @@ from pg3d.constraints.programs import (
     make_obstructing_avoid_region,
 )
 from pg3d.constraints.scenes import (
+    DEFAULT_WALL_HEIGHT,
     OBSTACLE_SCENE_NAMES,
     build_obstacle_scene,
     cluttered_field_scene,
     l_corner_scene,
     pillar_cluster_scene,
+    shortcut_trap_scene,
     u_pocket_scene,
+    wall_gap_at,
     wall_gap_scene,
 )
 
 __all__ = [
+    "DEFAULT_WALL_HEIGHT",
     "OBSTACLE_SCENE_NAMES",
     "AvoidProjection",
     "AvoidRegion",
@@ -51,6 +55,8 @@ __all__ = [
     "make_obstructing_avoid_region",
     "pillar_cluster_scene",
     "region_from_json",
+    "shortcut_trap_scene",
     "u_pocket_scene",
+    "wall_gap_at",
     "wall_gap_scene",
 ]
