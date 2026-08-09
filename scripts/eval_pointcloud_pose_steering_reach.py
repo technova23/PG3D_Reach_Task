@@ -2404,6 +2404,14 @@ def _constraints_for_episode(
             eval_timestep=args.posture_eval_timestep,
         )
         constraints.append(posture_constraint)
+    if getattr(args, "constraint_type", "region") == "cartesian_pose":
+        constraints.append(
+            _cartesian_pose_constraint_from_zarr_path(
+                spec=spec,
+                zarr_context=zarr_context,
+                args=args,
+            )
+        )
 
     return constraints, None
 

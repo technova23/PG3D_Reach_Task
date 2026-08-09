@@ -169,6 +169,9 @@ def main(argv: list[str] | None = None) -> int:
             viewer_step_delay=args.viewer_step_delay if args.viewer else 0.0,
             random_orientation=args.random_orientation,
             orientation_mode=args.orientation_mode,
+            diverse_orientation_fraction=args.diverse_orientation_fraction,
+            diverse_orientation_checkpoints=args.diverse_orientation_checkpoints,
+            diverse_orientation_cone_deg=args.diverse_orientation_cone_deg,
         )
 
         def process_new_episodes(seed_val, new_episodes_list):
@@ -735,6 +738,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("artifacts/pg3d_reach_balanced.zarr"))
     parser.add_argument("--overwrite", action="store_true", help="replace existing output zarr")
     parser.add_argument("--random-orientation", action="store_true", help="Option C: fully randomize TCP approach angle (within a cone) instead of using discrete modes")
+    parser.add_argument(
+        "--diverse-orientation-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction of episodes (per reset, decided independently of --orientation-mode/"
+            "--random-orientation) that get mid-path gripper reorientation: the intermediate "
+            "waypoints of that episode's trajectory are given orientations sampled from a wide "
+            "range and interpolated (slerp) between --diverse-orientation-checkpoints "
+            "well-separated targets, instead of holding the goal orientation constant along the "
+            "whole path. The episode's own goal orientation is untouched either way -- this only "
+            "affects the mid-path waypoints. Default 0.0 (disabled) exactly reproduces prior "
+            "behaviour. Kept as a minority fraction (e.g. 0.35) so the aggregate training "
+            "distribution's mode stays whatever --orientation-mode/--random-orientation already "
+            "produce (e.g. downward-dominant) -- this flag adds steerable diversity to the tail "
+            "of the distribution, it does not change the unconstrained default."
+        ),
+    )
+    parser.add_argument(
+        "--diverse-orientation-checkpoints",
+        type=int,
+        default=6,
+        help="Number of farthest-point-selected, non-clustered orientation targets to slerp "
+        "between along the path for --diverse-orientation-fraction episodes.",
+    )
+    parser.add_argument(
+        "--diverse-orientation-cone-deg",
+        type=float,
+        default=120.0,
+        help="Max tilt (degrees) from straight-down when sampling diverse-orientation "
+        "checkpoint candidates -- deliberately much wider than --random-orientation's fixed "
+        "60 degree cone, so this mode actually teaches non-downward poses are achievable.",
+    )
     parser.add_argument("--append", action="store_true", help="append to existing output zarr")
     args = parser.parse_args(argv)
     if args.seed_start is None:
@@ -773,6 +809,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--min-feasible-families must be positive")
     if args.min_feasible_families > args.trajectory_variants_per_reset:
         raise ValueError("--min-feasible-families cannot exceed --trajectory-variants-per-reset")
+    if not 0.0 <= args.diverse_orientation_fraction <= 1.0:
+        raise ValueError("--diverse-orientation-fraction must be in [0, 1]")
+    if args.diverse_orientation_checkpoints < 2:
+        raise ValueError("--diverse-orientation-checkpoints must be at least 2")
+    if not 0.0 < args.diverse_orientation_cone_deg <= 180.0:
+        raise ValueError("--diverse-orientation-cone-deg must be in (0, 180]")
     if args.overwrite and args.append:
         raise ValueError("cannot use both --overwrite and --append")
     if args.acceptance_success_distance <= 0:
@@ -911,6 +953,134 @@ def _collect_episode(
     )
 
 
+def _sample_broad_orientation_sapien(rng: np.random.Generator, *, cone_deg: float) -> np.ndarray:
+    """Sample an approach-vector orientation within `cone_deg` of straight-down.
+
+    Geometrically similar to the --random-orientation cone sampler (Option C,
+    same phi/theta cone-angle construction), but with a configurable -- for
+    diverse-orientation checkpoints, much wider -- cone. NOTE: unlike Option C,
+    `base_rot` here is built with the SAPIEN wxyz quat correctly reordered into
+    scipy's xyzw convention before constructing the Rotation; Option C instead
+    passes the SAPIEN-ordered components directly into `Rotation.from_quat`
+    (which expects xyzw), so its "downward" base is actually a 180-degree flip
+    about a different axis than the codebase's canonical downward quaternion
+    (`[0,1,0,0]` SAPIEN wxyz, used in `all_orientations["downward"]` above) --
+    see [[orientation-checkpoint-mixture]] memory. Returns a SAPIEN-convention
+    (w, x, y, z) quaternion, genuinely centered on that canonical downward pose.
+    """
+    from scipy.spatial.transform import Rotation
+
+    phi = rng.uniform(0, 2 * np.pi)
+    costheta = rng.uniform(np.cos(np.radians(cone_deg)), 1.0)
+    theta = np.arccos(costheta)
+    # SAPIEN downward [w,x,y,z]=[0,1,0,0] -> scipy xyzw=[1,0,0,0].
+    base_rot = Rotation.from_quat([1, 0, 0, 0])
+    tilt_axis = np.array([np.cos(phi), np.sin(phi), 0.0])
+    tilt_rot = Rotation.from_rotvec(tilt_axis * theta)
+    final_rot = tilt_rot * base_rot
+    ori_quat = final_rot.as_quat().astype(np.float32)
+    return np.array([ori_quat[3], ori_quat[0], ori_quat[1], ori_quat[2]], dtype=np.float32)
+
+
+def _quat_angular_distance_deg(q1_sapien: np.ndarray, q2_sapien: np.ndarray) -> float:
+    """Geodesic angular distance (degrees) between two SAPIEN (w,x,y,z) quaternions."""
+    dot = float(np.clip(np.abs(np.dot(q1_sapien, q2_sapien)), 0.0, 1.0))
+    return float(np.degrees(2.0 * np.arccos(dot)))
+
+
+def _farthest_point_select_orientations(
+    candidates: list[np.ndarray],
+    *,
+    k: int,
+    rng: np.random.Generator,
+) -> list[np.ndarray]:
+    """Greedily select `k` orientations maximizing pairwise minimum angular
+    separation (farthest-point sampling in SO(3)) -- keeps the checkpoint set
+    from clustering."""
+    if len(candidates) <= k:
+        return list(candidates)
+    selected_indices = [int(rng.integers(0, len(candidates)))]
+    min_dists = np.full(len(candidates), np.inf, dtype=np.float64)
+    for _ in range(k - 1):
+        last = candidates[selected_indices[-1]]
+        dists = np.array([_quat_angular_distance_deg(last, c) for c in candidates])
+        min_dists = np.minimum(min_dists, dists)
+        min_dists[selected_indices] = -np.inf
+        selected_indices.append(int(np.argmax(min_dists)))
+    return [candidates[i] for i in selected_indices]
+
+
+def _nn_chain_orientations(
+    orientations: list[np.ndarray],
+    *,
+    rng: np.random.Generator,
+) -> list[np.ndarray]:
+    """Order orientations via randomly-seeded greedy nearest-neighbor chaining:
+    start from a random orientation, then always append the nearest remaining
+    one. Produces mostly-smooth local transitions with occasional larger jumps
+    where the greedy chain runs out of nearby options -- a deliberate middle
+    ground between fully-random pairing and a fully-optimized smooth ordering.
+    """
+    remaining = list(orientations)
+    start_idx = int(rng.integers(0, len(remaining)))
+    chain = [remaining.pop(start_idx)]
+    while remaining:
+        last = chain[-1]
+        dists = [_quat_angular_distance_deg(last, c) for c in remaining]
+        next_idx = int(np.argmin(dists))
+        chain.append(remaining.pop(next_idx))
+    return chain
+
+
+def _build_orientation_checkpoint_curve(
+    rng: np.random.Generator,
+    *,
+    num_checkpoints: int,
+    cone_deg: float,
+    candidate_pool_size: int = 200,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Build a piecewise-slerp orientation curve over path-fraction [0, 1].
+
+    Samples a broad candidate pool, farthest-point-selects `num_checkpoints`
+    well-separated orientations (non-clustered), orders them via randomly-
+    seeded nearest-neighbor chaining, and assigns each to a sorted random
+    fraction in (0.05, 0.95). Returns (sorted_fractions, chained_quats_sapien)
+    ready for `_orientation_at_fraction` lookups.
+    """
+    candidates = [
+        _sample_broad_orientation_sapien(rng, cone_deg=cone_deg)
+        for _ in range(candidate_pool_size)
+    ]
+    selected = _farthest_point_select_orientations(candidates, k=num_checkpoints, rng=rng)
+    chained = _nn_chain_orientations(selected, rng=rng)
+    fractions = np.sort(rng.uniform(0.05, 0.95, size=len(chained))).astype(np.float64)
+    return fractions, chained
+
+
+def _orientation_at_fraction(
+    fraction: float,
+    checkpoint_fractions: np.ndarray,
+    checkpoint_quats_sapien: list[np.ndarray],
+) -> np.ndarray:
+    """Piecewise-slerp lookup: the checkpoint curve's orientation at `fraction`
+    (clamped to the first/last checkpoint outside their range)."""
+    from scipy.spatial.transform import Rotation, Slerp
+
+    fractions = np.asarray(checkpoint_fractions, dtype=np.float64)
+    if fraction <= fractions[0]:
+        return checkpoint_quats_sapien[0].astype(np.float32)
+    if fraction >= fractions[-1]:
+        return checkpoint_quats_sapien[-1].astype(np.float32)
+    # scipy Rotation/Slerp use (x,y,z,w); convert from SAPIEN (w,x,y,z).
+    scipy_quats = np.stack(
+        [np.array([q[1], q[2], q[3], q[0]], dtype=np.float64) for q in checkpoint_quats_sapien],
+        axis=0,
+    )
+    slerp = Slerp(fractions, Rotation.from_quat(scipy_quats))
+    result = slerp([fraction]).as_quat()[0]
+    return np.array([result[3], result[0], result[1], result[2]], dtype=np.float32)
+
+
 def _collect_multimodal_episodes(
     *,
     env: Any,
@@ -954,6 +1124,9 @@ def _collect_multimodal_episodes(
     viewer_step_delay: float = 0.0,
     random_orientation: bool = False,
     orientation_mode: str = "all",
+    diverse_orientation_fraction: float = 0.0,
+    diverse_orientation_checkpoints: int = 6,
+    diverse_orientation_cone_deg: float = 120.0,
 ) -> list[ReachEpisodeData]:
     obs, info = env.reset(seed=seed, options={"reconfigure": True})
     _render_viewer_frame(env, viewer_step_delay)
@@ -962,6 +1135,26 @@ def _collect_multimodal_episodes(
     reset_tcp_pose = _tcp_pose(unwrapped)
     reset_qpos = _get_robot_qpos(env)
     rng = np.random.default_rng(seed)
+    # Mixture design: only a fraction of episodes get mid-path orientation
+    # diversity (goal orientation is untouched either way, selected below via
+    # the existing orientation_mode/random_orientation logic). This keeps the
+    # aggregate training distribution's mode at whatever the base orientation
+    # logic already produces (downward-dominant), while still teaching the
+    # policy that other mid-path orientations are achievable when steered
+    # toward -- see [[orientation-checkpoint-mixture]] memory for rationale.
+    use_diverse_orientation = bool(rng.random() < diverse_orientation_fraction)
+    orientation_checkpoints: tuple[np.ndarray, list[np.ndarray]] | None = None
+    if use_diverse_orientation:
+        orientation_checkpoints = _build_orientation_checkpoint_curve(
+            rng,
+            num_checkpoints=diverse_orientation_checkpoints,
+            cone_deg=diverse_orientation_cone_deg,
+        )
+        print(
+            f"[seed {seed}] diverse orientation checkpoints: "
+            f"fractions={orientation_checkpoints[0].round(3).tolist()}",
+            flush=True,
+        )
     robot_base_position = _robot_base_position(unwrapped)
     waypoint_bounds = _inset_xy_bounds(
         _waypoint_workspace_bounds(
@@ -1140,12 +1333,19 @@ def _collect_multimodal_episodes(
                 curved_paths=curved_paths,
                 curvature_std=curvature_std,
                 verbose_waypoints=verbose_waypoints,
+                orientation_checkpoints=orientation_checkpoints,
             )
             for v in ori_variants:
                 v["name"] = f"{v['name']}_{ori_name}"
                 v["orientation_mode"] = ori_name
                 v["start_sampling"] = ori_start_metadata
                 v["goal_pose"] = goal_pose
+                v["diverse_orientation"] = use_diverse_orientation
+                if orientation_checkpoints is not None:
+                    v["orientation_checkpoint_fractions"] = orientation_checkpoints[0].tolist()
+                    v["orientation_checkpoint_quats"] = [
+                        q.tolist() for q in orientation_checkpoints[1]
+                    ]
             variants.extend(ori_variants)
     finally:
         planner.close()
@@ -1214,6 +1414,11 @@ def _collect_multimodal_episodes(
                 "goal_pose": _pose_to_list(variant.get("goal_pose", goal_pose)),
                 "start_sampling": variant.get("start_sampling", start_metadata),
                 "orientation_mode": variant.get("orientation_mode", "downward"),
+                "diverse_orientation": variant.get("diverse_orientation", False),
+                "orientation_checkpoint_fractions": variant.get(
+                    "orientation_checkpoint_fractions"
+                ),
+                "orientation_checkpoint_quats": variant.get("orientation_checkpoint_quats"),
             },
         )
         if episode is not None:
@@ -1433,8 +1638,20 @@ def generate_multimodal_waypoints(
     curved_paths: bool = False,
     curvature_std: float = 0.10,
     verbose_waypoints: bool = False,
+    orientation_checkpoints: tuple[np.ndarray, list[np.ndarray]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Sample waypoint-conditioned variants while keeping the official planner in charge."""
+    """Sample waypoint-conditioned variants while keeping the official planner in charge.
+
+    `orientation_checkpoints`, when provided, is a (fractions, quats_sapien) pair
+    from `_build_orientation_checkpoint_curve`: each intermediate waypoint pose
+    is given the checkpoint curve's orientation at that waypoint's own realized
+    path fraction (`waypoint_metadata[i]["path_ratio"]` from `_sample_waypoint_set`
+    -- not the family spec's nominal `ratios`, since jitter/curved-path sampling
+    moves the actual fraction) instead of the fixed `goal_quat`, so the gripper
+    reorients mid-path while `goal_pose`'s own orientation -- the actual final
+    target -- is left untouched. None reproduces the original behaviour exactly
+    (every waypoint uses `goal_quat`, orientation held constant along the path).
+    """
     start = np.asarray(current_tcp_pose[:3], dtype=np.float64)
     goal = np.asarray(goal_pose.p, dtype=np.float64).reshape(-1, 3)[0]
     goal_quat = np.asarray(goal_pose.q, dtype=np.float64).reshape(4)
@@ -1490,10 +1707,24 @@ def generate_multimodal_waypoints(
                 continue
             geometry_candidates += 1
 
-            waypoint_poses = [
-                sapien.Pose(p=waypoint.astype(np.float32), q=goal_quat.astype(np.float32))
-                for waypoint in waypoints
-            ]
+            if orientation_checkpoints is not None:
+                checkpoint_fractions, checkpoint_quats = orientation_checkpoints
+                waypoint_poses = [
+                    sapien.Pose(
+                        p=waypoint.astype(np.float32),
+                        q=_orientation_at_fraction(
+                            float(wp_meta["path_ratio"]),
+                            checkpoint_fractions,
+                            checkpoint_quats,
+                        ),
+                    )
+                    for waypoint, wp_meta in zip(waypoints, waypoint_metadata, strict=True)
+                ]
+            else:
+                waypoint_poses = [
+                    sapien.Pose(p=waypoint.astype(np.float32), q=goal_quat.astype(np.float32))
+                    for waypoint in waypoints
+                ]
             plan_result = _plan_multisegment_trajectory(
                 planner=planner,
                 env=env,
