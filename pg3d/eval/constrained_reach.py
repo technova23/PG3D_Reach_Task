@@ -87,6 +87,7 @@ class AvoidOverlayConfig:
     min_radius: float = 0.025
     margin: float = 0.0
     weight: float = 1.0
+    clearance_scale: float = 0.05
     tolerance: float = 1e-6
     name: str = "direct_path_avoid_region"
     path_fraction: float = 0.5
@@ -103,6 +104,7 @@ class NominalPathAvoidConfig:
     path_fraction: float = 0.5
     margin: float = 0.0
     weight: float = 1.0
+    clearance_scale: float = 0.05
     tolerance: float = 1e-6
     name: str = "nominal_path_avoid_region"
     shape: Literal["sphere", "box", "cuboid", "cylinder"] = "sphere"
@@ -275,6 +277,7 @@ def direct_path_avoid_region(
         target=cfg.target,
         margin=cfg.margin,
         weight=cfg.weight,
+        clearance_scale=cfg.clearance_scale,
         tolerance=cfg.tolerance,
         name=cfg.name,
     )
@@ -298,6 +301,8 @@ def nominal_path_avoid_region(
         raise ValueError("nominal path fraction must be in [0, 1]")
     if float(cfg.margin) < 0.0:
         raise ValueError("nominal path avoid margin must be non-negative")
+    if float(cfg.clearance_scale) < 0.0:
+        raise ValueError("nominal path avoid clearance scale must be non-negative")
     if float(cfg.tolerance) < 0.0:
         raise ValueError("nominal path avoid tolerance must be non-negative")
     if not np.isfinite(float(cfg.yaw)):
@@ -347,6 +352,7 @@ def nominal_path_avoid_region(
         region=region,
         margin=float(cfg.margin),
         weight=float(cfg.weight),
+        clearance_scale=float(cfg.clearance_scale),
         tolerance=float(cfg.tolerance),
         name=cfg.name,
     )

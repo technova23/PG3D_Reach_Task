@@ -152,6 +152,12 @@ their source indices, clearances, and exclusions are recorded for auditability.
 Candidate-path generation is seeded by source-pool index before each placement, so
 the obstacle and exclusion decision do not depend on which evaluation methods ran
 for earlier accepted episodes.
+Avoid-region and avoid-projection reranking now distinguish feasible candidates by
+minimum obstacle clearance. Hard satisfaction remains the existing margin-violation
+test, while the primary score adds a positive rational soft-clearance cost that falls
+as clearance increases. The default decay scale is 5 cm and can be set to zero for
+the historical hinge-only ablation. Rejection remains first-feasible, and ITPS keeps
+its separate differentiable energy.
 Future constrained evaluation now defaults to a 150-step task horizon instead of 80.
 The stable-success hold remains separate, so successes stop after the configured
 hold while failures receive all 150 task steps.

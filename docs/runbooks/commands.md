@@ -612,6 +612,16 @@ the same fixed seeds and the same saved direct-path avoid-region constraints. Co
 planning is a strong reach baseline and is not implemented in this scaffold, so do not over-claim
 reach-only results.
 
+Avoidance scoring now separates hard feasibility from soft clearance preference. For minimum
+signed distance `d`, margin `m`, and clearance scale `s`, the primary cost adds
+`s^2 / (s + max(d - m, 0))` to the existing maximum penetration. It is positive for every finite
+feasible candidate and decreases as clearance grows; `satisfied()` still uses only maximum
+violation. The default is `--avoid-clearance-scale 0.05`. Set it to `0` to reproduce the historical
+hinge-only score. This changes reranking among feasible candidates; rejection still selects the
+first feasible candidate in policy order. The evaluator applies the flag to generated and
+precomputed constraints alike; the resolved value is serialized in new constraints and recorded
+in the run summary. ITPS has its own energy and is unaffected by this flag.
+
 Tiny fixed-seed smoke:
 
 ```bash
@@ -786,6 +796,7 @@ uv run python scripts/eval_constrained_reach.py \
   --constraint-placement-candidates 10 \
   --constraint-placement-steps 150 \
   --avoid-path-fractions 0.5 \
+  --avoid-clearance-scale 0.05 \
   --avoid-shape box \
   --avoid-box-half-extents 0.055 0.08 0.375 \
   --embody-obstacle \

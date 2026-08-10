@@ -15,12 +15,18 @@ SmoothnessTarget = Literal["q", "eef"]
 
 @dataclass(frozen=True)
 class AvoidRegion:
-    """Penalize an imagined trajectory for entering a keep-out region."""
+    """Penalize an imagined trajectory for approaching or entering a keep-out region.
+
+    ``max_violation`` remains the hard feasibility signal. ``clearance_scale`` adds
+    a positive, monotonically decreasing soft cost outside the margin so reranking
+    can distinguish candidates that are all feasible.
+    """
 
     region: Region
     target: ConstraintTarget = "eef"
     margin: float = 0.0
     weight: float = 1.0
+    clearance_scale: float = 0.05
     tolerance: float = 1e-6
     name: str = "avoid_region"
     constraint_type: str = "avoid_region"
@@ -29,6 +35,7 @@ class AvoidRegion:
         if self.target not in {"eef", "robot"}:
             raise ValueError("AvoidRegion supports only target='eef' or target='robot'")
         _validate_nonnegative(self.margin, "margin")
+        _validate_nonnegative(self.clearance_scale, "clearance_scale")
         _validate_nonnegative(self.tolerance, "tolerance")
         _validate_finite(self.weight, "weight")
 
@@ -40,9 +47,15 @@ class AvoidRegion:
         # a length-averaged, squared penalty is far too small to compete with the
         # goal_distance term during candidate selection. See AvoidProjection.cost.
         max_violation = float(np.max(violation)) if violation.size else 0.0
+        clearance_preference = _clearance_preference(
+            signed_distance,
+            margin=float(self.margin),
+            scale=float(self.clearance_scale),
+        )
         return {
-            self.name: float(self.weight) * max_violation,
+            self.name: float(self.weight) * (max_violation + clearance_preference),
             f"{self.name}/max_violation": max_violation,
+            f"{self.name}/clearance_preference": clearance_preference,
             f"{self.name}/min_signed_distance": (
                 float(np.min(signed_distance)) if signed_distance.size else float("inf")
             ),
@@ -64,6 +77,7 @@ class AvoidRegion:
             "region": self.region.to_json(),
             "margin": self.margin,
             "weight": self.weight,
+            "clearance_scale": self.clearance_scale,
             "tolerance": self.tolerance,
             "name": self.name,
         }
@@ -88,6 +102,7 @@ class AvoidProjection:
     target: ConstraintTarget = "eef"
     margin: float = 0.0
     weight: float = 1.0
+    clearance_scale: float = 0.05
     tolerance: float = 1e-6
     name: str = "avoid_projection"
     constraint_type: str = "avoid_projection"
@@ -96,6 +111,7 @@ class AvoidProjection:
         if self.target not in {"eef", "robot"}:
             raise ValueError("AvoidProjection supports only target='eef' or target='robot'")
         _validate_nonnegative(self.margin, "margin")
+        _validate_nonnegative(self.clearance_scale, "clearance_scale")
         _validate_nonnegative(self.tolerance, "tolerance")
         _validate_finite(self.weight, "weight")
 
@@ -111,11 +127,17 @@ class AvoidProjection:
         # influence candidate selection. The max keeps it length-invariant and in
         # the same units (and on the same scale) as goal_distance.
         max_violation = float(np.max(violation)) if violation.size else 0.0
+        clearance_preference = _clearance_preference(
+            signed_distance,
+            margin=float(self.margin),
+            scale=float(self.clearance_scale),
+        )
         total = float(signed_distance.size)
         inside = float(np.count_nonzero(signed_distance < 0.0)) if signed_distance.size else 0.0
         return {
-            self.name: float(self.weight) * max_violation,
+            self.name: float(self.weight) * (max_violation + clearance_preference),
             f"{self.name}/max_violation": max_violation,
+            f"{self.name}/clearance_preference": clearance_preference,
             f"{self.name}/min_signed_distance": (
                 float(np.min(signed_distance)) if signed_distance.size else float("inf")
             ),
@@ -138,6 +160,7 @@ class AvoidProjection:
             "region": self.region.to_json(),
             "margin": self.margin,
             "weight": self.weight,
+            "clearance_scale": self.clearance_scale,
             "tolerance": self.tolerance,
             "name": self.name,
         }
@@ -199,6 +222,7 @@ def make_obstructing_avoid_region(
     radius: float = 0.07,
     margin: float = 0.0,
     weight: float = 1.0,
+    clearance_scale: float = 0.05,
     name: str = "avoid_region",
 ) -> AvoidRegion:
     """Create a small sphere on the direct EEF path from start to goal."""
@@ -210,6 +234,7 @@ def make_obstructing_avoid_region(
         region=SphereRegion(center=(start + goal) * 0.5, radius=radius),
         margin=margin,
         weight=weight,
+        clearance_scale=clearance_scale,
         name=name,
     )
 
@@ -223,6 +248,7 @@ def constraint_from_json(config: dict[str, Any]) -> AvoidRegion | AvoidProjectio
             target=config.get("target", "eef"),
             margin=float(config.get("margin", 0.0)),
             weight=float(config.get("weight", 1.0)),
+            clearance_scale=float(config.get("clearance_scale", 0.05)),
             tolerance=float(config.get("tolerance", 1e-6)),
             name=str(config.get("name", "avoid_region")),
         )
@@ -237,6 +263,7 @@ def constraint_from_json(config: dict[str, Any]) -> AvoidRegion | AvoidProjectio
             target=config.get("target", "eef"),
             margin=float(config.get("margin", 0.0)),
             weight=float(config.get("weight", 1.0)),
+            clearance_scale=float(config.get("clearance_scale", 0.05)),
             tolerance=float(config.get("tolerance", 1e-6)),
             name=str(config.get("name", "avoid_projection")),
         )
@@ -277,6 +304,25 @@ def _vector3(value: Any, *, name: str) -> Array:
     if array.shape != (3,):
         raise ValueError(f"{name} must have shape (3,), got {array.shape}")
     return array
+
+
+def _clearance_preference(
+    signed_distance: Array,
+    *,
+    margin: float,
+    scale: float,
+) -> float:
+    """Return a positive soft cost that decreases with minimum safe clearance.
+
+    The rational barrier has units of meters, equals ``scale`` at the hard
+    feasibility boundary, and approaches zero as clearance grows. Clamping the
+    clearance at zero keeps penetration ranking governed by ``max_violation``.
+    """
+    if not signed_distance.size or scale == 0.0:
+        return 0.0
+    minimum_safe_clearance = float(np.min(signed_distance)) - margin
+    safe_clearance = max(minimum_safe_clearance, 0.0)
+    return float(scale * scale / (scale + safe_clearance))
 
 
 def _validate_finite(value: float, name: str) -> None:

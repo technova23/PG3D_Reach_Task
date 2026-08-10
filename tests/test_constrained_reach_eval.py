@@ -1364,7 +1364,37 @@ def test_nominal_path_constraint_builder_defaults(tmp_path: Path) -> None:
     assert args.avoid_radius == pytest.approx(0.03)
     assert args.avoid_shape == "sphere"
     assert args.path_fraction == pytest.approx(0.5)
+    assert args.avoid_clearance_scale == pytest.approx(0.05)
     assert args.min_successes == 15
+
+
+def test_eval_avoid_clearance_scale_parses_and_validates(tmp_path: Path) -> None:
+    common = [
+        "--checkpoint",
+        str(tmp_path / "policy.pt"),
+        "--dataset",
+        str(tmp_path / "dataset.zarr"),
+        "--output-dir",
+        str(tmp_path / "eval"),
+    ]
+
+    args = parse_eval_args([*common, "--avoid-clearance-scale", "0.08"])
+
+    assert args.avoid_clearance_scale == pytest.approx(0.08)
+    assert _constraint_source_summary(args)["avoid_clearance_scale"] == pytest.approx(0.08)
+    finalized = _finalize_constraints(
+        [
+            AvoidRegion(
+                region=BoxRegion(center=[0.0, 0.0, 0.2], half_extents=[0.1, 0.1, 0.1]),
+                clearance_scale=0.01,
+            )
+        ],
+        robot_points=None,
+        args=args,
+    )
+    assert finalized[0].clearance_scale == pytest.approx(0.08)
+    with pytest.raises(ValueError, match="avoid-clearance-scale"):
+        parse_eval_args([*common, "--avoid-clearance-scale", "-0.01"])
 
 
 def test_dataset_demo_path_source_loads_complete_selected_episode() -> None:
@@ -1447,6 +1477,7 @@ def test_clearance_safe_builder_keeps_path_intersection() -> None:
         path_fraction=0.5,
         avoid_margin=0.0,
         avoid_weight=1.0,
+        avoid_clearance_scale=0.05,
         avoid_tolerance=1e-6,
         avoid_shape="box",
         obstacle_yaw_deg=0.0,

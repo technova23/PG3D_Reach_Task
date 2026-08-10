@@ -242,6 +242,10 @@ P09 adds simulator-free candidate rejection and reranking controllers:
   Optional `score_surrogate` values are lower-is-better soft costs.
 - `RejectionController` keeps policy order and selects the first feasible candidate from K samples.
 - `RerankingController` scores all sampled candidates and selects the best feasible candidate.
+- Avoidance feasibility is still determined only by maximum margin violation. The primary
+  avoidance score also includes a positive rational soft-clearance term, so feasible candidates
+  with greater minimum obstacle clearance receive lower scores instead of all tying at zero.
+  Rejection remains policy-order preserving and therefore does not optimize this soft term.
 - The default K fallback schedule is 16, 32, then 64. If no candidate is feasible, controllers
   return the least-bad fallback with explicit diagnostics.
 - Candidate diagnostics record constraint costs/satisfaction, final goal distance, trajectory

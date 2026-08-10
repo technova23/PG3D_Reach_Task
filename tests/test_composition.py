@@ -58,6 +58,32 @@ def test_reranking_prefers_feasible_candidate_over_lower_cost_unsafe_candidate()
     assert result.selection_reason == "best_feasible"
 
 
+def test_reranking_prefers_more_clearance_when_all_candidates_are_feasible() -> None:
+    near = _chunk("near", [[0.0, 0.0, 0.0], [0.5, 0.2, 0.0], [1.0, 0.0, 0.0]])
+    far = _chunk("far", [[0.0, 0.0, 0.0], [0.5, 0.4, 0.0], [1.0, 0.0, 0.0]])
+    controller = RerankingController(
+        policy=_FakePolicy({2: [near, far]}),
+        world_model=_FakeWorldModel(),
+        constraints=[_avoid_center()],
+        k_schedule=(2,),
+        score_weights=ScoreWeights(
+            goal_distance=0.0,
+            constraint=1.0,
+            smoothness=0.0,
+            consensus=0.0,
+            policy_surrogate=0.0,
+        ),
+    )
+
+    result = controller.select(_controller_input())
+
+    assert all(candidate.feasible for candidate in result.candidates)
+    assert all(candidate.constraint_penalty > 0.0 for candidate in result.candidates)
+    assert result.candidates[0].constraint_penalty > result.candidates[1].constraint_penalty
+    assert result.selected.action_chunk.metadata["name"] == "far"
+    assert result.selection_reason == "best_feasible"
+
+
 def test_fallback_k_schedule_retries_until_feasible_candidate() -> None:
     unsafe = _chunk("unsafe", [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]])
     safe = _chunk("safe", [[0.0, 0.0, 0.0], [0.5, 0.3, 0.0], [1.0, 0.0, 0.0]])

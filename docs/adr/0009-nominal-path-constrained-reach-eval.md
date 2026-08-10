@@ -96,3 +96,17 @@ frames.
 
 MP4 identity remains mandatory, but it is rendered in a new canvas header above the
 original camera frame. No simulator pixel may be covered by status text.
+
+## 2026-08-10 feasible-candidate scoring amendment
+
+Hard avoidance feasibility remains `max(margin - signed_distance, 0) <= tolerance`.
+The primary avoidance cost used by reranking now adds a positive soft-clearance term
+
+`clearance_scale^2 / (clearance_scale + max(min_signed_distance - margin, 0))`.
+
+The term has units of meters, equals `clearance_scale` at the feasibility boundary,
+and decreases toward zero as clearance grows. This removes the previous all-zero tie
+between feasible candidates while leaving feasibility itself unchanged. The default
+scale is 5 cm; scale zero is the historical hinge-only ablation. Rejection continues
+to choose the first feasible policy sample, so the change affects its diagnostics but
+not its selection rule. ITPS retains its separate guidance energy.

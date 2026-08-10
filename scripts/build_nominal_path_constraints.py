@@ -214,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             "path_fraction": args.path_fraction,
             "avoid_margin": args.avoid_margin,
             "avoid_weight": args.avoid_weight,
+            "avoid_clearance_scale": args.avoid_clearance_scale,
             "avoid_tolerance": args.avoid_tolerance,
             "avoid_shape": args.avoid_shape,
             "avoid_box_half_extents": args.avoid_box_half_extents,
@@ -280,6 +281,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--path-fraction", type=float, default=0.5)
     parser.add_argument("--avoid-margin", type=float, default=0.0)
     parser.add_argument("--avoid-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--avoid-clearance-scale",
+        type=float,
+        default=0.05,
+        help=(
+            "Soft-clearance decay scale in meters used to distinguish feasible "
+            "reranking candidates; set to 0 for hinge-only avoidance."
+        ),
+    )
     parser.add_argument("--avoid-tolerance", type=float, default=1e-6)
     parser.add_argument(
         "--avoid-shape",
@@ -340,6 +350,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--path-fraction must be in [0, 1]")
     if args.avoid_margin < 0.0:
         raise ValueError("--avoid-margin must be non-negative")
+    if not np.isfinite(args.avoid_clearance_scale) or args.avoid_clearance_scale < 0.0:
+        raise ValueError("--avoid-clearance-scale must be finite and non-negative")
     if args.avoid_tolerance < 0.0:
         raise ValueError("--avoid-tolerance must be non-negative")
     if args.avoid_box_half_extents is not None and (
@@ -530,6 +542,7 @@ def _build_constraint(
         path_fraction=args.path_fraction,
         margin=args.avoid_margin,
         weight=args.avoid_weight,
+        clearance_scale=args.avoid_clearance_scale,
         tolerance=args.avoid_tolerance,
         shape=args.avoid_shape,
         box_half_extents=resolved_geometry["box_half_extents"],

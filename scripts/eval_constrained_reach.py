@@ -1021,6 +1021,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--avoid-margin", type=float, default=0.0)
     parser.add_argument("--avoid-weight", type=float, default=1.0)
     parser.add_argument(
+        "--avoid-clearance-scale",
+        type=float,
+        default=0.05,
+        help=(
+            "Soft-clearance decay scale in meters. Feasible candidates retain a positive "
+            "avoidance cost that decreases with minimum obstacle clearance, allowing "
+            "reranking to prefer more clearance. Set to 0 for the historical hinge-only cost."
+        ),
+    )
+    parser.add_argument(
         "--avoid-shape",
         choices=["sphere", "box", "cuboid", "cylinder"],
         default="sphere",
@@ -1389,6 +1399,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--itps-barrier-temperature must be positive")
     if args.avoid_radius <= 0.0 or args.avoid_min_radius <= 0.0:
         raise ValueError("avoid radii must be positive")
+    if not np.isfinite(args.avoid_clearance_scale) or args.avoid_clearance_scale < 0.0:
+        raise ValueError("--avoid-clearance-scale must be finite and non-negative")
     if any(h <= 0.0 for h in args.projection_half_extents):
         raise ValueError("--projection-half-extents components must be positive")
     if args.constraint_type == "projection" and args.constraint_placement != "candidate_midpath":
@@ -2963,7 +2975,14 @@ def _finalize_constraints(
                 name=constraint.name,
                 preserve_center_z=grounded,
             )
-        finalized.append(replace(constraint, region=region, target=args.constraint_target))
+        finalized.append(
+            replace(
+                constraint,
+                region=region,
+                target=args.constraint_target,
+                clearance_scale=float(args.avoid_clearance_scale),
+            )
+        )
     if args.embody_obstacle and args.obstacle_family == "cabinet":
         if len(finalized) != 1 or not isinstance(finalized[0].region, BoxRegion):
             raise ValueError("cabinet family requires one root BoxRegion before expansion")
@@ -3215,6 +3234,7 @@ def _episode_constraints(
                     min_radius=args.avoid_min_radius,
                     margin=args.avoid_margin,
                     weight=args.avoid_weight,
+                    clearance_scale=args.avoid_clearance_scale,
                     path_fraction=frac,
                     name=name,
                     shape=args.avoid_shape,
@@ -3291,12 +3311,14 @@ def _build_placed_constraint(
             ),
             margin=float(args.avoid_margin),
             weight=float(args.avoid_weight),
+            clearance_scale=float(args.avoid_clearance_scale),
             name=name,
         )
     return AvoidRegion(
         region=_avoid_region_of_shape(center, radius, args),
         margin=float(args.avoid_margin),
         weight=float(args.avoid_weight),
+        clearance_scale=float(args.avoid_clearance_scale),
         name=name,
     )
 
@@ -3450,6 +3472,7 @@ def _widest_trajectory_constraints(
                 region=_avoid_region_of_shape(center, radius, args),
                 margin=float(args.avoid_margin),
                 weight=float(args.avoid_weight),
+                clearance_scale=float(args.avoid_clearance_scale),
                 name=name,
             )
         )
@@ -3943,6 +3966,7 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
         return {
             "type": "precomputed",
             "constraints_dir": str(args.constraints_dir),
+            "avoid_clearance_scale": float(args.avoid_clearance_scale),
             "episode_indices_file": (
                 str(args.episode_indices_file) if args.episode_indices_file is not None else None
             ),
@@ -3963,6 +3987,7 @@ def _constraint_source_summary(args: argparse.Namespace) -> dict[str, Any]:
         "avoid_min_radius": float(args.avoid_min_radius),
         "avoid_margin": float(args.avoid_margin),
         "avoid_weight": float(args.avoid_weight),
+        "avoid_clearance_scale": float(args.avoid_clearance_scale),
         "avoid_shape": str(args.avoid_shape),
         "avoid_box_half_extents": (
             [float(h) for h in args.avoid_box_half_extents]

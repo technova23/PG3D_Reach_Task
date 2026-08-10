@@ -64,9 +64,7 @@ def test_rotated_box_signed_distance_and_json_round_trip() -> None:
 
 
 def test_cylinder_signed_distance_and_json_round_trip() -> None:
-    cylinder = CylinderRegion(
-        center=[0.0, 0.0, 0.5], radius=0.2, half_length=0.4
-    )
+    cylinder = CylinderRegion(center=[0.0, 0.0, 0.5], radius=0.2, half_length=0.4)
     distances = cylinder.signed_distance(
         np.asarray(
             [[0.0, 0.0, 0.5], [0.3, 0.0, 0.5], [0.0, 0.0, 1.0]],
@@ -118,7 +116,9 @@ def test_avoid_projection_satisfied_when_path_skirts_footprint() -> None:
 
     costs = constraint.cost(rollout)
 
-    assert costs["avoid_projection"] == 0.0
+    assert costs["avoid_projection"] > 0.0
+    assert costs["avoid_projection/clearance_preference"] > 0.0
+    assert costs["avoid_projection/max_violation"] == 0.0
     assert costs["avoid_projection/inside_count"] == 0.0
     assert constraint.satisfied(rollout)
 
@@ -128,6 +128,7 @@ def test_avoid_projection_json_round_trip() -> None:
         region=RectRegion2D(center=[0.4, -0.1], half_extents=[0.1, 0.05]),
         margin=0.01,
         weight=2.0,
+        clearance_scale=0.07,
         name="candidate_midpath_avoid_projection",
     )
     [restored] = constraints_from_json(constraints_to_json([constraint]))
@@ -135,6 +136,7 @@ def test_avoid_projection_json_round_trip() -> None:
     assert isinstance(restored.region, RectRegion2D)
     assert restored.name == "candidate_midpath_avoid_projection"
     assert restored.weight == pytest.approx(2.0)
+    assert restored.clearance_scale == pytest.approx(0.07)
     np.testing.assert_allclose(restored.region.center, np.asarray([0.4, -0.1], dtype=np.float32))
     np.testing.assert_allclose(
         restored.region.half_extents, np.asarray([0.1, 0.05], dtype=np.float32)
@@ -153,7 +155,7 @@ def test_avoid_region_cost_detects_eef_path_violation() -> None:
     assert not constraint.satisfied(rollout)
 
 
-def test_avoid_region_is_zero_outside_margin() -> None:
+def test_avoid_region_has_positive_soft_cost_outside_margin() -> None:
     rollout = _rollout(eef_path=[[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]])
     constraint = AvoidRegion(
         region=BoxRegion(center=[0.5, 0.5, 0.0], half_extents=[0.1, 0.1, 0.1]),
@@ -162,8 +164,41 @@ def test_avoid_region_is_zero_outside_margin() -> None:
 
     costs = constraint.cost(rollout)
 
-    assert costs["avoid_region"] == 0.0
+    assert costs["avoid_region"] == pytest.approx(0.05**2 / (0.05 + 0.4))
+    assert costs["avoid_region/clearance_preference"] == pytest.approx(0.05**2 / (0.05 + 0.4))
     assert costs["avoid_region/max_violation"] == 0.0
+    assert constraint.satisfied(rollout)
+
+
+def test_avoid_region_soft_cost_prefers_greater_feasible_clearance() -> None:
+    near = _rollout(eef_path=[[0.5, 0.15, 0.0]])
+    far = _rollout(eef_path=[[0.5, 0.4, 0.0]])
+    constraint = AvoidRegion(
+        region=SphereRegion(center=[0.5, 0.0, 0.0], radius=0.1),
+        clearance_scale=0.05,
+    )
+
+    near_cost = constraint.cost(near)
+    far_cost = constraint.cost(far)
+
+    assert constraint.satisfied(near)
+    assert constraint.satisfied(far)
+    assert near_cost["avoid_region"] > far_cost["avoid_region"] > 0.0
+    assert near_cost["avoid_region/max_violation"] == 0.0
+    assert far_cost["avoid_region/max_violation"] == 0.0
+
+
+def test_avoid_region_clearance_scale_zero_restores_hinge_only_cost() -> None:
+    rollout = _rollout(eef_path=[[0.5, 0.4, 0.0]])
+    constraint = AvoidRegion(
+        region=SphereRegion(center=[0.5, 0.0, 0.0], radius=0.1),
+        clearance_scale=0.0,
+    )
+
+    costs = constraint.cost(rollout)
+
+    assert costs["avoid_region"] == 0.0
+    assert costs["avoid_region/clearance_preference"] == 0.0
     assert constraint.satisfied(rollout)
 
 
@@ -219,6 +254,7 @@ def test_constraint_json_round_trip() -> None:
             region=SphereRegion(center=[0.1, 0.2, 0.3], radius=0.05),
             margin=0.01,
             weight=2.0,
+            clearance_scale=0.07,
             tolerance=0.001,
         ),
         SmoothnessCost(target="q", order=1, weight=0.5, threshold=1.0),
@@ -230,6 +266,7 @@ def test_constraint_json_round_trip() -> None:
     assert isinstance(loaded[0], AvoidRegion)
     assert isinstance(loaded[0].region, SphereRegion)
     assert loaded[0].margin == pytest.approx(0.01)
+    assert loaded[0].clearance_scale == pytest.approx(0.07)
     assert isinstance(loaded[1], SmoothnessCost)
     assert loaded[1].target == "q"
     assert loaded[1].order == 1
