@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-07-23
+Last updated: 2026-08-10
 
 ## Current objective
 
@@ -142,6 +142,16 @@ bottom at `z=0`; grounded placement is not shifted away afterward. Cabinets alig
 the nominal path through the back panel instead of the open interior. The regenerated
 four-family suites span `z=0` to `z=0.4431` for the selected path point at
 `z=0.4231`; signed clearance there is negative for every family.
+Candidate-midpath pilots now have a clearance-safe replacement mode. Final grounded
+obstacles retain their exact midpoint-derived XY, yaw, size, and grounded Z, but are
+excluded before serialization or rollout when the stored initial whole-robot cloud
+has less than 2 cm signed clearance. The committed 40-entry pool contains original
+pilot unique-seed ranks 25--34 followed by unallocated ranks 85--114, leaving locked
+test ranks 35--84 untouched. Valid attempts are remapped to contiguous outputs and
+their source indices, clearances, and exclusions are recorded for auditability.
+Candidate-path generation is seeded by source-pool index before each placement, so
+the obstacle and exclusion decision do not depend on which evaluation methods ran
+for earlier accepted episodes.
 Future constrained evaluation now defaults to a 150-step task horizon instead of 80.
 The stable-success hold remains separate, so successes stop after the configured
 hold while failures receive all 150 task steps.

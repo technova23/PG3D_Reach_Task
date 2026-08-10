@@ -65,6 +65,7 @@ from scripts.eval_constrained_reach import (
     _artifact_file_record,
     _artifact_selection_summary,
     _build_multichunk_candidates,
+    _clearance_safe_candidate_spec,
     _constraint_bottom_z,
     _constraint_source_summary,
     _constraint_top_z,
@@ -1200,6 +1201,27 @@ def test_eval_paired_bootstrap_configuration(tmp_path: Path) -> None:
         )
 
 
+def test_target_valid_episodes_requires_all_artifacts(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires --artifact-selection all"):
+        parse_eval_args(
+            [
+                "--checkpoint",
+                str(tmp_path / "policy.pt"),
+                "--dataset",
+                str(tmp_path / "dataset.zarr"),
+                "--output-dir",
+                str(tmp_path / "eval"),
+                "--source",
+                "dataset",
+                "--constraint-placement",
+                "candidate_midpath",
+                "--embody-obstacle",
+                "--target-valid-episodes",
+                "10",
+            ]
+        )
+
+
 def test_eval_episode_indices_file_and_precomputed_constraints(tmp_path: Path) -> None:
     indices_path = tmp_path / "episode_indices.txt"
     indices_path.write_text("# selected base-success episodes\n3\n7\n", encoding="utf-8")
@@ -1485,6 +1507,156 @@ def test_precomputed_initial_clearance_gate_rejects_impossible_episode() -> None
             zarr_context=context,
             minimum_clearance=0.02,
         )
+
+
+def _clearance_context(robot_point: list[float]) -> dict[str, np.ndarray]:
+    return {
+        "point_cloud": np.asarray([robot_point, [0.8, 0.8, 0.8]], dtype=np.float32),
+        "robot_mask": np.asarray([True, False]),
+        "point_valid_mask": np.asarray([True, True]),
+    }
+
+
+def test_unsafe_grounded_box_is_rejected_after_final_yaw_and_grounding(
+    tmp_path: Path,
+) -> None:
+    args = parse_eval_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "eval"),
+            "--embody-obstacle",
+            "--avoid-shape",
+            "box",
+            "--avoid-box-half-extents",
+            "0.1",
+            "0.05",
+            "0.2",
+            "--obstacle-yaw-deg",
+            "30",
+        ]
+    )
+    original = AvoidRegion(
+        region=BoxRegion(center=[0.0, 0.0, 0.8], half_extents=[0.1, 0.05, 0.2])
+    )
+    finalized = _finalize_constraints(
+        [original],
+        robot_points=np.asarray([[0.0, 0.0, 0.2]], dtype=np.float32),
+        args=args,
+    )
+
+    accepted, record = _clearance_safe_candidate_spec(
+        RolloutSpec(output_index=4, seed=17, source="dataset", dataset_episode_index=99),
+        finalized,
+        zarr_context=_clearance_context([0.0, 0.0, 0.2]),
+        minimum_clearance=0.02,
+        accepted_output_index=0,
+    )
+
+    assert accepted is None
+    assert record["exclusion_reason"] == "insufficient_initial_robot_clearance"
+    assert record["initial_robot_clearance"] < 0.02
+    assert finalized[0].region.center == pytest.approx([0.0, 0.0, 0.2])
+    assert finalized[0].region.yaw == pytest.approx(np.deg2rad(30.0))
+
+
+def test_safe_grounded_placement_is_accepted_without_translation(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "policy.pt"),
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--output-dir",
+            str(tmp_path / "eval"),
+            "--embody-obstacle",
+            "--avoid-shape",
+            "box",
+            "--avoid-box-half-extents",
+            "0.1",
+            "0.05",
+            "0.2",
+            "--obstacle-yaw-deg",
+            "20",
+        ]
+    )
+    original = AvoidRegion(
+        region=BoxRegion(center=[0.25, -0.1, 0.8], half_extents=[0.1, 0.05, 0.2])
+    )
+    finalized = _finalize_constraints(
+        [original],
+        robot_points=np.asarray([[0.8, 0.8, 0.2]], dtype=np.float32),
+        args=args,
+    )
+    center_before_gate = finalized[0].region.center.copy()
+
+    accepted, record = _clearance_safe_candidate_spec(
+        RolloutSpec(output_index=6, seed=23, source="dataset", dataset_episode_index=101),
+        finalized,
+        zarr_context=_clearance_context([0.8, 0.8, 0.2]),
+        minimum_clearance=0.02,
+        accepted_output_index=0,
+    )
+
+    assert accepted is not None
+    assert accepted.output_index == 0
+    assert record["exclusion_reason"] is None
+    assert record["initial_robot_clearance"] >= 0.02
+    np.testing.assert_array_equal(finalized[0].region.center, center_before_gate)
+    np.testing.assert_allclose(center_before_gate, [0.25, -0.1, 0.2])
+
+
+def test_clearance_exclusions_are_replaced_with_contiguous_output_indices() -> None:
+    constraint = AvoidRegion(
+        region=BoxRegion(center=[0.0, 0.0, 0.2], half_extents=[0.1, 0.1, 0.1])
+    )
+    accepted: list[RolloutSpec] = []
+    attempts: list[dict[str, object]] = []
+    for pool_index in range(12):
+        unsafe = pool_index in {0, 3}
+        remapped, record = _clearance_safe_candidate_spec(
+            RolloutSpec(
+                output_index=pool_index,
+                seed=100 + pool_index,
+                source="dataset",
+                dataset_episode_index=200 + pool_index,
+            ),
+            [constraint],
+            zarr_context=_clearance_context([0.11 if unsafe else 0.13, 0.0, 0.2]),
+            minimum_clearance=0.02,
+            accepted_output_index=len(accepted),
+        )
+        attempts.append(record)
+        if remapped is not None:
+            accepted.append(remapped)
+        if len(accepted) == 10:
+            break
+
+    assert [spec.output_index for spec in accepted] == list(range(10))
+    assert [spec.dataset_episode_index for spec in accepted[:3]] == [201, 202, 204]
+    assert [record["source_pool_index"] for record in attempts if record["exclusion_reason"]] == [
+        0,
+        3,
+    ]
+
+
+def test_candidate_midpath_replacement_pool_respects_locked_partitions() -> None:
+    split = json.loads(Path("configs/eval/e3_episode_split.json").read_text(encoding="utf-8"))
+    pool = _read_episode_indices_file(
+        Path("configs/eval/e3_candidate_midpath_pilot_pool_episode_indices.txt")
+    )
+    pilot = split["pilot"]["dataset_episode_indices"]
+    checkpoint = set(split["checkpoint_gate"]["dataset_episode_indices"])
+    definitive_test = set(split["test"]["dataset_episode_indices"])
+
+    assert len(pool) == 40
+    assert pool[:10] == pilot
+    assert len(set(pool)) == len(pool)
+    assert set(pool).isdisjoint(checkpoint)
+    assert set(pool).isdisjoint(definitive_test)
 
 
 def test_locked_e3_protocol_requires_all_labeled_video_rerun_pairs() -> None:

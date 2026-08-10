@@ -768,6 +768,48 @@ Reserve `configs/eval/e3_test_episode_indices.txt` for the definitive run only. 
 not select checkpoints, obstacle parameters, or method hyperparameters using those 50
 episodes.
 
+For the clearance-safe candidate-midpath pilot, scan the original pilot ranks first
+and then the committed unallocated replacement ranks. This keeps the obstacle at its
+computed 50% candidate-trajectory midpoint: after yaw, final sizing, and grounding,
+placements below 2 cm initial whole-robot clearance are excluded rather than moved.
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --methods base rejection reranking itps \
+  --source dataset \
+  --episode-indices-file configs/eval/e3_candidate_midpath_pilot_pool_episode_indices.txt \
+  --target-valid-episodes 10 \
+  --device cuda \
+  --constraint-placement candidate_midpath \
+  --constraint-placement-candidates 10 \
+  --constraint-placement-steps 150 \
+  --avoid-path-fractions 0.5 \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.055 0.08 0.375 \
+  --embody-obstacle \
+  --obstacle-family carton \
+  --obstacle-top-z 0.75 \
+  --robot-clearance-placement-margin 0.02 \
+  --robot-clearance-metric \
+  --max-steps 150 \
+  --post-success-steps 16 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --output-dir artifacts/candidate-midpath-clearance-safe-100k-pilot \
+  --allow-failure
+```
+
+`--target-valid-episodes` requires `--artifact-selection all`. The evaluator scans
+the 40-entry pool in file order, never draws from locked test ranks 35--84, and fails
+if fewer than ten placements pass. Accepted placements are remapped to output indices
+0--9. `episode_indices.txt` records their dataset indices;
+`placement_exclusions.jsonl` records each rejected pool entry and measured clearance;
+`summary.json` records all attempts, accepted mappings, exclusions, and pool exhaustion.
+Constraint JSON, metrics, MP4, and Rerun paths use the contiguous accepted index.
+
 Build the fixed nominal-base-success subset from the locked pilot pool using a
 tabletop-supported carton:
 

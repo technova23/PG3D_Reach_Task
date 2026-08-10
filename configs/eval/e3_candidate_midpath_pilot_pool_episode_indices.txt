@@ -1,0 +1,44 @@
+# Clearance-safe candidate-midpath pilot pool.
+# Source pool 0--9: original pilot unique-seed ranks 25--34.
+286
+297
+305
+317
+329
+341
+353
+365
+377
+389
+# Source pool 10--39: unallocated unique-seed ranks 85--114.
+# Locked definitive-test ranks 35--84 are intentionally excluded.
+974
+986
+998
+1010
+1022
+1034
+1046
+1058
+1069
+1081
+1093
+1105
+1117
+1129
+1138
+1150
+1159
+1171
+1179
+1191
+1203
+1215
+1227
+1239
+1251
+1263
+1273
+1285
+1297
+1309

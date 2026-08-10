@@ -468,10 +468,15 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
     artifact_seed = args.artifact_selection_seed
+    artifact_output_indices = (
+        list(range(int(args.target_valid_episodes)))
+        if args.target_valid_episodes is not None
+        else [spec.output_index for spec in specs]
+    )
     video_episode_indices = (
         set(
             select_artifact_episode_indices(
-                [spec.output_index for spec in specs],
+                artifact_output_indices,
                 selection=args.artifact_selection,
                 count=args.artifact_episode_count,
                 seed=artifact_seed,
@@ -484,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
     rerun_episode_indices = (
         set(
             select_artifact_episode_indices(
-                [spec.output_index for spec in specs],
+                artifact_output_indices,
                 selection=args.artifact_selection,
                 count=args.artifact_episode_count,
                 seed=artifact_seed,
@@ -508,8 +513,12 @@ def main(argv: list[str] | None = None) -> int:
     sim_env: Any | None = None
     ghost_env: Any | None = None
     rows: list[dict[str, Any]] = []
+    accepted_specs: list[RolloutSpec] = []
+    placement_attempts: list[dict[str, Any]] = []
+    placement_exclusions: list[dict[str, Any]] = []
     metrics_path = args.output_dir / "metrics.jsonl"
     decisions_path = args.output_dir / "decisions.jsonl"
+    placement_exclusions_path = args.output_dir / "placement_exclusions.jsonl"
     timings_path = args.output_dir / "timings.jsonl"
     timing_written = 0
     run_id = str(args.output_dir.resolve())
@@ -534,16 +543,29 @@ def main(argv: list[str] | None = None) -> int:
         with (
             metrics_path.open("w", encoding="utf-8") as metrics_file,
             decisions_path.open("w", encoding="utf-8") as decisions_file,
+            placement_exclusions_path.open("w", encoding="utf-8") as exclusions_file,
         ):
-            for spec in specs:
+            for pool_spec in specs:
+                if (
+                    args.target_valid_episodes is not None
+                    and len(accepted_specs) >= args.target_valid_episodes
+                ):
+                    break
                 zarr_context = (
-                    _zarr_episode_context(zarr_root, spec.dataset_episode_index)
-                    if zarr_root is not None and spec.dataset_episode_index is not None
+                    _zarr_episode_context(zarr_root, pool_spec.dataset_episode_index)
+                    if zarr_root is not None and pool_spec.dataset_episode_index is not None
                     else None
                 )
+                placement_policy_seed: int | None = None
+                if args.target_valid_episodes is not None:
+                    placement_policy_seed = _episode_policy_seed(
+                        args.seed,
+                        pool_spec.output_index,
+                    )
+                    _seed_torch(placement_policy_seed)
                 constraints = _constraints_for_episode(
                     sim_env,
-                    spec=spec,
+                    spec=pool_spec,
                     policy=policy,
                     adapter=adapter,
                     action_mode=action_mode,
@@ -552,6 +574,34 @@ def main(argv: list[str] | None = None) -> int:
                     args=args,
                     zarr_context=zarr_context,
                 )
+                spec = pool_spec
+                placement_record: dict[str, Any] | None = None
+                if args.target_valid_episodes is not None:
+                    spec, placement_record = _clearance_safe_candidate_spec(
+                        pool_spec,
+                        constraints,
+                        zarr_context=zarr_context,
+                        minimum_clearance=float(args.robot_clearance_placement_margin),
+                        accepted_output_index=len(accepted_specs),
+                    )
+                    placement_record["placement_policy_seed"] = placement_policy_seed
+                    placement_attempts.append(placement_record)
+                    if spec is None:
+                        placement_exclusions.append(placement_record)
+                        exclusions_file.write(
+                            json.dumps(_jsonable(placement_record), sort_keys=True) + "\n"
+                        )
+                        exclusions_file.flush()
+                        print(
+                            "excluded candidate-midpath placement: "
+                            f"pool={pool_spec.output_index} "
+                            f"dataset={pool_spec.dataset_episode_index} seed={pool_spec.seed} "
+                            f"clearance={placement_record['initial_robot_clearance']:.6f} "
+                            f"required={args.robot_clearance_placement_margin:.6f}",
+                            flush=True,
+                        )
+                        continue
+                accepted_specs.append(spec)
                 _validate_precomputed_initial_clearance(
                     constraints,
                     zarr_context=zarr_context,
@@ -622,6 +672,7 @@ def main(argv: list[str] | None = None) -> int:
                             "checkpoint_id": str(checkpoint_path),
                             "dataset": str(args.dataset),
                             "source": spec.source,
+                            "source_pool_index": int(pool_spec.output_index),
                             "dataset_episode_index": spec.dataset_episode_index,
                             "simulator_seed": int(spec.seed),
                             "policy_seed": policy_seed,
@@ -633,10 +684,17 @@ def main(argv: list[str] | None = None) -> int:
                             "run_id": run_id,
                             "checkpoint_id": str(checkpoint_path),
                             "source": spec.source,
+                            "source_pool_index": int(pool_spec.output_index),
                             "dataset_episode_index": spec.dataset_episode_index,
                             "simulator_seed": int(spec.seed),
                             "policy_seed": policy_seed,
                             "constraint_id": constraint_id,
+                            "initial_robot_clearance": (
+                                placement_record["initial_robot_clearance"]
+                                if placement_record is not None
+                                else None
+                            ),
+                            "placement_policy_seed": placement_policy_seed,
                             "constraint_path": str(constraint_path),
                             "git_commit": git_info["commit"],
                             "method_config": _method_config(
@@ -692,6 +750,20 @@ def main(argv: list[str] | None = None) -> int:
         if ghost_env is not None:
             ghost_env.close()
 
+    target_valid_shortfall = (
+        args.target_valid_episodes is not None
+        and len(accepted_specs) < args.target_valid_episodes
+    )
+    if args.target_valid_episodes is not None:
+        episode_indices_path = args.output_dir / "episode_indices.txt"
+        episode_indices_path.write_text(
+            "".join(
+                f"{spec.dataset_episode_index}\n"
+                for spec in accepted_specs
+                if spec.dataset_episode_index is not None
+            ),
+            encoding="utf-8",
+        )
     validate_paired_episode_rows(rows, methods=list(args.methods))
     artifact_manifest = _write_artifact_manifest(
         artifact_manifest_path,
@@ -715,8 +787,24 @@ def main(argv: list[str] | None = None) -> int:
         "k_schedule": list(args.k_schedule),
         "itps": itps_config.to_json(),
         "constraint_source": _constraint_source_summary(args),
+        "placement_selection": {
+            "enabled": args.target_valid_episodes is not None,
+            "target_valid_episodes": args.target_valid_episodes,
+            "candidate_pool_size": len(specs),
+            "attempted_placements": len(placement_attempts),
+            "accepted_placements": len(accepted_specs),
+            "minimum_initial_robot_clearance": (
+                float(args.robot_clearance_placement_margin)
+                if args.target_valid_episodes is not None
+                else None
+            ),
+            "pool_exhausted": bool(target_valid_shortfall),
+            "attempts": placement_attempts,
+            "exclusions": placement_exclusions,
+            "exclusions_path": str(placement_exclusions_path),
+        },
         "artifact_selection": _artifact_selection_summary(
-            specs,
+            accepted_specs,
             video_episode_indices=video_episode_indices,
             rerun_episode_indices=rerun_episode_indices,
             args=args,
@@ -782,6 +870,14 @@ def main(argv: list[str] | None = None) -> int:
     if run is not None:
         _log_wandb_summary(run, args=args, rows=rows, summary=summary)
 
+    if target_valid_shortfall:
+        print(
+            "Failed constrained reach eval: candidate pool exhausted after "
+            f"{len(placement_attempts)} attempts with {len(accepted_specs)}/"
+            f"{args.target_valid_episodes} valid placements",
+            file=sys.stderr,
+        )
+        return 1
     failures = sum(0 if row["combined_success"] else 1 for row in rows)
     return 0 if args.allow_failure or failures == 0 else 1
 
@@ -799,6 +895,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--source", choices=["dataset", "fresh"], default="fresh")
     parser.add_argument("--episodes", type=int, default=3)
+    parser.add_argument(
+        "--target-valid-episodes",
+        type=int,
+        default=None,
+        help=(
+            "For clearance-safe candidate-midpath pilots, scan the selected episode pool "
+            "in order until this many finalized grounded placements satisfy "
+            "--robot-clearance-placement-margin. Unsafe placements are excluded before "
+            "constraints or methods are written and accepted outputs are remapped from zero."
+        ),
+    )
     parser.add_argument("--episode-indices", type=int, nargs="+", default=None)
     parser.add_argument(
         "--episode-indices-file",
@@ -1187,6 +1294,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.episodes <= 0:
         raise ValueError("--episodes must be positive")
+    if args.target_valid_episodes is not None:
+        if args.target_valid_episodes <= 0:
+            raise ValueError("--target-valid-episodes must be positive")
+        if args.artifact_selection != "all":
+            raise ValueError("--target-valid-episodes requires --artifact-selection all")
+        if args.source != "dataset":
+            raise ValueError("--target-valid-episodes requires --source dataset")
+        if args.constraint_placement != "candidate_midpath":
+            raise ValueError(
+                "--target-valid-episodes requires --constraint-placement candidate_midpath"
+            )
+        if args.constraints_dir is not None or args.no_constraints:
+            raise ValueError("--target-valid-episodes requires generated constraints")
+        if not args.embody_obstacle or not args.ground_embodied_obstacle:
+            raise ValueError(
+                "--target-valid-episodes requires a grounded embodied obstacle"
+            )
+        if not args.robot_clearance_placement:
+            raise ValueError(
+                "--target-valid-episodes requires --robot-clearance-placement"
+            )
     if args.paired_bootstrap_samples <= 0:
         raise ValueError("--paired-bootstrap-samples must be positive")
     if args.no_constraints and args.constraints_dir is not None:
@@ -2978,8 +3106,28 @@ def _validate_precomputed_initial_clearance(
     """Reject impossible precomputed episodes before any compared method runs."""
     if minimum_clearance is None or not constraints:
         return None
+    clearance = _initial_robot_constraint_clearance(
+        constraints,
+        zarr_context=zarr_context,
+    )
+    if clearance + 1e-8 < float(minimum_clearance):
+        raise ValueError(
+            "precomputed obstacle violates initial robot clearance: "
+            f"{clearance:.6f} < {float(minimum_clearance):.6f} m"
+        )
+    return clearance
+
+
+def _initial_robot_constraint_clearance(
+    constraints: list[AvoidRegion],
+    *,
+    zarr_context: dict[str, Any] | None,
+) -> float:
+    """Measure finalized constraints against the stored initial whole-robot cloud."""
+    if not constraints:
+        raise ValueError("initial robot clearance requires at least one constraint")
     if zarr_context is None:
-        raise ValueError("precomputed initial-clearance validation requires a dataset episode")
+        raise ValueError("initial robot clearance requires a dataset episode")
     points = np.asarray(zarr_context["point_cloud"], dtype=np.float32).reshape(-1, 3)
     robot_mask = np.asarray(zarr_context["robot_mask"], dtype=bool).reshape(-1)
     valid_mask = np.asarray(zarr_context["point_valid_mask"], dtype=bool).reshape(-1)
@@ -2988,13 +3136,43 @@ def _validate_precomputed_initial_clearance(
     robot_points = points[robot_mask & valid_mask]
     if not len(robot_points):
         raise ValueError("initial robot point cloud is empty")
-    clearance = float(min_constraint_clearance(robot_points, constraints))
-    if clearance + 1e-8 < float(minimum_clearance):
-        raise ValueError(
-            "precomputed obstacle violates initial robot clearance: "
-            f"{clearance:.6f} < {float(minimum_clearance):.6f} m"
-        )
-    return clearance
+    return float(min_constraint_clearance(robot_points, constraints))
+
+
+def _clearance_safe_candidate_spec(
+    spec: RolloutSpec,
+    constraints: list[AvoidRegion],
+    *,
+    zarr_context: dict[str, Any] | None,
+    minimum_clearance: float,
+    accepted_output_index: int,
+) -> tuple[RolloutSpec | None, dict[str, Any]]:
+    """Accept an unchanged placement or describe its geometry-only exclusion."""
+    clearance = _initial_robot_constraint_clearance(
+        constraints,
+        zarr_context=zarr_context,
+    )
+    accepted = clearance + 1e-8 >= float(minimum_clearance)
+    record: dict[str, Any] = {
+        "source_pool_index": int(spec.output_index),
+        "output_index": int(accepted_output_index) if accepted else None,
+        "dataset_episode_index": spec.dataset_episode_index,
+        "seed": int(spec.seed),
+        "initial_robot_clearance": clearance,
+        "required_initial_robot_clearance": float(minimum_clearance),
+        "exclusion_reason": None if accepted else "insufficient_initial_robot_clearance",
+    }
+    if not accepted:
+        return None, record
+    return (
+        RolloutSpec(
+            output_index=accepted_output_index,
+            seed=spec.seed,
+            source=spec.source,
+            dataset_episode_index=spec.dataset_episode_index,
+        ),
+        record,
+    )
 
 
 def _precomputed_constraint_path(constraints_dir: Path, spec: RolloutSpec) -> Path:
