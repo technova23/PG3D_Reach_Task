@@ -90,6 +90,36 @@
       48572888
     ]
   },
+  "candidate_midpath_75cm_frozen": {
+    "fixture": "configs/eval/e3_candidate_midpath_75cm_frozen_v1/fixture.json",
+    "episode_indices_file": "configs/eval/e3_candidate_midpath_75cm_frozen_v1/episode_indices.txt",
+    "purpose": "candidate-midpath pilot, method comparison, and planning-horizon ablations",
+    "definitive_test_suite": false,
+    "dataset_episode_indices": [
+      305,
+      317,
+      974,
+      986,
+      1010,
+      1034,
+      1069,
+      1117,
+      1129,
+      1138
+    ],
+    "simulator_seeds": [
+      48572874,
+      48572879,
+      48573006,
+      48573007,
+      48573016,
+      48573020,
+      48573030,
+      48573036,
+      48573038,
+      48573041
+    ]
+  },
   "test": {
     "episode_indices_file": "configs/eval/e3_test_episode_indices.txt",
     "unique_seed_rank_start": 35,

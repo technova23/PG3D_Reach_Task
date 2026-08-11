@@ -821,6 +821,61 @@ if fewer than ten placements pass. Accepted placements are remapped to output in
 `summary.json` records all attempts, accepted mappings, exclusions, and pool exhaustion.
 Constraint JSON, metrics, MP4, and Rerun paths use the contiguous accepted index.
 
+### Frozen 75 cm candidate-midpath suite
+
+Future candidate-midpath pilot, method-comparison, and planning-horizon ablations use
+`configs/eval/e3_candidate_midpath_75cm_frozen_v1`. Do not rerun placement generation
+or `--target-valid-episodes`: the output order, dataset episodes, seeds, and physical
+obstacle poses are frozen. This ten-episode tuning suite is separate from the locked
+50-episode definitive E3 test.
+
+Use the EEF constraint variant for base/rejection/reranking/ITPS comparisons:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --methods base rejection reranking itps \
+  --source dataset \
+  --episodes 10 \
+  --episode-indices-file configs/eval/e3_candidate_midpath_75cm_frozen_v1/episode_indices.txt \
+  --constraints-dir configs/eval/e3_candidate_midpath_75cm_frozen_v1/constraints/eef \
+  --constraint-target eef \
+  --geometry-mode fast \
+  --planning-horizon-chunks 1 \
+  --execution-horizon-chunks 1 \
+  --k-schedule 16 32 64 \
+  --seed 0 \
+  --device cuda \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.055 0.08 0.375 \
+  --avoid-clearance-scale 0.05 \
+  --embody-obstacle \
+  --obstacle-family carton \
+  --obstacle-yaw-deg 0 \
+  --obstacle-top-z 0.75 \
+  --precomputed-initial-clearance-margin 0.02 \
+  --robot-clearance-metric \
+  --terminate-on-obstacle-contact \
+  --max-steps 150 \
+  --post-success-steps 16 \
+  --artifact-selection all \
+  --output-dir artifacts/CHOOSE-A-NEW-RUN-NAME
+```
+
+For exact whole-robot rejection/reranking, change the method and guidance settings:
+
+```bash
+  --methods rejection reranking \
+  --constraints-dir configs/eval/e3_candidate_midpath_75cm_frozen_v1/constraints/robot \
+  --constraint-target robot \
+  --geometry-mode exact
+```
+
+The complete frozen mapping and provenance are in
+`configs/eval/e3_candidate_midpath_75cm_frozen_v1/fixture.json`. A physical placement
+or episode change requires a new version; do not edit the v1 fixture in place.
+
 Build the fixed nominal-base-success subset from the locked pilot pool using a
 tabletop-supported carton:
 

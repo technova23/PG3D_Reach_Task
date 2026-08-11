@@ -1690,6 +1690,49 @@ def test_candidate_midpath_replacement_pool_respects_locked_partitions() -> None
     assert set(pool).isdisjoint(definitive_test)
 
 
+def test_frozen_candidate_midpath_75cm_suite_is_internally_consistent() -> None:
+    root = Path("configs/eval/e3_candidate_midpath_75cm_frozen_v1")
+    fixture = json.loads((root / "fixture.json").read_text(encoding="utf-8"))
+    split = json.loads(Path("configs/eval/e3_episode_split.json").read_text(encoding="utf-8"))
+    episode_indices = _read_episode_indices_file(root / "episode_indices.txt")
+    episodes = fixture["episodes"]
+
+    assert fixture["status"] == "frozen"
+    assert fixture["definitive_e3_test_suite"] is False
+    assert len(episodes) == 10
+    assert [episode["output_index"] for episode in episodes] == list(range(10))
+    assert [episode["dataset_episode_index"] for episode in episodes] == episode_indices
+    assert split["candidate_midpath_75cm_frozen"]["dataset_episode_indices"] == episode_indices
+    assert min(episode["initial_robot_clearance_m"] for episode in episodes) >= 0.02
+    assert set(episode_indices).isdisjoint(split["checkpoint_gate"]["dataset_episode_indices"])
+    assert set(episode_indices).isdisjoint(split["test"]["dataset_episode_indices"])
+
+    expected_half_extents = fixture["obstacle"]["half_extents_m"]
+    for episode in episodes:
+        expected_center = episode["center"]
+        constraint_file = episode["constraint_file"]
+        loaded_by_target = {}
+        for target in ("eef", "robot"):
+            constraints = load_episode_constraints(root / "constraints" / target / constraint_file)
+            assert len(constraints) == 1
+            constraint = constraints[0]
+            assert isinstance(constraint, AvoidRegion)
+            assert isinstance(constraint.region, BoxRegion)
+            assert constraint.target == target
+            assert constraint.clearance_scale == pytest.approx(0.05)
+            np.testing.assert_allclose(constraint.region.center, expected_center)
+            np.testing.assert_allclose(constraint.region.half_extents, expected_half_extents)
+            assert constraint.region.yaw == pytest.approx(0.0)
+            assert constraint.region.center[2] - constraint.region.half_extents[2] == pytest.approx(
+                fixture["obstacle"]["support_plane_z_m"]
+            )
+            loaded_by_target[target] = constraint
+        np.testing.assert_allclose(
+            loaded_by_target["eef"].region.center,
+            loaded_by_target["robot"].region.center,
+        )
+
+
 def test_locked_e3_protocol_requires_all_labeled_video_rerun_pairs() -> None:
     config = load_e3_protocol(Path("configs/eval/e3_protocol.json").resolve())
 

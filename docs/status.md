@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 ## Current objective
 
@@ -152,6 +152,12 @@ their source indices, clearances, and exclusions are recorded for auditability.
 Candidate-path generation is seeded by source-pool index before each placement, so
 the obstacle and exclusion decision do not depend on which evaluation methods ran
 for earlier accepted episodes.
+The accepted 75 cm clearance-safe population is now frozen as the tracked fixture
+`configs/eval/e3_candidate_midpath_75cm_frozen_v1`. It fixes ten dataset episodes,
+all paired seeds, exact grounded carton poses, and matched EEF/robot constraint
+variants. Future candidate-midpath pilot, method, and horizon ablations must load
+this fixture rather than regenerate or independently filter placements. It remains
+tuning/ablation data and does not replace the locked 50-episode definitive E3 test.
 Avoid-region and avoid-projection reranking now distinguish feasible candidates by
 minimum obstacle clearance. Hard satisfaction remains the existing margin-violation
 test, while the primary score adds a positive rational soft-clearance cost that falls

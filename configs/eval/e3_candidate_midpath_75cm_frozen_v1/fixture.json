@@ -1,0 +1,221 @@
+{
+  "schema_version": "pg3d.fixed_candidate_midpath_suite.v1",
+  "fixture_id": "e3-candidate-midpath-75cm-frozen-v1",
+  "status": "frozen",
+  "frozen_date": "2026-08-11",
+  "scope": "candidate-midpath pilot, method comparison, and planning-horizon ablations",
+  "definitive_e3_test_suite": false,
+  "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
+  "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
+  "checkpoint_model": "ema",
+  "source_artifacts": {
+    "accepted_episode_run": "artifacts/candidate-midpath-clearance-safe-100k-pilot",
+    "robot_constraints": "artifacts/candidate-midpath-clearance-safe-robot-constraints",
+    "exact_robot_validation_run": "artifacts/candidate-midpath-whole-arm-exact-100k-pilot"
+  },
+  "selection": {
+    "candidate_pool_file": "configs/eval/e3_candidate_midpath_pilot_pool_episode_indices.txt",
+    "required_initial_robot_clearance_m": 0.02,
+    "attempted_placements": 25,
+    "accepted_placements": 10,
+    "excluded_placements": 15,
+    "accepted_source_pool_indices": [
+      2,
+      3,
+      10,
+      11,
+      13,
+      15,
+      18,
+      22,
+      23,
+      24
+    ]
+  },
+  "obstacle": {
+    "family": "carton",
+    "shape": "box",
+    "support_plane_z_m": 0,
+    "full_size_m": [
+      0.10999999940395355,
+      0.1599999964237213,
+      0.75
+    ],
+    "half_extents_m": [
+      0.054999999701976776,
+      0.07999999821186066,
+      0.375
+    ],
+    "yaw_rad": 0,
+    "yaw_deg": 0
+  },
+  "constraint_defaults": {
+    "type": "avoid_region",
+    "name": "candidate_midpath_avoid_region",
+    "margin_m": 0,
+    "tolerance": 0.000001,
+    "weight": 1,
+    "clearance_scale_m": 0.05,
+    "eef_constraints_dir": "configs/eval/e3_candidate_midpath_75cm_frozen_v1/constraints/eef",
+    "robot_constraints_dir": "configs/eval/e3_candidate_midpath_75cm_frozen_v1/constraints/robot"
+  },
+  "invariants": [
+    "Preserve output order and dataset episode indices.",
+    "Preserve obstacle center, half-extents, yaw, and support-plane contact.",
+    "Use policy seed 0 so the recorded per-output policy_seed mapping remains fixed.",
+    "Do not regenerate candidate-midpath placements or run clearance-safe replacement selection.",
+    "Create a new fixture version rather than editing this frozen v1 suite."
+  ],
+  "episodes": [
+    {
+      "output_index": 0,
+      "dataset_episode_index": 305,
+      "simulator_seed": 48572874,
+      "policy_seed": 916202559,
+      "source_pool_index": 2,
+      "placement_policy_seed": 62126402,
+      "initial_robot_clearance_m": 0.12291646003723145,
+      "center": [
+        -0.19806933403015137,
+        0.09573230147361755,
+        0.375
+      ],
+      "constraint_file": "episode_000.json"
+    },
+    {
+      "output_index": 1,
+      "dataset_episode_index": 317,
+      "simulator_seed": 48572879,
+      "policy_seed": 4274160928,
+      "source_pool_index": 3,
+      "placement_policy_seed": 3073537515,
+      "initial_robot_clearance_m": 0.08478546142578125,
+      "center": [
+        -0.07605887949466705,
+        -0.0125518087297678,
+        0.375
+      ],
+      "constraint_file": "episode_001.json"
+    },
+    {
+      "output_index": 2,
+      "dataset_episode_index": 974,
+      "simulator_seed": 48573006,
+      "policy_seed": 62126402,
+      "source_pool_index": 10,
+      "placement_policy_seed": 765317199,
+      "initial_robot_clearance_m": 0.07897913455963135,
+      "center": [
+        -0.18901915848255157,
+        -0.057136472314596176,
+        0.375
+      ],
+      "constraint_file": "episode_002.json"
+    },
+    {
+      "output_index": 3,
+      "dataset_episode_index": 986,
+      "simulator_seed": 48573007,
+      "policy_seed": 3073537515,
+      "source_pool_index": 11,
+      "placement_policy_seed": 2642714612,
+      "initial_robot_clearance_m": 0.057202257215976715,
+      "center": [
+        -0.16298940777778625,
+        -0.01870773732662201,
+        0.375
+      ],
+      "constraint_file": "episode_003.json"
+    },
+    {
+      "output_index": 4,
+      "dataset_episode_index": 1010,
+      "simulator_seed": 48573016,
+      "policy_seed": 4021621599,
+      "source_pool_index": 13,
+      "placement_policy_seed": 1048372686,
+      "initial_robot_clearance_m": 0.18342755734920502,
+      "center": [
+        -0.1029917299747467,
+        -0.06830453872680664,
+        0.375
+      ],
+      "constraint_file": "episode_004.json"
+    },
+    {
+      "output_index": 5,
+      "dataset_episode_index": 1034,
+      "simulator_seed": 48573020,
+      "policy_seed": 3283500616,
+      "source_pool_index": 15,
+      "placement_policy_seed": 3840608811,
+      "initial_robot_clearance_m": 0.08854831755161285,
+      "center": [
+        -0.2226373851299286,
+        -0.0004138017538934946,
+        0.375
+      ],
+      "constraint_file": "episode_005.json"
+    },
+    {
+      "output_index": 6,
+      "dataset_episode_index": 1069,
+      "simulator_seed": 48573030,
+      "policy_seed": 2953062871,
+      "source_pool_index": 18,
+      "placement_policy_seed": 1896072728,
+      "initial_robot_clearance_m": 0.0694565698504448,
+      "center": [
+        -0.1315213441848755,
+        -0.15107932686805725,
+        0.375
+      ],
+      "constraint_file": "episode_006.json"
+    },
+    {
+      "output_index": 7,
+      "dataset_episode_index": 1117,
+      "simulator_seed": 48573036,
+      "policy_seed": 1860412786,
+      "source_pool_index": 22,
+      "placement_policy_seed": 1216595746,
+      "initial_robot_clearance_m": 0.07541734725236893,
+      "center": [
+        -0.23593541979789734,
+        0.20035535097122192,
+        0.375
+      ],
+      "constraint_file": "episode_007.json"
+    },
+    {
+      "output_index": 8,
+      "dataset_episode_index": 1129,
+      "simulator_seed": 48573038,
+      "policy_seed": 4256662015,
+      "source_pool_index": 23,
+      "placement_policy_seed": 3577244961,
+      "initial_robot_clearance_m": 0.06874746084213257,
+      "center": [
+        -0.07847712934017181,
+        -0.04634665697813034,
+        0.375
+      ],
+      "constraint_file": "episode_008.json"
+    },
+    {
+      "output_index": 9,
+      "dataset_episode_index": 1138,
+      "simulator_seed": 48573041,
+      "policy_seed": 3641704370,
+      "source_pool_index": 24,
+      "placement_policy_seed": 2559968563,
+      "initial_robot_clearance_m": 0.11414743959903717,
+      "center": [
+        -0.0719042643904686,
+        0.13494063913822174,
+        0.375
+      ],
+      "constraint_file": "episode_009.json"
+    }
+  ]
+}
