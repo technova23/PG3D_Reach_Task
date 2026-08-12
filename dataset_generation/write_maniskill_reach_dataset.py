@@ -203,6 +203,8 @@ def run_generation(
                 curvature_std=args.curvature_std,
                 verbose_waypoints=args.verbose_waypoints,
                 viewer_step_delay=args.viewer_step_delay if args.viewer else 0.0,
+                randomize_start_goal_orientation=args.randomize_start_goal_orientation,
+                orientation_cone_deg=args.orientation_cone_deg,
             )
             if not new_episodes:
                 print(f"[seed {seed}] skipped: no complete feasible variant set", flush=True)
@@ -590,6 +592,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--randomize-start-goal-orientation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "give each trajectory-family episode its own randomly sampled start and goal "
+            "gripper orientation (sampled within --orientation-cone-deg of straight-down), "
+            "instead of every episode using the single default downward orientation at both "
+            "ends. Orientations are farthest-point-selected across a reset's episodes so they "
+            "are spread out rather than clustered, and slerp-interpolated across intermediate "
+            "waypoints by each waypoint's actual path fraction. Off by default so existing "
+            "callers (Panda, other tasks) are unaffected. If a sampled orientation isn't "
+            "IK-reachable at the start/goal position, falls back to a few fresh cone samples "
+            "and finally to the default downward orientation for that episode."
+        ),
+    )
+    parser.add_argument(
+        "--orientation-cone-deg",
+        type=float,
+        default=120.0,
+        help=(
+            "half-angle (degrees) of the cone around straight-down within which start/goal "
+            "orientations are sampled when --randomize-start-goal-orientation is set. 0 means "
+            "always straight down; larger values allow more extreme (e.g. near-sideways) "
+            "orientations at the cost of a higher IK-infeasibility/fallback rate."
+        ),
+    )
+    parser.add_argument(
         "--max-joint-step",
         type=float,
         default=2.50,
@@ -670,6 +699,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--progress-interval must be positive")
     if args.min_feasible_families <= 0:
         raise ValueError("--min-feasible-families must be positive")
+    if not 0.0 <= args.orientation_cone_deg <= 180.0:
+        raise ValueError("--orientation-cone-deg must be between 0 and 180")
     if args.min_feasible_families > args.trajectory_variants_per_reset:
         raise ValueError("--min-feasible-families cannot exceed --trajectory-variants-per-reset")
     if args.acceptance_success_distance <= 0:
@@ -806,6 +837,113 @@ def _collect_episode(
     )
 
 
+def _sample_broad_orientation_sapien(rng: np.random.Generator, *, cone_deg: float) -> np.ndarray:
+    """Sample a gripper orientation within `cone_deg` of straight-down, as a SAPIEN
+    [w, x, y, z] quaternion. The tilt angle is drawn uniform-by-solid-angle (uniform
+    in cos(theta), not theta) so samples aren't over-weighted toward the cone edge.
+    """
+    from scipy.spatial.transform import Rotation
+
+    phi = rng.uniform(0, 2 * np.pi)
+    costheta = rng.uniform(np.cos(np.radians(cone_deg)), 1.0)
+    theta = np.arccos(costheta)
+    # SAPIEN downward tabletop orientation [0,1,0,0] (wxyz) == scipy xyzw [1,0,0,0].
+    base_rot = Rotation.from_quat([1, 0, 0, 0])
+    tilt_axis = np.array([np.cos(phi), np.sin(phi), 0.0])
+    tilt_rot = Rotation.from_rotvec(tilt_axis * theta)
+    final_rot = tilt_rot * base_rot
+    ori_quat_xyzw = final_rot.as_quat().astype(np.float32)
+    return np.array(
+        [ori_quat_xyzw[3], ori_quat_xyzw[0], ori_quat_xyzw[1], ori_quat_xyzw[2]],
+        dtype=np.float32,
+    )
+
+
+def _quat_angular_distance_deg(q1_sapien: np.ndarray, q2_sapien: np.ndarray) -> float:
+    """Geodesic angular distance in degrees between two SAPIEN [w,x,y,z] quaternions."""
+    dot = float(np.clip(np.abs(np.dot(q1_sapien, q2_sapien)), 0.0, 1.0))
+    return float(np.degrees(2.0 * np.arccos(dot)))
+
+
+def _farthest_point_select_orientations(
+    candidates: list[np.ndarray],
+    *,
+    k: int,
+    rng: np.random.Generator,
+) -> list[np.ndarray]:
+    """Greedily select `k` candidates maximizing the minimum pairwise angular
+    separation, so the returned orientations are spread out rather than clustered.
+    """
+    if k <= 0:
+        return []
+    if len(candidates) <= k:
+        return list(candidates)
+    remaining = list(candidates)
+    selected = [remaining.pop(int(rng.integers(0, len(remaining))))]
+    while len(selected) < k:
+        best_idx, best_min_dist = -1, -1.0
+        for idx, cand in enumerate(remaining):
+            min_dist = min(_quat_angular_distance_deg(cand, s) for s in selected)
+            if min_dist > best_min_dist:
+                best_idx, best_min_dist = idx, min_dist
+        selected.append(remaining.pop(best_idx))
+    return selected
+
+
+def _slerp_two_orientations(
+    fraction: float,
+    quat_a_sapien: np.ndarray,
+    quat_b_sapien: np.ndarray,
+) -> np.ndarray:
+    """Slerp between two SAPIEN [w,x,y,z] quaternions at `fraction` in [0, 1]."""
+    from scipy.spatial.transform import Rotation, Slerp
+
+    t = float(np.clip(fraction, 0.0, 1.0))
+    rot_a = Rotation.from_quat(quat_a_sapien[[1, 2, 3, 0]])
+    rot_b = Rotation.from_quat(quat_b_sapien[[1, 2, 3, 0]])
+    slerp = Slerp([0.0, 1.0], Rotation.concatenate([rot_a, rot_b]))
+    interp_xyzw = slerp([t]).as_quat()[0].astype(np.float32)
+    return np.array(
+        [interp_xyzw[3], interp_xyzw[0], interp_xyzw[1], interp_xyzw[2]],
+        dtype=np.float32,
+    )
+
+
+def _resolve_reachable_orientation(
+    *,
+    planner: Any,
+    env: Any,
+    sapien: Any,
+    position: np.ndarray,
+    primary_quat: np.ndarray,
+    seed_qpos: np.ndarray,
+    rng: np.random.Generator,
+    cone_deg: float,
+    extra_attempts: int = 3,
+    suppress_planner_output: bool = True,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Try to IK-solve `position` at `primary_quat`; on failure, retry with a few
+    fresh cone samples before giving up. Returns (final_qpos, used_quat), or None
+    if nothing in the pool was reachable (caller should fall back to the default
+    orientation in that case).
+    """
+    candidates = [primary_quat] + [
+        _sample_broad_orientation_sapien(rng, cone_deg=cone_deg) for _ in range(extra_attempts)
+    ]
+    for candidate_quat in candidates:
+        plan = _plan_to_pose(
+            planner=planner,
+            env=env,
+            pose=_pose_with_orientation(sapien, position=position, quat=candidate_quat),
+            start_qpos=seed_qpos,
+            suppress_planner_output=suppress_planner_output,
+        )
+        if plan is not None:
+            final_qpos, _status = plan
+            return final_qpos, candidate_quat
+    return None
+
+
 def _collect_multimodal_episodes(
     *,
     env: Any,
@@ -847,6 +985,8 @@ def _collect_multimodal_episodes(
     curvature_std: float = 0.10,
     verbose_waypoints: bool = False,
     viewer_step_delay: float = 0.0,
+    randomize_start_goal_orientation: bool = False,
+    orientation_cone_deg: float = 120.0,
 ) -> list[ReachEpisodeData]:
     obs, info = env.reset(seed=seed, options={"reconfigure": True})
     _render_viewer_frame(env, viewer_step_delay)
@@ -980,6 +1120,8 @@ def _collect_multimodal_episodes(
             curved_paths=curved_paths,
             curvature_std=curvature_std,
             verbose_waypoints=verbose_waypoints,
+            randomize_start_goal_orientation=randomize_start_goal_orientation,
+            orientation_cone_deg=orientation_cone_deg,
         )
     finally:
         planner.close()
@@ -1001,8 +1143,23 @@ def _collect_multimodal_episodes(
             f"planned_steps={variant['positions'].shape[0]}",
             flush=True,
         )
+        variant_start_qpos = variant.get("start_qpos", start_qpos)
+        variant_start_tcp_pose = start_tcp_pose.copy()
+        if "start_orientation_quat" in variant:
+            variant_start_tcp_pose[3:7] = np.asarray(
+                variant["start_orientation_quat"], dtype=np.float32
+            )
+        variant_goal_pose = (
+            _pose_with_orientation(
+                sapien,
+                position=np.asarray(goal_pose.p, dtype=np.float32).reshape(3),
+                quat=np.asarray(variant["goal_orientation_quat"], dtype=np.float32),
+            )
+            if "goal_orientation_quat" in variant
+            else goal_pose
+        )
         obs, info = env.reset(seed=seed, options={"reconfigure": False})
-        _set_robot_qpos(env, start_qpos)
+        _set_robot_qpos(env, variant_start_qpos)
         _set_start_site_pose(env, start_tcp_pose[:3])
         obs, info = _refresh_obs_after_manual_qpos(
             env,
@@ -1035,9 +1192,12 @@ def _collect_multimodal_episodes(
                 "trajectory_waypoints": variant["waypoints"],
                 "trajectory_waypoint_metadata": variant["waypoint_metadata"],
                 "trajectory_quality": variant["quality"],
-                "start_tcp_pose": start_tcp_pose.astype(np.float32).tolist(),
-                "goal_pose": _pose_to_list(goal_pose),
+                "start_tcp_pose": variant_start_tcp_pose.astype(np.float32).tolist(),
+                "goal_pose": _pose_to_list(variant_goal_pose),
                 "start_sampling": start_metadata,
+                "randomize_start_goal_orientation": randomize_start_goal_orientation,
+                "start_orientation_quat": variant.get("start_orientation_quat"),
+                "goal_orientation_quat": variant.get("goal_orientation_quat"),
             },
         )
         if episode is not None:
@@ -1263,21 +1423,88 @@ def generate_multimodal_waypoints(
     curved_paths: bool = False,
     curvature_std: float = 0.10,
     verbose_waypoints: bool = False,
+    randomize_start_goal_orientation: bool = False,
+    orientation_cone_deg: float = 120.0,
 ) -> list[dict[str, Any]]:
     """Sample waypoint-conditioned variants while keeping the official planner in charge."""
     start = np.asarray(current_tcp_pose[:3], dtype=np.float64)
     goal = np.asarray(goal_pose.p, dtype=np.float64).reshape(-1, 3)[0]
     goal_quat = np.asarray(goal_pose.q, dtype=np.float64).reshape(4)
+    default_start_quat = np.asarray(current_tcp_pose[3:7], dtype=np.float32)
     delta = goal - start
     distance = float(np.linalg.norm(delta))
     if distance < 1e-6:
         return []
 
     specs = _trajectory_variant_specs(variants_per_reset)
+
+    # Per-family start/goal orientation pools. FPS-selected so the orientations used
+    # across this reset's episodes are spread out rather than clustered together --
+    # see _farthest_point_select_orientations. Independent pools for start vs. goal
+    # since both need broad SO(3) coverage for arbitrary orientation steering at
+    # inference time (not just "start != goal within one episode").
+    start_quat_pool: list[np.ndarray] = []
+    goal_quat_pool: list[np.ndarray] = []
+    if randomize_start_goal_orientation:
+        candidate_pool_size = max(len(specs) * 4, 12)
+        start_candidates = [
+            _sample_broad_orientation_sapien(rng, cone_deg=orientation_cone_deg)
+            for _ in range(candidate_pool_size)
+        ]
+        goal_candidates = [
+            _sample_broad_orientation_sapien(rng, cone_deg=orientation_cone_deg)
+            for _ in range(candidate_pool_size)
+        ]
+        start_quat_pool = _farthest_point_select_orientations(
+            start_candidates, k=len(specs), rng=rng
+        )
+        goal_quat_pool = _farthest_point_select_orientations(
+            goal_candidates, k=len(specs), rng=rng
+        )
+
     variants: list[dict[str, Any]] = []
     failed_family_count = 0
     max_failed_families = 5
-    for spec in specs:
+    for spec_idx, spec in enumerate(specs):
+        family_start_qpos = start_qpos
+        family_start_quat = default_start_quat
+        family_goal_quat = goal_quat
+        family_goal_pose = goal_pose
+        if randomize_start_goal_orientation:
+            start_resolution = _resolve_reachable_orientation(
+                planner=planner,
+                env=env,
+                sapien=sapien,
+                position=start.astype(np.float32),
+                primary_quat=start_quat_pool[spec_idx],
+                seed_qpos=start_qpos,
+                rng=rng,
+                cone_deg=orientation_cone_deg,
+                suppress_planner_output=suppress_planner_output,
+            )
+            if start_resolution is not None:
+                family_start_qpos, family_start_quat = start_resolution
+            goal_resolution = _resolve_reachable_orientation(
+                planner=planner,
+                env=env,
+                sapien=sapien,
+                position=goal.astype(np.float32),
+                primary_quat=goal_quat_pool[spec_idx],
+                seed_qpos=family_start_qpos,
+                rng=rng,
+                cone_deg=orientation_cone_deg,
+                suppress_planner_output=suppress_planner_output,
+            )
+            if goal_resolution is not None:
+                _goal_final_qpos, family_goal_quat = goal_resolution
+                family_goal_pose = _pose_with_orientation(
+                    sapien, position=goal.astype(np.float32), quat=family_goal_quat
+                )
+            print(
+                f"[seed {seed}] family {spec.family_id}:{spec.name} orientation: "
+                f"start={family_start_quat.tolist()} goal={family_goal_quat.tolist()}",
+                flush=True,
+            )
         selected_variant: dict[str, Any] | None = None
         geometry_candidates = 0
         planned_candidates = 0
@@ -1320,15 +1547,27 @@ def generate_multimodal_waypoints(
                 continue
             geometry_candidates += 1
 
-            waypoint_poses = [
-                sapien.Pose(p=waypoint.astype(np.float32), q=goal_quat.astype(np.float32))
-                for waypoint in waypoints
-            ]
+            if randomize_start_goal_orientation:
+                waypoint_poses = [
+                    _pose_with_orientation(
+                        sapien,
+                        position=waypoint.astype(np.float32),
+                        quat=_slerp_two_orientations(
+                            wp_meta["path_ratio"], family_start_quat, family_goal_quat
+                        ),
+                    )
+                    for waypoint, wp_meta in zip(waypoints, waypoint_metadata, strict=True)
+                ]
+            else:
+                waypoint_poses = [
+                    sapien.Pose(p=waypoint.astype(np.float32), q=goal_quat.astype(np.float32))
+                    for waypoint in waypoints
+                ]
             plan_result = _plan_multisegment_trajectory(
                 planner=planner,
                 env=env,
-                poses=[*waypoint_poses, goal_pose],
-                start_qpos=start_qpos,
+                poses=[*waypoint_poses, family_goal_pose],
+                start_qpos=family_start_qpos,
                 suppress_planner_output=suppress_planner_output,
                 smooth_trajectory=smooth_trajectory,
             )
@@ -1398,6 +1637,9 @@ def generate_multimodal_waypoints(
                 "waypoints": [waypoint.astype(np.float32).tolist() for waypoint in waypoints],
                 "waypoint_metadata": waypoint_metadata,
                 "quality": quality,
+                "start_qpos": family_start_qpos,
+                "start_orientation_quat": family_start_quat.tolist(),
+                "goal_orientation_quat": family_goal_quat.tolist(),
             }
             print(
                 f"[seed {seed}] family {spec.family_id}:{spec.name} first feasible "

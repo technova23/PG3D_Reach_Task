@@ -625,7 +625,7 @@ def episode_metric_row(
     *,
     method: EvalMethod,
     episode: int,
-    seed: int,
+    seed: int | None,
     path: EpisodePath,
     constraints: list[Any],
     reach_success: bool,
@@ -672,7 +672,7 @@ def episode_metric_row(
     row = {
         "method": method,
         "episode": int(episode),
-        "seed": int(seed),
+        "seed": (int(seed) if seed is not None else None),
         "steps": int(steps),
         "replans": int(replans),
         "reach_success": bool(reach_success),
