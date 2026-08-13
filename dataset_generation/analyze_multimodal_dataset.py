@@ -50,13 +50,21 @@ def _family_path_spread_metric(
     goal_pos: np.ndarray,
     starts: np.ndarray,
     ends: np.ndarray,
-    decimals: int = 4,
+    decimals: int = 2,
 ) -> dict:
     """Quantify path multimodality: average, across unique (start, goal) pairs,
     the standard deviation of `_path_lateral_width` across that pair's family
-    variants. Episodes are grouped by exact (rounded) start/goal match, since
-    family variants generated in the same reset share bit-identical start/goal
-    coordinates.
+    variants. Episodes are grouped by rounded start/goal position match.
+
+    Family variants generated in the same reset share the same *nominal*
+    start/goal position, but are no longer bit-identical: under
+    --randomize-start-goal-orientation (write_maniskill_reach_dataset.py),
+    each family independently IK/motion-plans its own start pose (same
+    target xyz, different target orientation), so the actual achieved
+    position can differ by small numerical amounts across families. Default
+    decimals=2 (~1cm) tolerates that while still separating genuinely
+    different start/goal pairs, which are normally resampled much farther
+    apart than that.
     """
     start_xyz = tcp_pose[starts][:, :3]
     goal_xyz = goal_pos[starts]
@@ -112,6 +120,18 @@ def main() -> int:
         type=int,
         default=12,
         help="Number of trajectory families to expect (for the overlay plot).",
+    )
+    parser.add_argument(
+        "--position-match-decimals",
+        type=int,
+        default=2,
+        help=(
+            "Decimal places used to group episodes by start/goal position when "
+            "computing path_multimodality (default 2, ~1cm). Loosen (lower) if a dataset "
+            "generated with --randomize-start-goal-orientation shows num_start_goal_pairs=0 "
+            "-- independent per-family orientation IK solves make positions no longer "
+            "bit-identical across family variants."
+        ),
     )
     args = parser.parse_args()
 
@@ -226,6 +246,7 @@ def main() -> int:
         goal_pos=goal_pos,
         starts=starts,
         ends=ends,
+        decimals=args.position_match_decimals,
     )
 
     # --------------------------------------------------
