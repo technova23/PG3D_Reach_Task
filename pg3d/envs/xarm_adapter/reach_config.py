@@ -62,9 +62,9 @@ ROBOT_BASE_POSITION = np.array([-0.615, 0.0, 0.0], dtype=np.float32)
 # actual gripper-equipped robot; see module docstring for the 2026-07-02 re-tune.
 XARM7_REACH_BOX_BASE = np.array(
     [
-        [0.18, 0.60],   # forward (dx) — expanded 2026-08-08, was 0.50; re-verify before trusting
+        [0.18, 0.65],   # forward (dx) — expanded 2026-08-08, was 0.50; re-verify before trusting
         [-0.42, 0.42],  # lateral (dy) — symmetric, unchanged (already Panda-comparable)
-        [0.05, 0.50],   # height  (dz) above the base/table surface — expanded 2026-08-08, was 0.37
+        [0.05, 0.55],   # height  (dz) above the base/table surface — expanded 2026-08-08, was 0.37
     ],
     dtype=np.float32,
 )
