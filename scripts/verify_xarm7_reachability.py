@@ -115,6 +115,9 @@ def _discover_reachable_envelope(
 
     reachable_points: list[np.ndarray] = []
     unreachable_points: list[np.ndarray] = []
+    ik_success_count = 0
+    fk_check_failures = 0
+    diagnosed = False
     for dp in grid:
         if float(np.linalg.norm(dp[:2])) < min_base_clearance:
             continue
@@ -124,16 +127,40 @@ def _discover_reachable_envelope(
         if status != "Success":
             unreachable_points.append(dp)
             continue
+        ik_success_count += 1
         # mplib's IK may return either a single qpos array or a list of
         # candidate qpos arrays depending on version; handle both.
         ik_qpos = ik_result[0] if isinstance(ik_result, (list, tuple)) else ik_result
-        _set_robot_qpos(env, np.asarray(ik_qpos, dtype=np.float32))
+        ik_qpos = np.asarray(ik_qpos, dtype=np.float32)
+        if not diagnosed:
+            print(
+                f"   [diag] first IK success at dp={dp.tolist()}: "
+                f"ik_result type={type(ik_result).__name__} "
+                f"ik_qpos shape={ik_qpos.shape} start_qpos shape={np.asarray(start_qpos).shape}",
+                flush=True,
+            )
+        _set_robot_qpos(env, ik_qpos)
         actual_tcp = _tcp_pose(env.unwrapped)
         distance = float(np.linalg.norm(actual_tcp[:3].astype(np.float64) - world_p))
+        if not diagnosed:
+            print(
+                f"   [diag] target_world={world_p.tolist()} "
+                f"actual_tcp_world={actual_tcp[:3].astype(np.float64).tolist()} "
+                f"distance={distance:.4f} tolerance={position_tolerance}",
+                flush=True,
+            )
+            diagnosed = True
         if distance <= position_tolerance:
             reachable_points.append(dp)
         else:
+            fk_check_failures += 1
             unreachable_points.append(dp)
+    print(
+        f"   [diag] ik_success_count={ik_success_count} "
+        f"fk_check_failures={fk_check_failures} "
+        f"fk_check_passes={ik_success_count - fk_check_failures}",
+        flush=True,
+    )
     _set_robot_qpos(env, start_qpos)
     return (
         np.asarray(reachable_points, dtype=np.float64).reshape(-1, 3),
