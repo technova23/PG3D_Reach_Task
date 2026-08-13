@@ -334,7 +334,9 @@ def run_generation(
             "external_dp3": git_commit_info(repo_root / "external" / "dp3"),
         },
     }
-    summary = write_reach_zarr(args.output, episodes, metadata=metadata, overwrite=args.overwrite)
+    summary = write_reach_zarr(
+        args.output, episodes, metadata=metadata, overwrite=args.overwrite, append=args.append
+    )
     alias_arrays = _ensure_goal_observation_aliases(args.output)
     summary.get("arrays", {}).update(alias_arrays)
     family_arrays = _ensure_trajectory_family_arrays(args.output, episodes)
@@ -665,7 +667,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--keep-failures", action="store_true")
     parser.add_argument("--output", type=Path, default=Path("artifacts/pg3d_reach_balanced.zarr"))
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--overwrite", action="store_true", help="replace existing output zarr")
+    parser.add_argument("--append", action="store_true", help="append to existing output zarr")
     args = parser.parse_args(argv)
     if args.seed_start is None:
         args.seed_start = int(np.random.SeedSequence().entropy % (2**31 - 1))
@@ -703,6 +706,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--orientation-cone-deg must be between 0 and 180")
     if args.min_feasible_families > args.trajectory_variants_per_reset:
         raise ValueError("--min-feasible-families cannot exceed --trajectory-variants-per-reset")
+    if args.overwrite and args.append:
+        raise ValueError("cannot use both --overwrite and --append")
     if args.acceptance_success_distance <= 0:
         raise ValueError("--acceptance-success-distance must be positive")
     if args.min_base_clearance < 0:
