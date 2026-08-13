@@ -28,6 +28,11 @@ Usage:
 
     # Sweep the gripper variant instead (TCP = link_tcp)
     python scripts/verify_xarm7_reachability.py --variant gripper
+
+    # Also empirically discover the true reachable envelope (broad grid, IK +
+    # forward-kinematics re-check per point) before verifying the shipped boxes,
+    # and get a suggested XARM7_REACH_BOX_BASE derived from what's actually reachable
+    python scripts/verify_xarm7_reachability.py --variant gripper --discover-envelope
 """
 
 from __future__ import annotations
@@ -73,6 +78,79 @@ def _sweep(planner: Any, base_pos: np.ndarray, start_qpos: np.ndarray,
         status, _ = planner.IK(goal, start_qpos, n_init_qpos=20, threshold=1e-3)
         reachable[i] = status == "Success"
     return reachable
+
+
+def _discover_reachable_envelope(
+    planner: Any,
+    env: Any,
+    base_pos: np.ndarray,
+    start_qpos: np.ndarray,
+    quat_wxyz: np.ndarray,
+    *,
+    bounds: np.ndarray,
+    grid_shape: tuple[int, int, int],
+    min_base_clearance: float,
+    position_tolerance: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Broad grid-search reachability discovery over `bounds` (base-relative),
+    the same analogy as a PyBullet-style "IK then re-verify with forward
+    kinematics" sweep: solve IK for every candidate point, then actually set
+    the resulting qpos on the simulated robot and check where its TCP really
+    ended up, rather than trusting the solver's own status flag alone.
+
+    Unlike a plain PyBullet `calculateInverseKinematics` sweep, this keeps two
+    properties that matter for this repo's actual failure modes:
+    - mplib's IK is collision-aware (rejects self-colliding solutions), which
+      is what originally caught the xarm7_gripper wrist-fold blind spot (see
+      reach_config.py docstring); a non-collision-aware solver would report
+      false positives there.
+    - IK is solved at the fixed downward TCP orientation every reach goal
+      actually uses, not a free/unconstrained orientation, which would
+      overstate reachability relative to what data-gen can actually use.
+    """
+    from dataset_generation.write_maniskill_reach_dataset import _set_robot_qpos, _tcp_pose
+
+    axes = [np.linspace(lo, hi, n) for (lo, hi), n in zip(bounds, grid_shape, strict=True)]
+    grid = np.array(np.meshgrid(*axes, indexing="ij")).reshape(3, -1).T.astype(np.float64)
+
+    reachable_points: list[np.ndarray] = []
+    unreachable_points: list[np.ndarray] = []
+    for dp in grid:
+        if float(np.linalg.norm(dp[:2])) < min_base_clearance:
+            continue
+        world_p = base_pos + dp
+        goal = np.hstack([world_p, quat_wxyz]).astype(np.float64)
+        status, ik_result = planner.IK(goal, start_qpos, n_init_qpos=20, threshold=1e-3)
+        if status != "Success":
+            unreachable_points.append(dp)
+            continue
+        # mplib's IK may return either a single qpos array or a list of
+        # candidate qpos arrays depending on version; handle both.
+        ik_qpos = ik_result[0] if isinstance(ik_result, (list, tuple)) else ik_result
+        _set_robot_qpos(env, np.asarray(ik_qpos, dtype=np.float32))
+        actual_tcp = _tcp_pose(env.unwrapped)
+        distance = float(np.linalg.norm(actual_tcp[:3].astype(np.float64) - world_p))
+        if distance <= position_tolerance:
+            reachable_points.append(dp)
+        else:
+            unreachable_points.append(dp)
+    _set_robot_qpos(env, start_qpos)
+    return (
+        np.asarray(reachable_points, dtype=np.float64).reshape(-1, 3),
+        np.asarray(unreachable_points, dtype=np.float64).reshape(-1, 3),
+    )
+
+
+def _suggest_box_from_points(points: np.ndarray, *, percentile: float) -> np.ndarray:
+    """Robust axis-aligned box [3,2] from a reachable point cloud: trims the
+    outer `percentile` on each side per axis so a handful of sparse,
+    isolated reachable points don't blow the suggested box out to an
+    unrepresentative edge (the interior grid density is what should drive
+    the box, not a lucky far-corner hit).
+    """
+    lo = np.percentile(points, percentile, axis=0)
+    hi = np.percentile(points, 100.0 - percentile, axis=0)
+    return np.stack([lo, hi], axis=1)
 
 
 def _build_planner(variant: str):
@@ -143,6 +221,47 @@ def main(argv: list[str] | None = None) -> int:
               f"base={base_pos.tolist()}, orient(wxyz)={_DOWN_QUAT_WXYZ.tolist()}")
         print(f"IK seed = rest qpos, grid = {args.grid}^3\n")
 
+        if args.discover_envelope:
+            print("── STAGE 1: envelope discovery (broad grid, IK + forward-kinematics re-check)")
+            discover_bounds = np.asarray(args.discover_bounds, dtype=np.float64).reshape(3, 2)
+            print(f"   scan bounds (base-rel): dx{discover_bounds[0].tolist()} "
+                  f"dy{discover_bounds[1].tolist()} dz{discover_bounds[2].tolist()} "
+                  f"grid={tuple(args.discover_grid)} "
+                  f"min_base_clearance={args.discover_min_base_clearance} "
+                  f"position_tolerance={args.discover_position_tolerance}")
+            reachable_pts, unreachable_pts = _discover_reachable_envelope(
+                planner,
+                env,
+                base_pos,
+                start_qpos,
+                _DOWN_QUAT_WXYZ,
+                bounds=discover_bounds,
+                grid_shape=tuple(args.discover_grid),
+                min_base_clearance=args.discover_min_base_clearance,
+                position_tolerance=args.discover_position_tolerance,
+            )
+            total_scanned = len(reachable_pts) + len(unreachable_pts)
+            print(f"   reachable: {len(reachable_pts)}/{total_scanned} "
+                  f"({100 * len(reachable_pts) / max(total_scanned, 1):.1f}%)")
+            if len(reachable_pts) > 0:
+                suggested_box = _suggest_box_from_points(
+                    reachable_pts, percentile=args.discover_percentile
+                )
+                print(f"   suggested box (base-rel, {args.discover_percentile:.0f}th/"
+                      f"{100 - args.discover_percentile:.0f}th percentile of reachable points):")
+                print(f"     dx{suggested_box[0].tolist()} dy{suggested_box[1].tolist()} "
+                      f"dz{suggested_box[2].tolist()}")
+                print("   (STAGE 2 below verifies XARM7_REACH_BOX_BASE/MAX_ENVELOPE as shipped, "
+                      "not this suggestion -- update reach_config.py and re-run to verify it.)\n")
+            else:
+                print("   no reachable points found in the scanned bounds\n")
+            if args.csv:
+                for dp in reachable_pts:
+                    csv_rows.append(f"DISCOVERY,{dp[0]:.4f},{dp[1]:.4f},{dp[2]:.4f},1")
+                for dp in unreachable_pts:
+                    csv_rows.append(f"DISCOVERY,{dp[0]:.4f},{dp[1]:.4f},{dp[2]:.4f},0")
+            print("── STAGE 2: verify current reach_config.py boxes")
+
         for name, box in boxes.items():
             corners = _corners(box)
             corner_mask = _sweep(planner, base_pos, start_qpos, corners, _DOWN_QUAT_WXYZ)
@@ -179,6 +298,63 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Which xArm7 agent/TCP to sweep (default: nogripper, TCP=link_eef).")
     p.add_argument("--grid", type=int, default=5, help="Interior grid resolution per axis (N^3 points).")
     p.add_argument("--csv", type=str, default=None, help="Optional path to dump per-point reachability CSV.")
+    p.add_argument(
+        "--discover-envelope",
+        action="store_true",
+        help=(
+            "Before verifying the shipped boxes, run a broad exploratory grid sweep "
+            "(over --discover-bounds) to empirically map the true reachable envelope, "
+            "instead of only checking the already-chosen XARM7_REACH_BOX_BASE/"
+            "MAX_ENVELOPE. Each candidate point's IK solution is re-verified by actually "
+            "setting it on the simulated robot and checking the resulting TCP position "
+            "via forward kinematics (within --discover-position-tolerance), not just "
+            "trusting the IK solver's own status flag. Prints a suggested axis-aligned "
+            "box derived from the discovered reachable points."
+        ),
+    )
+    p.add_argument(
+        "--discover-bounds",
+        type=float,
+        nargs=6,
+        default=[-1.0, 1.0, -1.0, 1.0, 0.0, 1.2],
+        metavar=("DX_MIN", "DX_MAX", "DY_MIN", "DY_MAX", "DZ_MIN", "DZ_MAX"),
+        help=(
+            "Base-relative bounds of the broad candidate region to scan when "
+            "--discover-envelope is set: a natural symmetric box around the base "
+            "(default +/-1.0m lateral, 0-1.2m vertical), not derived from any existing "
+            "reach_config.py box -- the point is to independently discover the true "
+            "reachable shape, not re-measure a pre-set guess."
+        ),
+    )
+    p.add_argument(
+        "--discover-grid",
+        type=int,
+        nargs=3,
+        default=[12, 12, 10],
+        metavar=("NX", "NY", "NZ"),
+        help="Grid resolution per axis (x, y, z) for --discover-envelope.",
+    )
+    p.add_argument(
+        "--discover-min-base-clearance",
+        type=float,
+        default=0.15,
+        help="Skip candidate points with horizontal (xy) distance from the base below this, "
+        "to avoid self-collision artifacts near the base column.",
+    )
+    p.add_argument(
+        "--discover-position-tolerance",
+        type=float,
+        default=0.02,
+        help="Max distance (m) between target and actual FK-derived TCP position to count "
+        "an IK-solved point as genuinely reachable.",
+    )
+    p.add_argument(
+        "--discover-percentile",
+        type=float,
+        default=5.0,
+        help="Percentile (and its 100-p complement) used to derive the suggested box from "
+        "the reachable point cloud, trimming sparse outlier points on each side.",
+    )
     return p.parse_args(argv)
 
 
