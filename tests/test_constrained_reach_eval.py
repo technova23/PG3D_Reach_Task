@@ -1570,9 +1570,7 @@ def test_unsafe_grounded_box_is_rejected_after_final_yaw_and_grounding(
             "30",
         ]
     )
-    original = AvoidRegion(
-        region=BoxRegion(center=[0.0, 0.0, 0.8], half_extents=[0.1, 0.05, 0.2])
-    )
+    original = AvoidRegion(region=BoxRegion(center=[0.0, 0.0, 0.8], half_extents=[0.1, 0.05, 0.2]))
     finalized = _finalize_constraints(
         [original],
         robot_points=np.asarray([[0.0, 0.0, 0.2]], dtype=np.float32),
@@ -1641,9 +1639,7 @@ def test_safe_grounded_placement_is_accepted_without_translation(tmp_path: Path)
 
 
 def test_clearance_exclusions_are_replaced_with_contiguous_output_indices() -> None:
-    constraint = AvoidRegion(
-        region=BoxRegion(center=[0.0, 0.0, 0.2], half_extents=[0.1, 0.1, 0.1])
-    )
+    constraint = AvoidRegion(region=BoxRegion(center=[0.0, 0.0, 0.2], half_extents=[0.1, 0.1, 0.1]))
     accepted: list[RolloutSpec] = []
     attempts: list[dict[str, object]] = []
     for pool_index in range(12):
@@ -2321,6 +2317,8 @@ def test_exact_single_chunk_selection_uses_supported_controller_arguments() -> N
         timer=TimingRecorder(enabled=False),
         compute_counts=ComputeOperationCounts(),
         itps_config=ITPSGuidanceConfig(),
+        itps_collision_model=None,
+        constraint_target="eef",
     )
 
     assert decision.result is not None

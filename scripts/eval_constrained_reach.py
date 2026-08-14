@@ -49,6 +49,9 @@ from pg3d.envs.maniskill_adapter.dataset import (
     git_commit_info,
     load_reach_metadata,
 )
+from pg3d.envs.maniskill_adapter.panda_collision import (
+    load_panda_collision_point_template,
+)
 from pg3d.envs.obstacles import (
     CABINET_COMPONENTS,
     scaled_cabinet_components,
@@ -93,6 +96,7 @@ from pg3d.utils.serialization import jsonable as _jsonable
 from pg3d.world_model import ActionChunk, GeometricWorldModel, ImaginedRollout
 from pg3d.world_model.chunks import interpret_joint_chunk
 from pg3d.world_model.compositor import compose_robot_cloud, static_scene_from_robot_mask
+from pg3d.world_model.panda_collision import DifferentiablePandaCollisionPoints
 from pg3d.world_model.panda_fk import panda_end_effector_position
 from scripts.compare_world_model_rollout import (
     entry_to_world_model_observation,
@@ -132,6 +136,8 @@ class ITPSGuidanceConfig:
     mcmc_steps: int = 4
     energy: AvoidanceEnergyMode = "smooth"
     barrier_temperature: float = 0.01
+    robot_points: int = 1024
+    robot_sample_seed: int = 0
 
     def to_json(self) -> dict[str, float | int | str]:
         return {
@@ -140,6 +146,8 @@ class ITPSGuidanceConfig:
             "mcmc_steps": self.mcmc_steps,
             "energy": self.energy,
             "barrier_temperature": self.barrier_temperature,
+            "robot_points": self.robot_points,
+            "robot_sample_seed": self.robot_sample_seed,
         }
 
 
@@ -396,6 +404,8 @@ def main(argv: list[str] | None = None) -> int:
         mcmc_steps=int(args.itps_mcmc_steps),
         energy=args.itps_energy,
         barrier_temperature=float(args.itps_barrier_temperature),
+        robot_points=int(args.itps_robot_points),
+        robot_sample_seed=int(args.itps_robot_sample_seed),
     )
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, args.checkpoint_dir)
     try:
@@ -541,6 +551,14 @@ def main(argv: list[str] | None = None) -> int:
             policy_batch_size=args.policy_batch_size,
             timer=timer,
         )
+        itps_collision_model = _make_itps_collision_model(
+            sim_env,
+            policy=policy,
+            constraint_target=args.constraint_target,
+            methods=args.methods,
+            config=itps_config,
+            gripper_open=float(args.gripper_open),
+        )
         with (
             metrics_path.open("w", encoding="utf-8") as metrics_file,
             decisions_path.open("w", encoding="utf-8") as decisions_file,
@@ -667,6 +685,8 @@ def main(argv: list[str] | None = None) -> int:
                         directional_sign=_steer_sign(args.steer),
                         directional_weight=args.steer_weight,
                         itps_config=itps_config,
+                        itps_collision_model=itps_collision_model,
+                        constraint_target=args.constraint_target,
                         artifact_identity={
                             "run_id": run_id,
                             "git_commit": git_info["commit"],
@@ -752,8 +772,7 @@ def main(argv: list[str] | None = None) -> int:
             ghost_env.close()
 
     target_valid_shortfall = (
-        args.target_valid_episodes is not None
-        and len(accepted_specs) < args.target_valid_episodes
+        args.target_valid_episodes is not None and len(accepted_specs) < args.target_valid_episodes
     )
     if args.target_valid_episodes is not None:
         episode_indices_path = args.output_dir / "episode_indices.txt"
@@ -818,9 +837,7 @@ def main(argv: list[str] | None = None) -> int:
         "contact_termination": {
             "enabled": bool(args.terminate_on_obstacle_contact),
             "sources": ["physx", "whole_robot_signed_clearance"],
-            "geometric_contact_threshold_m": float(
-                args.geometric_contact_threshold
-            ),
+            "geometric_contact_threshold_m": float(args.geometric_contact_threshold),
             "keeps_first_contact_frame": True,
         },
         "timing": timer.summary(),
@@ -939,6 +956,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="smooth",
     )
     parser.add_argument("--itps-barrier-temperature", type=float, default=0.01)
+    parser.add_argument(
+        "--itps-robot-points",
+        type=int,
+        default=1024,
+        help="Collision-surface point count per pose for whole-body ITPS guidance.",
+    )
+    parser.add_argument(
+        "--itps-robot-sample-seed",
+        type=int,
+        default=0,
+        help="Deterministic Panda collision-surface sampling seed.",
+    )
     parser.add_argument(
         "--max-steps",
         type=int,
@@ -1319,13 +1348,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.constraints_dir is not None or args.no_constraints:
             raise ValueError("--target-valid-episodes requires generated constraints")
         if not args.embody_obstacle or not args.ground_embodied_obstacle:
-            raise ValueError(
-                "--target-valid-episodes requires a grounded embodied obstacle"
-            )
+            raise ValueError("--target-valid-episodes requires a grounded embodied obstacle")
         if not args.robot_clearance_placement:
-            raise ValueError(
-                "--target-valid-episodes requires --robot-clearance-placement"
-            )
+            raise ValueError("--target-valid-episodes requires --robot-clearance-placement")
     if args.paired_bootstrap_samples <= 0:
         raise ValueError("--paired-bootstrap-samples must be positive")
     if args.no_constraints and args.constraints_dir is not None:
@@ -1398,6 +1423,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--itps-mcmc-steps must be positive")
     if args.itps_barrier_temperature <= 0.0:
         raise ValueError("--itps-barrier-temperature must be positive")
+    if args.itps_robot_points < 320:
+        raise ValueError("--itps-robot-points must be at least 320")
+    if args.itps_robot_sample_seed < 0:
+        raise ValueError("--itps-robot-sample-seed must be non-negative")
     if args.avoid_radius <= 0.0 or args.avoid_min_radius <= 0.0:
         raise ValueError("avoid radii must be positive")
     if not np.isfinite(args.avoid_clearance_scale) or args.avoid_clearance_scale < 0.0:
@@ -1447,8 +1476,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         or args.precomputed_initial_clearance_margin < 0.0
     ):
         raise ValueError("--precomputed-initial-clearance-margin must be finite and non-negative")
-    if args.constraint_target == "robot" and "itps" in args.methods:
-        raise ValueError("--methods itps supports only --constraint-target eef")
+    if (
+        args.constraint_target == "robot"
+        and "itps" in args.methods
+        and (not np.isfinite(args.gripper_open) or not 0.0 <= args.gripper_open <= 0.04)
+    ):
+        raise ValueError("whole-body ITPS requires --gripper-open within [0, 0.04]")
     guidance_methods = {"rejection", "reranking"}
     if (
         args.constraint_target == "robot"
@@ -1508,6 +1541,8 @@ def run_eval_episode(
     rng: np.random.Generator,
     timer: TimingRecorder,
     itps_config: ITPSGuidanceConfig,
+    itps_collision_model: DifferentiablePandaCollisionPoints | None,
+    constraint_target: Literal["eef", "robot"],
     video_env_factory: Callable[[], Any] | None = None,
     constraint_overlay_alpha: float = 0.25,
     constraint_overlay_color: tuple[float, float, float] = (1.0, 0.25, 0.05),
@@ -1670,6 +1705,8 @@ def run_eval_episode(
                         directional_sign=directional_sign,
                         directional_weight=directional_weight,
                         itps_config=itps_config,
+                        itps_collision_model=itps_collision_model,
+                        constraint_target=constraint_target,
                     )
             finally:
                 compute_counts.end_action_selection(policy.device, memory_baseline)
@@ -1853,14 +1890,10 @@ def run_eval_episode(
             _close_env(video_env)
 
     video_path = (
-        output_dir / "videos" / method / f"episode_{spec.output_index:03d}.mp4"
-        if video
-        else None
+        output_dir / "videos" / method / f"episode_{spec.output_index:03d}.mp4" if video else None
     )
     rerun_path = (
-        output_dir / "rerun" / method / f"episode_{spec.output_index:03d}.rrd"
-        if rerun
-        else None
+        output_dir / "rerun" / method / f"episode_{spec.output_index:03d}.rrd" if rerun else None
     )
     control_dt = _env_control_dt(sim_env)
     robot_clearance_point_clouds: list[np.ndarray] | None = None
@@ -2027,9 +2060,7 @@ def _episode_artifact_identity(
         {
             "method": str(row["method"]),
             "episode": int(row["episode"]),
-            "simulator_seed": int(
-                identity.get("simulator_seed", row.get("seed", 0))
-            ),
+            "simulator_seed": int(identity.get("simulator_seed", row.get("seed", 0))),
             "dataset_episode_index": identity.get("dataset_episode_index"),
             "obstacle_id": row.get("obstacle_id"),
             "obstacle_family": row.get("obstacle_family"),
@@ -2233,6 +2264,8 @@ def _select_decision(
     timer: TimingRecorder,
     compute_counts: ComputeOperationCounts,
     itps_config: ITPSGuidanceConfig,
+    itps_collision_model: DifferentiablePandaCollisionPoints | None,
+    constraint_target: Literal["eef", "robot"],
     directional_sign: int = 0,
     directional_weight: float = 1.0,
 ) -> EvalDecisionSummary:
@@ -2257,6 +2290,8 @@ def _select_decision(
                 rng=rng,
                 config=itps_config,
                 compute_counts=compute_counts,
+                collision_model=itps_collision_model,
+                constraint_target=constraint_target,
             ),
             result=None,
             candidate_feasible=0,
@@ -2387,6 +2422,8 @@ def _select_itps_chunk(
     rng: np.random.Generator,
     config: ITPSGuidanceConfig,
     compute_counts: ComputeOperationCounts,
+    collision_model: DifferentiablePandaCollisionPoints | None,
+    constraint_target: Literal["eef", "robot"],
 ) -> ActionChunk:
     device = policy.device
     obs_batch = _repeat_obs_window_to_torch(
@@ -2404,10 +2441,21 @@ def _select_itps_chunk(
 
     def guidance_fn(traj: torch.Tensor) -> torch.Tensor:
         compute_counts.record_differentiable_fk(traj)
-        eef_path = _itps_eef_path(policy, traj, world_from_base)
+        if constraint_target == "robot":
+            if collision_model is None:
+                raise RuntimeError("whole-body ITPS requires Panda collision geometry")
+            guidance_points = _itps_robot_points(
+                policy,
+                traj,
+                world_from_base,
+                collision_model,
+            )
+        else:
+            guidance_points = _itps_eef_path(policy, traj, world_from_base)
         return avoidance_energy(
-            eef_path,
+            guidance_points,
             constraints,
+            target=constraint_target,
             mode=config.energy,
             temperature=config.barrier_temperature,
         )
@@ -2424,7 +2472,11 @@ def _select_itps_chunk(
         actions=action.detach().cpu().numpy().astype(np.float32, copy=True),
         action_mode=_action_mode("abs_joint"),
         dt=1.0,
-        metadata={"method": "itps", **config.to_json()},
+        metadata={
+            "method": "itps",
+            "guidance_target": constraint_target,
+            **config.to_json(),
+        },
     )
 
 
@@ -2437,6 +2489,46 @@ def _itps_eef_path(
     normalized_actions = normalized_trajectory[..., : policy.action_dim]
     actions = policy.normalizer["action"].unnormalize(normalized_actions)
     return panda_end_effector_position(actions[..., :7], world_from_base)
+
+
+def _itps_robot_points(
+    policy: SimpleDP3,
+    normalized_trajectory: torch.Tensor,
+    world_from_base: torch.Tensor,
+    collision_model: DifferentiablePandaCollisionPoints,
+) -> torch.Tensor:
+    """Unnormalize an ITPS trajectory and transform sampled Panda collision points."""
+    normalized_actions = normalized_trajectory[..., : policy.action_dim]
+    actions = policy.normalizer["action"].unnormalize(normalized_actions)
+    return collision_model(actions[..., :7], world_from_base)
+
+
+def _make_itps_collision_model(
+    env: Any,
+    *,
+    policy: SimpleDP3,
+    constraint_target: Literal["eef", "robot"],
+    methods: list[str],
+    config: ITPSGuidanceConfig,
+    gripper_open: float,
+) -> DifferentiablePandaCollisionPoints | None:
+    """Build whole-body ITPS geometry once for the active Panda environment."""
+    if constraint_target != "robot" or "itps" not in methods:
+        return None
+    unwrapped = getattr(env, "unwrapped", env)
+    agent = getattr(unwrapped, "agent", None)
+    urdf_path = getattr(agent, "urdf_path", None)
+    if urdf_path is None:
+        raise RuntimeError("whole-body ITPS requires an active Panda agent with urdf_path")
+    template = load_panda_collision_point_template(
+        urdf_path,
+        point_count=config.robot_points,
+        sample_seed=config.robot_sample_seed,
+    )
+    return DifferentiablePandaCollisionPoints(
+        template,
+        gripper_open=gripper_open,
+    ).to(device=policy.device, dtype=policy.dtype)
 
 
 def _build_multichunk_candidates(
@@ -4122,10 +4214,7 @@ def _subsample_robot_clouds(
     indices = list(range(0, len(clouds), stride))
     if indices[-1] != len(clouds) - 1:
         indices.append(len(clouds) - 1)
-    return [
-        np.asarray(clouds[index], dtype=np.float32).reshape(-1, 3)
-        for index in indices
-    ]
+    return [np.asarray(clouds[index], dtype=np.float32).reshape(-1, 3) for index in indices]
 
 
 def _env_kwargs(
@@ -4640,9 +4729,7 @@ def validate_artifact_manifest(
             raise ValueError(f"artifact {artifact['artifact_id']} has video without Rerun")
         embedded_identity = artifact.get("embedded_identity")
         if embedded_identity is None:
-            raise ValueError(
-                f"artifact {artifact['artifact_id']} is missing embedded identity"
-            )
+            raise ValueError(f"artifact {artifact['artifact_id']} is missing embedded identity")
         if embedded_identity != row.get("embedded_artifact_identity"):
             raise ValueError(
                 f"artifact {artifact['artifact_id']} embedded identity disagrees "
@@ -4663,22 +4750,14 @@ def validate_artifact_manifest(
                     "with its metrics row"
                 )
         if files.get("video") is not None and row.get("video_labels_embedded") is not True:
-            raise ValueError(
-                f"artifact {artifact['artifact_id']} video has no embedded labels"
-            )
+            raise ValueError(f"artifact {artifact['artifact_id']} video has no embedded labels")
         if files.get("rerun") is not None and row.get("rerun_identity_embedded") is not True:
-            raise ValueError(
-                f"artifact {artifact['artifact_id']} RRD has no embedded identity"
-            )
+            raise ValueError(f"artifact {artifact['artifact_id']} RRD has no embedded identity")
         metadata_record = files.get("policy_pointcloud_metadata")
         if files.get("rerun") is not None and metadata_record is None:
-            raise ValueError(
-                f"artifact {artifact['artifact_id']} has no RRD metadata sidecar"
-            )
+            raise ValueError(f"artifact {artifact['artifact_id']} has no RRD metadata sidecar")
         if metadata_record is not None:
-            metadata = json.loads(
-                Path(str(metadata_record["path"])).read_text(encoding="utf-8")
-            )
+            metadata = json.loads(Path(str(metadata_record["path"])).read_text(encoding="utf-8"))
             if metadata.get("recording_identity") != embedded_identity:
                 raise ValueError(
                     f"artifact {artifact['artifact_id']} RRD identity disagrees "

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -14,8 +15,18 @@ from pg3d.constraints.geometry import (
 from pg3d.constraints.programs import AvoidProjection, AvoidRegion
 from pg3d.constraints.torch_geometry import avoidance_energy
 from pg3d.policies.dp3.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
+from pg3d.world_model.panda_collision import (
+    DifferentiablePandaCollisionPoints,
+    PandaCollisionPointTemplate,
+)
 from pg3d.world_model.panda_fk import panda_end_effector_position
-from scripts.eval_constrained_reach import _itps_eef_path
+from scripts.eval_constrained_reach import (
+    ComputeOperationCounts,
+    ITPSGuidanceConfig,
+    _itps_eef_path,
+    _itps_robot_points,
+    _select_itps_chunk,
+)
 from scripts.eval_constrained_reach import parse_args as parse_eval_args
 
 
@@ -209,12 +220,125 @@ def test_itps_eef_path_unnormalizes_actions_with_gradients() -> None:
     assert torch.count_nonzero(normalized.grad).item() > 0
 
 
+def test_itps_robot_points_unnormalize_actions_with_gradients() -> None:
+    normalizer = LinearNormalizer(
+        {
+            "action": SingleFieldLinearNormalizer.create_manual(
+                scale=torch.ones(7),
+                offset=torch.zeros(7),
+            )
+        }
+    )
+    policy = SimpleNamespace(action_dim=7, normalizer=normalizer)
+    template = PandaCollisionPointTemplate(
+        local_points=np.zeros((10, 3), dtype=np.float32),
+        link_indices=np.arange(10, dtype=np.int64),
+        link_counts=(1,) * 10,
+        sample_seed=0,
+    )
+    collision_model = DifferentiablePandaCollisionPoints(template)
+    normalized = torch.tensor(
+        [[[0.1, 0.3, -0.2, -1.5, 0.2, 1.7, 0.4]]],
+        requires_grad=True,
+    )
+
+    points = _itps_robot_points(  # type: ignore[arg-type]
+        policy,
+        normalized,
+        torch.eye(4),
+        collision_model,
+    )
+    points[..., 0].sum().backward()
+
+    assert points.shape == (1, 1, 10, 3)
+    assert normalized.grad is not None
+    assert torch.count_nonzero(normalized.grad).item() > 0
+
+
+def test_itps_chunk_uses_whole_body_guidance_with_mocked_policy() -> None:
+    normalizer = LinearNormalizer(
+        {
+            "action": SingleFieldLinearNormalizer.create_manual(
+                scale=torch.ones(7),
+                offset=torch.zeros(7),
+            )
+        }
+    )
+
+    class MockPolicy:
+        device = torch.device("cpu")
+        dtype = torch.float32
+        action_dim = 7
+        goal_marker_points = 0
+        goal_marker_radius = 0.015
+
+        def __init__(self) -> None:
+            self.normalizer = normalizer
+            self.guidance_gradient: torch.Tensor | None = None
+
+        def predict_action_itps(self, _obs_batch, **kwargs):
+            trajectory = torch.tensor(
+                [[[0.1, 0.3, -0.2, -1.5, 0.2, 1.7, 0.4]]],
+                requires_grad=True,
+            )
+            energy = kwargs["guidance_fn"](trajectory)
+            self.guidance_gradient = torch.autograd.grad(energy.sum(), trajectory)[0]
+            return {"action": trajectory.detach(), "action_pred": trajectory.detach()}
+
+    class MockProvider:
+        @staticmethod
+        def world_from_robot_base() -> np.ndarray:
+            return np.eye(4, dtype=np.float32)
+
+    local_points = np.stack(
+        [np.asarray([0.01 * (index + 1), 0.02, 0.03], dtype=np.float32) for index in range(10)]
+    )
+    collision_model = DifferentiablePandaCollisionPoints(
+        PandaCollisionPointTemplate(
+            local_points=local_points,
+            link_indices=np.arange(10, dtype=np.int64),
+            link_counts=(1,) * 10,
+            sample_seed=0,
+        )
+    )
+    policy = MockPolicy()
+    entry = {
+        "point_cloud": np.zeros((4, 3), dtype=np.float32),
+        "agent_pos": np.zeros(9, dtype=np.float32),
+        "target_position": np.asarray([0.5, 0.0, 0.4], dtype=np.float32),
+        "tcp_pose": np.asarray([0.0, 0.0, 0.4, 1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    }
+    constraint = AvoidRegion(
+        SphereRegion(center=[0.4, 0.1, 0.4], radius=0.3),
+        target="robot",
+    )
+
+    chunk = _select_itps_chunk(
+        policy=policy,  # type: ignore[arg-type]
+        provider=MockProvider(),  # type: ignore[arg-type]
+        obs_window=[entry],  # type: ignore[list-item]
+        constraints=[constraint],
+        rng=np.random.default_rng(0),
+        config=ITPSGuidanceConfig(energy="smooth"),
+        compute_counts=ComputeOperationCounts(),
+        collision_model=collision_model,
+        constraint_target="robot",
+    )
+
+    assert chunk.actions.shape == (1, 7)
+    assert chunk.metadata["guidance_target"] == "robot"
+    assert policy.guidance_gradient is not None
+    assert torch.count_nonzero(policy.guidance_gradient).item() > 0
+
+
 def test_itps_cli_defaults_and_validation() -> None:
     args = parse_eval_args(_base_args())
     assert args.itps_guide_ratio == 60.0
     assert args.itps_mcmc_steps == 4
     assert args.itps_energy == "smooth"
     assert args.itps_barrier_temperature == 0.01
+    assert args.itps_robot_points == 1024
+    assert args.itps_robot_sample_seed == 0
 
     selected = parse_eval_args([*_base_args(), "--itps-energy", "hinge", "--itps-mcmc-steps", "2"])
     assert selected.itps_energy == "hinge"
@@ -222,8 +346,25 @@ def test_itps_cli_defaults_and_validation() -> None:
 
     with pytest.raises(ValueError, match="itps-guide-ratio"):
         parse_eval_args([*_base_args(), "--itps-guide-ratio", "-1"])
-    with pytest.raises(ValueError, match="constraint-target eef"):
-        parse_eval_args([*_base_args(), "--methods", "itps", "--constraint-target", "robot"])
+    robot = parse_eval_args([*_base_args(), "--methods", "itps", "--constraint-target", "robot"])
+    assert robot.constraint_target == "robot"
+    assert robot.geometry_mode == "fast"
+    with pytest.raises(ValueError, match="at least 320"):
+        parse_eval_args([*_base_args(), "--itps-robot-points", "319"])
+    with pytest.raises(ValueError, match="sample-seed"):
+        parse_eval_args([*_base_args(), "--itps-robot-sample-seed", "-1"])
+    with pytest.raises(ValueError, match="gripper-open"):
+        parse_eval_args(
+            [
+                *_base_args(),
+                "--methods",
+                "itps",
+                "--constraint-target",
+                "robot",
+                "--gripper-open",
+                "0.05",
+            ]
+        )
 
 
 def _base_args() -> list[str]:
