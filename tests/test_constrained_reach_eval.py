@@ -827,6 +827,7 @@ def test_compute_operation_counts_measure_actual_batches_and_geometry() -> None:
         },
     )
     counts.record_differentiable_fk(torch.zeros((3, 5, 7), dtype=torch.float32))
+    counts.record_differentiable_robot_points(torch.zeros((3, 5, 10, 3), dtype=torch.float32))
     row = counts.to_metric_row(replans=2)
 
     assert row["denoiser_forward_calls"] == 2
@@ -834,6 +835,8 @@ def test_compute_operation_counts_measure_actual_batches_and_geometry() -> None:
     assert row["denoiser_evaluations_per_replan"] == pytest.approx(3.0)
     assert row["differentiable_fk_calls"] == 1
     assert row["differentiable_fk_pose_evaluations"] == 15
+    assert row["differentiable_robot_point_calls"] == 1
+    assert row["differentiable_robot_point_evaluations"] == 150
     assert row["eef_geometry_queries"] == 7
     assert row["robot_point_cloud_queries"] == 5
     assert row["robot_point_cloud_renders"] == 3

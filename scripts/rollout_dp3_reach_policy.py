@@ -706,22 +706,24 @@ def save_rerun_timeline(
         )
         for entry in timeline
     ]
-    np.savez_compressed(
-        bundle_path,
-        point_cloud=np.stack([item["all_points"] for item in semantics]),
-        colors=np.stack([item["all_colors"] for item in semantics]),
-        valid_mask=np.stack([item["all_valid_mask"] for item in semantics]),
-        robot_mask=np.stack([item["all_robot_mask"] for item in semantics]),
-        obstacle_mask=np.stack([item["all_obstacle_mask"] for item in semantics]),
-        scene_mask=np.stack([item["all_scene_mask"] for item in semantics]),
-        goal_mask=np.stack([item["all_goal_mask"] for item in semantics]),
-        target_position=np.stack(
+    replan_metadata, itps_robot_points, itps_link_indices = _pack_itps_replan_geometry(
+        replans or []
+    )
+    bundle_arrays = {
+        "point_cloud": np.stack([item["all_points"] for item in semantics]),
+        "colors": np.stack([item["all_colors"] for item in semantics]),
+        "valid_mask": np.stack([item["all_valid_mask"] for item in semantics]),
+        "robot_mask": np.stack([item["all_robot_mask"] for item in semantics]),
+        "obstacle_mask": np.stack([item["all_obstacle_mask"] for item in semantics]),
+        "scene_mask": np.stack([item["all_scene_mask"] for item in semantics]),
+        "goal_mask": np.stack([item["all_goal_mask"] for item in semantics]),
+        "target_position": np.stack(
             [np.asarray(entry["target_position"], dtype=np.float32) for entry in timeline]
         ),
-        tcp_position=np.stack(
+        "tcp_position": np.stack(
             [np.asarray(entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3] for entry in timeline]
         ),
-        tcp_clearance=np.asarray(
+        "tcp_clearance": np.asarray(
             [
                 _rerun_tcp_clearance(
                     np.asarray(entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3],
@@ -731,7 +733,11 @@ def save_rerun_timeline(
             ],
             dtype=np.float32,
         ),
-    )
+    }
+    if itps_robot_points is not None and itps_link_indices is not None:
+        bundle_arrays["itps_robot_points"] = itps_robot_points
+        bundle_arrays["itps_robot_link_indices"] = itps_link_indices
+    np.savez_compressed(bundle_path, **bundle_arrays)
     constraint_visuals: list[dict[str, Any]] = []
     if constraints:
         from pg3d.viz.constraints import avoid_region_line_visuals
@@ -751,7 +757,7 @@ def save_rerun_timeline(
                 "rerun_writer_version": "0.35.0",
                 "recording_identity": _jsonable(recording_identity or {}),
                 "constraint_visuals": constraint_visuals,
-                "replans": _jsonable(replans or []),
+                "replans": _jsonable(replan_metadata),
             },
             sort_keys=True,
         ),
@@ -772,6 +778,44 @@ def save_rerun_timeline(
         ],
         check=True,
     )
+
+
+def _pack_itps_replan_geometry(
+    replans: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], np.ndarray | None, np.ndarray | None]:
+    """Move large ITPS clouds from JSON metadata into the compressed neutral bundle."""
+    metadata = []
+    point_rollouts = []
+    shared_link_indices: np.ndarray | None = None
+    for replan in replans:
+        record = dict(replan)
+        points = record.pop("itps_robot_points", None)
+        link_indices = record.pop("itps_robot_link_indices", None)
+        if points is not None:
+            if link_indices is None:
+                raise ValueError("ITPS Rerun points require link indices")
+            points_array = np.asarray(points, dtype=np.float32)
+            indices_array = np.asarray(link_indices, dtype=np.int64)
+            if points_array.ndim != 3 or points_array.shape[-1] != 3:
+                raise ValueError("ITPS Rerun points must have shape [H, N, 3]")
+            if indices_array.shape != (points_array.shape[1],):
+                raise ValueError("ITPS Rerun link indices must have shape [N]")
+            if shared_link_indices is None:
+                shared_link_indices = indices_array.copy()
+            elif not np.array_equal(shared_link_indices, indices_array):
+                raise ValueError("ITPS Rerun link indices changed between replans")
+            record["itps_robot_points_bundle_index"] = len(point_rollouts)
+            point_rollouts.append(points_array)
+        elif link_indices is not None:
+            raise ValueError("ITPS Rerun link indices require robot points")
+        metadata.append(record)
+    if not point_rollouts:
+        return metadata, None, None
+    try:
+        stacked = np.stack(point_rollouts, axis=0)
+    except ValueError as exc:
+        raise ValueError("ITPS Rerun point rollout shapes changed between replans") from exc
+    return metadata, stacked, shared_link_indices
 
 
 def _rerun35_exporter_python() -> Path:

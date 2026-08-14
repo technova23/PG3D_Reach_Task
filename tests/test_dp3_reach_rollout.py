@@ -294,6 +294,20 @@ def test_rerun35_export_retains_exact_policy_tensor_bundle(
             "episode": 0,
             "simulator_seed": 123,
         },
+        replans=[
+            {
+                "step": 0,
+                "replan_index": 0,
+                "itps_robot_points": np.zeros((2, 10, 3), dtype=np.float32),
+                "itps_robot_link_indices": np.arange(10, dtype=np.int64),
+                "itps_worst_points": [
+                    {
+                        "constraint_index": 0,
+                        "position": [0.0, 0.0, 0.0],
+                    }
+                ],
+            }
+        ],
     )
 
     with np.load(output.with_suffix(".policy_input.npz"), allow_pickle=False) as bundle:
@@ -307,16 +321,18 @@ def test_rerun35_export_retains_exact_policy_tensor_bundle(
         np.testing.assert_array_equal(bundle["obstacle_mask"][0], semantics["all_obstacle_mask"])
         np.testing.assert_array_equal(bundle["scene_mask"][0], semantics["all_scene_mask"])
         assert bundle["point_cloud"].shape == (1, 4, 3)
+        assert bundle["itps_robot_points"].shape == (1, 2, 10, 3)
+        np.testing.assert_array_equal(bundle["itps_robot_link_indices"], np.arange(10))
     assert output.read_bytes() == b"rrd35"
-    metadata = json.loads(
-        output.with_suffix(".policy_input.json").read_text(encoding="utf-8")
-    )
+    metadata = json.loads(output.with_suffix(".policy_input.json").read_text(encoding="utf-8"))
     assert metadata["rerun_writer_version"] == "0.35.0"
     assert metadata["recording_identity"] == {
         "episode": 0,
         "method": "reranking",
         "simulator_seed": 123,
     }
+    assert "itps_robot_points" not in metadata["replans"][0]
+    assert metadata["replans"][0]["itps_robot_points_bundle_index"] == 0
 
 
 def test_rollout_script_import_keeps_simulator_lazy() -> None:

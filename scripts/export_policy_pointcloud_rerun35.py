@@ -46,6 +46,14 @@ def export(bundle_path: Path, metadata_path: Path, output_path: Path) -> None:
         target = bundle["target_position"]
         tcp = bundle["tcp_position"]
         clearance = bundle["tcp_clearance"]
+        itps_robot_points = (
+            bundle["itps_robot_points"].copy() if "itps_robot_points" in bundle.files else None
+        )
+        itps_robot_link_indices = (
+            bundle["itps_robot_link_indices"].copy()
+            if "itps_robot_link_indices" in bundle.files
+            else None
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with rr.RecordingStream("pg3d_dp3_reach_policy_rollout") as recording:
@@ -66,9 +74,7 @@ def export(bundle_path: Path, metadata_path: Path, output_path: Path) -> None:
         )
         recording.log(
             "recording/identity",
-            rr.TextDocument(
-                json.dumps(metadata.get("recording_identity", {}), sort_keys=True)
-            ),
+            rr.TextDocument(json.dumps(metadata.get("recording_identity", {}), sort_keys=True)),
             static=True,
         )
         for visual in metadata.get("constraint_visuals", []):
@@ -122,6 +128,38 @@ def export(bundle_path: Path, metadata_path: Path, output_path: Path) -> None:
                     f"planning/replan_{replan_index:03d}/selected",
                     rr.LineStrips3D([selected], colors=[255, 0, 255], radii=0.004),
                 )
+            bundle_index = replan.get("itps_robot_points_bundle_index")
+            if bundle_index is not None:
+                if itps_robot_points is None or itps_robot_link_indices is None:
+                    raise RuntimeError("ITPS replan metadata has no bundled robot geometry")
+                link_palette = np.asarray(
+                    [
+                        [31, 119, 180],
+                        [255, 127, 14],
+                        [44, 160, 44],
+                        [214, 39, 40],
+                        [148, 103, 189],
+                        [140, 86, 75],
+                        [227, 119, 194],
+                        [127, 127, 127],
+                        [188, 189, 34],
+                        [23, 190, 207],
+                    ],
+                    dtype=np.uint8,
+                )
+                colors_by_link = link_palette[itps_robot_link_indices]
+                rollout = itps_robot_points[int(bundle_index)]
+                for horizon_index, cloud in enumerate(rollout):
+                    recording.log(
+                        f"planning/replan_{replan_index:03d}/robot/horizon_{horizon_index:03d}",
+                        rr.Points3D(cloud, colors=colors_by_link, radii=0.003),
+                    )
+                for worst in replan.get("itps_worst_points", []):
+                    recording.log(
+                        f"planning/replan_{replan_index:03d}/worst_points/constraint_"
+                        f"{int(worst['constraint_index']):03d}",
+                        rr.Points3D([worst["position"]], colors=[255, 0, 0], radii=0.008),
+                    )
 
 
 def _validate(path: Path) -> int:

@@ -14,7 +14,9 @@ from pg3d.constraints.geometry import (
 )
 from pg3d.constraints.programs import AvoidProjection, AvoidRegion
 from pg3d.constraints.torch_geometry import avoidance_energy
+from pg3d.eval import TimingRecorder
 from pg3d.policies.dp3.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
+from pg3d.world_model import ActionChunk
 from pg3d.world_model.panda_collision import (
     DifferentiablePandaCollisionPoints,
     PandaCollisionPointTemplate,
@@ -25,6 +27,7 @@ from scripts.eval_constrained_reach import (
     ITPSGuidanceConfig,
     _itps_eef_path,
     _itps_robot_points,
+    _itps_robot_replan_diagnostics,
     _select_itps_chunk,
 )
 from scripts.eval_constrained_reach import parse_args as parse_eval_args
@@ -313,6 +316,7 @@ def test_itps_chunk_uses_whole_body_guidance_with_mocked_policy() -> None:
         target="robot",
     )
 
+    compute_counts = ComputeOperationCounts()
     chunk = _select_itps_chunk(
         policy=policy,  # type: ignore[arg-type]
         provider=MockProvider(),  # type: ignore[arg-type]
@@ -320,15 +324,63 @@ def test_itps_chunk_uses_whole_body_guidance_with_mocked_policy() -> None:
         constraints=[constraint],
         rng=np.random.default_rng(0),
         config=ITPSGuidanceConfig(energy="smooth"),
-        compute_counts=ComputeOperationCounts(),
+        compute_counts=compute_counts,
         collision_model=collision_model,
         constraint_target="robot",
     )
 
     assert chunk.actions.shape == (1, 7)
     assert chunk.metadata["guidance_target"] == "robot"
+    assert chunk.metadata["collision_geometry_source"] == "maniskill_panda_urdf"
+    assert chunk.metadata["excluded_collision_links"] == ["panda_link0"]
+    assert sum(chunk.metadata["collision_link_allocation"].values()) == 10
+    assert compute_counts.differentiable_robot_point_calls == 1
+    assert compute_counts.differentiable_robot_point_evaluations == 10
     assert policy.guidance_gradient is not None
     assert torch.count_nonzero(policy.guidance_gradient).item() > 0
+
+
+def test_itps_robot_replan_diagnostics_capture_cloud_and_worst_point() -> None:
+    local_points = np.stack(
+        [np.asarray([0.01 * index, 0.02, 0.03], dtype=np.float32) for index in range(10)]
+    )
+    collision_model = DifferentiablePandaCollisionPoints(
+        PandaCollisionPointTemplate(
+            local_points=local_points,
+            link_indices=np.arange(10, dtype=np.int64),
+            link_counts=(1,) * 10,
+            sample_seed=0,
+        )
+    )
+
+    class MockProvider:
+        @staticmethod
+        def world_from_robot_base() -> np.ndarray:
+            return np.eye(4, dtype=np.float32)
+
+    diagnostics = _itps_robot_replan_diagnostics(
+        ActionChunk(
+            actions=np.zeros((2, 7), dtype=np.float32),
+            action_mode="abs_joint",
+            dt=1.0,
+        ),
+        provider=MockProvider(),  # type: ignore[arg-type]
+        collision_model=collision_model,
+        constraints=[
+            AvoidRegion(
+                SphereRegion(center=[0.1, 0.0, 0.4], radius=0.2),
+                target="robot",
+            )
+        ],
+        timer=TimingRecorder(enabled=False),
+    )
+
+    assert diagnostics["itps_robot_points"].shape == (2, 10, 3)
+    np.testing.assert_array_equal(diagnostics["itps_robot_link_indices"], np.arange(10))
+    worst = diagnostics["itps_worst_points"][0]
+    assert 0 <= worst["horizon_index"] < 2
+    assert 0 <= worst["point_index"] < 10
+    assert np.asarray(worst["position"]).shape == (3,)
 
 
 def test_itps_cli_defaults_and_validation() -> None:

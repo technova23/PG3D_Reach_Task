@@ -159,6 +159,8 @@ class ComputeOperationCounts:
     denoiser_evaluations: int = 0
     differentiable_fk_calls: int = 0
     differentiable_fk_pose_evaluations: int = 0
+    differentiable_robot_point_calls: int = 0
+    differentiable_robot_point_evaluations: int = 0
     end_effector_position_queries: int = 0
     end_effector_position_only_queries: int = 0
     eef_geometry_queries: int = 0
@@ -205,6 +207,13 @@ class ComputeOperationCounts:
         self.differentiable_fk_calls += 1
         self.differentiable_fk_pose_evaluations += int(trajectory.shape[0] * trajectory.shape[1])
 
+    def record_differentiable_robot_points(self, points: torch.Tensor) -> None:
+        """Count one vectorized collision-point transform and all generated XYZ points."""
+        if points.ndim != 4 or points.shape[-1] != 3:
+            raise ValueError("ITPS robot points must have shape [B, H, N, 3]")
+        self.differentiable_robot_point_calls += 1
+        self.differentiable_robot_point_evaluations += int(np.prod(points.shape[:-1]))
+
     def begin_action_selection(self, device: torch.device) -> int | None:
         """Reset PyTorch CUDA peak stats and return the current allocation."""
         if device.type != "cuda" or not torch.cuda.is_available():
@@ -245,6 +254,10 @@ class ComputeOperationCounts:
             "denoiser_evaluations_per_replan": _per_replan(self.denoiser_evaluations, replans),
             "differentiable_fk_calls": int(self.differentiable_fk_calls),
             "differentiable_fk_pose_evaluations": int(self.differentiable_fk_pose_evaluations),
+            "differentiable_robot_point_calls": int(self.differentiable_robot_point_calls),
+            "differentiable_robot_point_evaluations": int(
+                self.differentiable_robot_point_evaluations
+            ),
             "end_effector_position_queries": int(self.end_effector_position_queries),
             "end_effector_position_only_queries": int(self.end_effector_position_only_queries),
             "eef_geometry_queries": int(self.eef_geometry_queries),
@@ -1737,6 +1750,9 @@ def run_eval_episode(
                         decision,
                         provider=provider,
                         current_entry=sim_entry,
+                        constraints=constraints,
+                        constraint_target=constraint_target,
+                        collision_model=itps_collision_model,
                         step=steps,
                         replan_index=replans - 1,
                         timer=timer,
@@ -2450,6 +2466,7 @@ def _select_itps_chunk(
                 world_from_base,
                 collision_model,
             )
+            compute_counts.record_differentiable_robot_points(guidance_points)
         else:
             guidance_points = _itps_eef_path(policy, traj, world_from_base)
         return avoidance_energy(
@@ -2468,6 +2485,14 @@ def _select_itps_chunk(
         mcmc_steps=config.mcmc_steps,
     )
     action = output["action"][0]
+    geometry_metadata: dict[str, Any] = {}
+    if constraint_target == "robot" and collision_model is not None:
+        geometry_metadata = {
+            "collision_geometry_source": "maniskill_panda_urdf",
+            "collision_link_allocation": collision_model.allocation(),
+            "gripper_open": collision_model.gripper_open,
+            "excluded_collision_links": ["panda_link0"],
+        }
     return ActionChunk(
         actions=action.detach().cpu().numpy().astype(np.float32, copy=True),
         action_mode=_action_mode("abs_joint"),
@@ -2476,6 +2501,7 @@ def _select_itps_chunk(
             "method": "itps",
             "guidance_target": constraint_target,
             **config.to_json(),
+            **geometry_metadata,
         },
     )
 
@@ -2825,6 +2851,9 @@ def _rerun_replan_record(
     *,
     provider: ManiSkillGhostPandaGeometryProvider,
     current_entry: Entry,
+    constraints: list[AvoidRegion | AvoidProjection],
+    constraint_target: Literal["eef", "robot"],
+    collision_model: DifferentiablePandaCollisionPoints | None,
     step: int,
     replan_index: int,
     timer: TimingRecorder,
@@ -2862,13 +2891,70 @@ def _rerun_replan_record(
         )
         selected_path = np.concatenate([current_tcp.reshape(1, 3), rollout.eef_path], axis=0)
         selected_index = None
-    return {
+    record = {
         "step": int(step),
         "replan_index": int(replan_index),
         "selection_reason": decision.selection_reason,
         "selected_index": selected_index,
         "selected_eef_path": selected_path,
         "candidates": candidates,
+    }
+    if constraint_target == "robot" and collision_model is not None:
+        record.update(
+            _itps_robot_replan_diagnostics(
+                decision.selected_chunk,
+                provider=provider,
+                collision_model=collision_model,
+                constraints=constraints,
+                timer=timer,
+            )
+        )
+    return record
+
+
+def _itps_robot_replan_diagnostics(
+    action_chunk: ActionChunk,
+    *,
+    provider: ManiSkillGhostPandaGeometryProvider,
+    collision_model: DifferentiablePandaCollisionPoints,
+    constraints: list[AvoidRegion | AvoidProjection],
+    timer: TimingRecorder,
+) -> dict[str, Any]:
+    """Build final selected whole-body geometry without retaining inner MCMC states."""
+    device = collision_model.local_points.device
+    dtype = collision_model.local_points.dtype
+    q = torch.as_tensor(action_chunk.actions[..., :7], device=device, dtype=dtype)
+    world_from_base = torch.as_tensor(
+        provider.world_from_robot_base(),
+        device=device,
+        dtype=dtype,
+    )
+    with timer.time("rerun_itps_robot_geometry"):
+        with torch.no_grad():
+            robot_points = collision_model(q, world_from_base).detach().cpu().numpy()
+    flat_points = robot_points.reshape(-1, 3)
+    points_per_step = int(robot_points.shape[1])
+    worst_points = []
+    for constraint_index, constraint in enumerate(constraints):
+        signed_distance = constraint.region.signed_distance(flat_points)
+        flat_index = int(np.argmin(signed_distance))
+        horizon_index, point_index = divmod(flat_index, points_per_step)
+        distance = float(signed_distance[flat_index])
+        worst_points.append(
+            {
+                "constraint_index": constraint_index,
+                "constraint_name": constraint.name,
+                "horizon_index": horizon_index,
+                "point_index": point_index,
+                "position": robot_points[horizon_index, point_index],
+                "signed_distance": distance,
+                "violation": max(0.0, float(constraint.margin) - distance),
+            }
+        )
+    return {
+        "itps_robot_points": robot_points.astype(np.float32, copy=False),
+        "itps_robot_link_indices": collision_model.link_indices.detach().cpu().numpy(),
+        "itps_worst_points": worst_points,
     }
 
 

@@ -989,6 +989,8 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "denoiser_evaluations_per_replan",
             "differentiable_fk_calls",
             "differentiable_fk_pose_evaluations",
+            "differentiable_robot_point_calls",
+            "differentiable_robot_point_evaluations",
             "end_effector_position_queries",
             "end_effector_position_only_queries",
             "eef_geometry_queries",
