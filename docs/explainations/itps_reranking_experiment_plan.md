@@ -256,7 +256,10 @@ selection, the definitive E3 constrained-test episode set must be disjoint.
 
 The `K=1`, zero-guidance three-episode regression produced bit-identical
 base/rejection/reranking chunks on every seed; ITPS remained different because its
-zero-energy path still uses the isolated DDPM/MCMC sampler rather than ordinary DDIM.
+zero-energy path still uses the isolated four-step MCMC sampler rather than ordinary
+single-pass DDIM. That historical regression used DDPM reverse steps; ITPS switched
+to deterministic DDIM reverse steps on 2026-08-14, so new results require a fresh
+zero-guidance regression and must retain scheduler provenance.
 
 ### E2 — Realistic obstacle embodiment and observation validation
 

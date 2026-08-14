@@ -135,6 +135,7 @@ class ITPSGuidanceConfig:
 
     def to_json(self) -> dict[str, float | int | str]:
         return {
+            "scheduler": "ddim",
             "guide_ratio": self.guide_ratio,
             "mcmc_steps": self.mcmc_steps,
             "energy": self.energy,
@@ -4808,6 +4809,7 @@ def _init_wandb(
                 "execution_horizon_chunks": args.execution_horizon_chunks,
                 "k_schedule": list(args.k_schedule),
                 "itps": {
+                    "scheduler": "ddim",
                     "guide_ratio": float(args.itps_guide_ratio),
                     "mcmc_steps": int(args.itps_mcmc_steps),
                     "energy": str(args.itps_energy),

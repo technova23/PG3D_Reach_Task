@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-08-11
+Last updated: 2026-08-14
 
 ## Current objective
 
@@ -21,8 +21,8 @@ Work for the inference-time policy steering baseline is now isolated on the
 - a faithful `SimpleDP3.stochastic_sample(...)` implementation of the released ITPS
   annealed-MCMC loop: four inner steps by default, guide ratio 60, clean-sample
   re-noising at the same diffusion level, and advancement only on the final inner step,
-- an isolated DDPM scheduler and seeded forward/reverse noise, so ITPS cannot change the
-  scheduler used by base DP3 or later evaluation methods,
+- an isolated deterministic DDIM scheduler and seeded initial/inner-loop forward noise,
+  so ITPS cannot change the scheduler used by base DP3 or later evaluation methods,
 - differentiable Panda FK matched to ManiSkill's `panda_v2.urdf`, including the TCP and
   live robot-base transforms; the live 11-configuration check passed with 0.61 micrometers
   maximum position error,
@@ -74,7 +74,9 @@ replication had identical endpoints and produced five validated MP4/`.rrd` pairs
 A separate three-episode `K=1`, zero-guidance regression produced bit-identical
 base/rejection/reranking chunks and complete MP4/`.rrd` pairs for all four methods;
 ITPS appropriately remained different because its zero-energy path still uses
-DDPM/MCMC inference.
+four-step annealed-MCMC inference rather than ordinary single-pass DDIM. Those
+historical artifacts were generated before the ITPS reverse scheduler changed from
+DDPM to DDIM and must not be mixed with new DDIM-ITPS results.
 E2 has its first end-to-end realistic-obstacle slice: an axis-aligned box is now a
 collidable actor in the control environment rather than a render-only overlay. Live
 camera segmentation tracks it through cropping and Rerun, and runtime validation

@@ -687,7 +687,9 @@ uv run python scripts/eval_constrained_reach.py \
 for the exact max-violation constraint energy. ITPS uses the checkpoint's inference-step count;
 the paper's ten-step Maze2D experiment is not forced on pg3d. Guidance is EEF-only and rejects
 `--constraint-target robot`. Unlike rejection/reranking, ITPS generates one trajectory by modifying
-the reverse diffusion process rather than sampling and scoring K completed candidates.
+the reverse diffusion process rather than sampling and scoring K completed candidates. Its isolated
+DDIM reverse steps are deterministic; fresh Gaussian noise is still sampled when intermediate MCMC
+steps re-noise the predicted clean trajectory back to the current diffusion level.
 
 ### E1 nominal checkpoint gate
 
@@ -745,8 +747,10 @@ uv run python scripts/eval_constrained_reach.py \
 ```
 
 These are nominal-policy and implementation-regression runs, not constrained-task
-results. ITPS still uses its isolated DDPM/MCMC inference procedure when the guide
-ratio is zero, so equality with ordinary DDIM is not expected.
+results. ITPS still uses four inner annealed-MCMC steps when the guide ratio is zero,
+including stochastic clean-sample re-noising, so equality with ordinary single-pass
+DDIM is not expected. Historical runs made before 2026-08-14 used DDPM reverse steps
+and must not be compared as if they used the current DDIM scheduler.
 
 The initial 2026-07-23 E1 run under `artifacts/e1-nominal-step-65000-v2` reached
 14/25 episodes and stably held 12/25, below the predeclared 15/25 transient gate.

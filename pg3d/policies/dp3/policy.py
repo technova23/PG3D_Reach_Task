@@ -347,15 +347,17 @@ class SimpleDP3(BasePolicy):
             "action_pred": action_pred,
         }
 
-    def _make_itps_scheduler(self) -> DDPMScheduler:
-        """Build an isolated DDPM scheduler for ITPS without changing base inference."""
+    def _make_itps_scheduler(self) -> DDIMScheduler:
+        """Build an isolated DDIM scheduler for ITPS without changing base inference."""
         config = self.noise_scheduler.config
-        return DDPMScheduler(
+        return DDIMScheduler(
             num_train_timesteps=int(config.num_train_timesteps),
             beta_start=float(config.beta_start),
             beta_end=float(config.beta_end),
             beta_schedule=str(config.beta_schedule),
             clip_sample=bool(config.clip_sample),
+            set_alpha_to_one=True,
+            steps_offset=0,
             prediction_type=str(config.prediction_type),
         )
 

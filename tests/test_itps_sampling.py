@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from pg3d.policies.dp3 import SimpleDP3
 from pg3d.policies.dp3.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
@@ -129,7 +130,16 @@ def test_itps_requires_batched_tensor_energy() -> None:
         )
 
 
-def test_itps_is_reproducible_and_matches_one_step_ddpm() -> None:
+def test_itps_uses_isolated_ddim_scheduler() -> None:
+    policy = _tiny_policy()
+
+    scheduler = policy._make_itps_scheduler()
+
+    assert isinstance(scheduler, DDIMScheduler)
+    assert scheduler is not policy.noise_scheduler
+
+
+def test_itps_is_reproducible_and_matches_one_step_ddim() -> None:
     policy = _tiny_policy()
     policy.model = _RecordingZeroModel()
     condition = torch.zeros((1, 2, 7))
