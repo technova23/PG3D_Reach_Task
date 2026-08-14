@@ -1,0 +1,25 @@
+[
+  {
+    "clearance_scale": 0.05,
+    "margin": 0,
+    "name": "candidate_midpath_avoid_region",
+    "region": {
+      "center": [
+        -0.1029917299747467,
+        -0.06830453872680664,
+        0.3
+      ],
+      "half_extents": [
+        0.054999999701976776,
+        0.07999999821186066,
+        0.3
+      ],
+      "type": "box",
+      "yaw": 0
+    },
+    "target": "robot",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1
+  }
+]
