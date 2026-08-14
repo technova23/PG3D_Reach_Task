@@ -67,9 +67,9 @@ negative is penetration.
 
 Minimum clearance distinguishes a near miss from deep penetration, while duration and
 integrated violation distinguish a momentary boundary crossing from sustained unsafe
-motion. The primary constraint metric should eventually use whole-robot geometry.
-TCP-only clearance remains a required diagnostic because ITPS currently provides
-EEF-only guidance.
+motion. The primary constraint metric uses whole-robot geometry. TCP-only clearance remains a
+required diagnostic so matched EEF-guidance and whole-body-guidance experiments can be interpreted
+separately.
 
 ### 2.4 Motion-quality metrics
 
@@ -91,7 +91,7 @@ should not be the only paper metric.
 | Action-selection latency | Wall-clock time from receiving an observation window to returning the selected action chunk; report median, p90, and p95 per replan. Synchronize CUDA around timing. |
 | Episode planning time | Sum of action-selection time across replans, excluding rendering and artifact writing. |
 | Policy-network evaluations | Actual denoiser module calls per replan and episode, plus batch-item-equivalent evaluations so one batched `K`-candidate call is not treated as the same amount of work as a batch-one call. |
-| FK / geometry evaluations | Differentiable FK calls and evaluated poses for ITPS; EEF queries, point-cloud queries, and cache-miss renders for reranking. Count only calls made inside action selection. |
+| FK / geometry evaluations | Differentiable FK calls, evaluated poses, collision-point transform calls, and generated points for ITPS; EEF queries, point-cloud queries, and cache-miss renders for reranking. Count only calls made inside action selection. |
 | Peak GPU memory | Maximum absolute and incremental PyTorch CUDA allocation during any action-selection call in the episode. |
 | Throughput | Executed control steps per wall-clock second without video, Rerun, W&B upload, or plot generation. |
 
@@ -466,12 +466,10 @@ Do not tune on the final test episodes; use a disjoint validation set.
 
 ### E7 — Geometry-target ablation
 
-Evaluate TCP/EEF-only, gripper proxy, and whole-robot constraint measurement. Until
-ITPS supports differentiable whole-robot guidance, clearly separate:
-
-- the matched EEF-guidance comparison, and
-- whole-robot executed safety evaluation, where both methods are measured but only
-  reranking may use that geometry internally.
+Evaluate TCP/EEF-only, gripper proxy, and whole-robot constraint measurement. Report two matched
+comparisons: EEF-target constraints for both methods and robot-target constraints for both methods.
+Whole-body ITPS uses 1024 sampled movable-link collision points; executed whole-robot grading still
+includes the fixed base and remains authoritative for both comparisons.
 
 ### E8 — Robustness and repeatability
 
@@ -539,8 +537,8 @@ ITPS before/after-guidance trajectory overlay.
 
 Measured compute instrumentation is now implemented at the actual call boundaries.
 Each episode reports denoiser module calls and batch-item-equivalent evaluations;
-differentiable ITPS FK calls and evaluated poses; fast EEF queries; exact robot-cloud
-queries and cache-miss renders; episode/per-replan geometry totals; and the maximum
+differentiable ITPS FK calls, evaluated poses, and generated collision points; fast EEF queries;
+exact robot-cloud queries and cache-miss renders; episode/per-replan geometry totals; and the maximum
 absolute and incremental PyTorch CUDA allocation observed during action selection.
 Provider deltas are sampled immediately around planning, so Rerun recording and
 post-hoc whole-robot safety grading do not inflate method compute.
@@ -560,9 +558,9 @@ It logs the exact fixed-size point tensor supplied to DP3 after goal-marker
 replacement, plus separate valid robot, ordinary-scene, obstacle, and goal-marker
 entities; executed TCP history; target and constraint wireframes; per-step signed
 clearance and violation state; all reranking candidates with feasibility colors and
-scores; and the selected predicted path for base, reranking, and ITPS. ITPS currently
-has only its final guided path because the isolated sampler does not expose a stable
-before-guidance trajectory artifact.
+scores; and the selected predicted path for base, reranking, and ITPS. Whole-body ITPS additionally
+logs the final selected collision-point rollout colored by link and the worst point for every
+constraint. It does not retain inner MCMC clouds or a before-guidance trajectory.
 
 Time-indexed whole-robot violations and action discontinuity are now implemented.
 When whole-robot grading is enabled, the evaluator retains one mesh-derived robot

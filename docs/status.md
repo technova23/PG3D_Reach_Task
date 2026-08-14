@@ -28,6 +28,8 @@ Work for the inference-time policy steering baseline is now isolated on the
   maximum position error,
 - EEF guidance over every configured sphere, box, or projected rectangle, with selectable
   smooth-barrier or exact-hinge energy and support for constraint margins and weights,
+- whole-body guidance over 1024 deterministic collision-surface points from link1--link7, the
+  hand, and both fingers, using batched differentiable FK and exact worst-point reduction,
 - ITPS as a method in `scripts/eval_constrained_reach.py`; the incomplete standalone sampler
   diagnostic was removed so there is one closed-loop evaluation entrypoint,
 - per-replan JSONL logging of the raw diffusion action chunk and the executed
@@ -35,8 +37,11 @@ Work for the inference-time policy steering baseline is now isolated on the
   behavior can be inspected directly.
 
 ITPS guides the full normalized diffusion horizon, differentiably unnormalizes actions to
-physical joint radians for FK, and returns the same execution slice as normal DP3. It remains an
-EEF-only baseline; differentiable whole-robot collision guidance and sketch input are out of scope.
+physical joint radians for FK, and returns the same execution slice as normal DP3. It supports
+both `--constraint-target eef` and `--constraint-target robot`. Whole-body mode samples the active
+ManiSkill Panda collision geometry once at startup, excludes fixed link0 from gradient guidance,
+and retains full-robot initial-clearance, contact-termination, and executed safety grading.
+Sketch input remains out of scope.
 The active DP3 architecture now has one canonical module implementation at
 `pg3d/policies/dp3/modules.py`; two unreferenced legacy copies at the top of `pg3d/policies/`
 were removed before writing line-referenced diffusion-policy documentation.

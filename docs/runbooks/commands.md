@@ -655,8 +655,9 @@ uv run python scripts/eval_constrained_reach.py \
 
 ### ITPS stochastic-sampling baseline
 
-First validate that differentiable FK matches the live ManiSkill Panda TCP. This check is required
-before running ITPS and fails if any of the rest pose plus ten sampled configurations exceeds 1 mm:
+First validate that differentiable FK matches the live ManiSkill Panda TCP and movable link poses.
+This check is required before running ITPS and fails if any of the rest pose plus ten sampled
+configurations exceeds the configured position or rotation tolerance:
 
 ```bash
 uv run python scripts/check_panda_fk.py --samples 10 --tolerance 0.001
@@ -684,12 +685,48 @@ uv run python scripts/eval_constrained_reach.py \
 ```
 
 `smooth` applies a softplus signed-distance barrier before penetration. Use `--itps-energy hinge`
-for the exact max-violation constraint energy. ITPS uses the checkpoint's inference-step count;
-the paper's ten-step Maze2D experiment is not forced on pg3d. Guidance is EEF-only and rejects
-`--constraint-target robot`. Unlike rejection/reranking, ITPS generates one trajectory by modifying
-the reverse diffusion process rather than sampling and scoring K completed candidates. Its isolated
-DDIM reverse steps are deterministic; fresh Gaussian noise is still sampled when intermediate MCMC
-steps re-noise the predicted clean trajectory back to the current diffusion level.
+for the hinge violation energy. Both modes take the exact worst point across the prediction horizon
+and, for robot guidance, all sampled collision points. ITPS uses the checkpoint's inference-step
+count; the paper's ten-step Maze2D experiment is not forced on pg3d. Unlike rejection/reranking,
+ITPS generates one trajectory by modifying the reverse diffusion process rather than sampling and
+scoring K completed candidates. Its isolated DDIM reverse steps are deterministic; fresh Gaussian
+noise is still sampled when intermediate MCMC steps re-noise the predicted clean trajectory back to
+the current diffusion level.
+
+For whole-body guidance, select robot-target constraint files. The evaluator samples 1024 points
+from the active Panda collision geometry by default; link0 is excluded from guidance but remains in
+the initial-clearance and executed collision checks:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --methods itps \
+  --source dataset \
+  --episodes 1 \
+  --episode-indices-file configs/eval/e3_candidate_midpath_60cm_fixed_v1/episode_indices.txt \
+  --constraints-dir configs/eval/e3_candidate_midpath_60cm_fixed_v1/constraints/robot \
+  --constraint-target robot \
+  --geometry-mode exact \
+  --device cuda \
+  --itps-guide-ratio 60 \
+  --itps-mcmc-steps 4 \
+  --itps-energy smooth \
+  --itps-barrier-temperature 0.01 \
+  --itps-robot-points 1024 \
+  --itps-robot-sample-seed 0 \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.055 0.08 0.30 \
+  --embody-obstacle \
+  --obstacle-family carton \
+  --obstacle-top-z 0.60 \
+  --precomputed-initial-clearance-margin 0.02 \
+  --robot-clearance-metric \
+  --terminate-on-obstacle-contact \
+  --max-steps 1 \
+  --output-dir artifacts/itps-whole-body-smoke \
+  --allow-failure
+```
 
 ### E1 nominal checkpoint gate
 
@@ -874,6 +911,52 @@ For exact whole-robot rejection/reranking, change the method and guidance settin
   --constraints-dir configs/eval/e3_candidate_midpath_75cm_frozen_v1/constraints/robot \
   --constraint-target robot \
   --geometry-mode exact
+```
+
+Run the matched ten-episode 60 cm whole-body ITPS evaluation with:
+
+```bash
+./.venv/bin/python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --methods itps \
+  --source dataset \
+  --episodes 10 \
+  --episode-indices-file configs/eval/e3_candidate_midpath_60cm_fixed_v1/episode_indices.txt \
+  --constraints-dir configs/eval/e3_candidate_midpath_60cm_fixed_v1/constraints/robot \
+  --constraint-target robot \
+  --geometry-mode exact \
+  --planning-horizon-chunks 1 \
+  --execution-horizon-chunks 1 \
+  --k-schedule 16 \
+  --seed 0 \
+  --device cuda \
+  --itps-guide-ratio 60 \
+  --itps-mcmc-steps 4 \
+  --itps-energy smooth \
+  --itps-barrier-temperature 0.01 \
+  --itps-robot-points 1024 \
+  --itps-robot-sample-seed 0 \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.055 0.08 0.30 \
+  --avoid-clearance-scale 0.05 \
+  --embody-obstacle \
+  --obstacle-family carton \
+  --obstacle-point-quota 32 \
+  --obstacle-yaw-deg 0 \
+  --obstacle-top-z 0.60 \
+  --precomputed-initial-clearance-margin 0.02 \
+  --robot-clearance-metric \
+  --terminate-on-obstacle-contact \
+  --max-steps 150 \
+  --post-success-steps 16 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --profile \
+  --sync-cuda-timers \
+  --output-dir artifacts/itps-ddim-whole-body-60cm-fixed \
+  --allow-failure
 ```
 
 The complete frozen mapping and provenance are in
