@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from pg3d.world_model.panda_fk import panda_end_effector_position
+from pg3d.world_model.panda_fk import (
+    PANDA_MOVABLE_COLLISION_LINKS,
+    panda_end_effector_position,
+    panda_link_transforms,
+)
 
 
 def test_panda_fk_matches_urdf_reference_positions() -> None:
@@ -65,6 +69,57 @@ def test_panda_fk_gradient_matches_finite_difference() -> None:
     torch.testing.assert_close(analytic, numeric, atol=1e-6, rtol=1e-5)
 
 
+def test_panda_link_transforms_follow_documented_order() -> None:
+    q = torch.zeros((2, 3, 7), dtype=torch.float64)
+    transforms = panda_link_transforms(q, gripper_open=0.04)
+
+    assert len(PANDA_MOVABLE_COLLISION_LINKS) == 10
+    assert transforms.shape == (2, 3, 10, 4, 4)
+    expected_bottom_row = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=torch.float64)
+    torch.testing.assert_close(
+        transforms[..., 3, :],
+        expected_bottom_row.expand_as(transforms[..., 3, :]),
+    )
+
+
+def test_panda_finger_transforms_use_mirrored_gripper_positions() -> None:
+    q = torch.zeros(7, dtype=torch.float64)
+    closed = panda_link_transforms(q, gripper_open=0.0)
+    opened = panda_link_transforms(q, gripper_open=0.04)
+
+    hand_rotation = opened[7, :3, :3]
+    left_displacement = opened[8, :3, 3] - closed[8, :3, 3]
+    right_displacement = opened[9, :3, 3] - closed[9, :3, 3]
+    expected = hand_rotation @ torch.tensor([0.0, 0.04, 0.0], dtype=torch.float64)
+    torch.testing.assert_close(left_displacement, expected)
+    torch.testing.assert_close(right_displacement, -expected)
+
+
+def test_panda_link_point_gradient_matches_finite_difference() -> None:
+    q = torch.tensor(
+        [0.1, 0.3, -0.2, -1.5, 0.2, 1.7, 0.4],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    local_point = torch.tensor([0.03, -0.02, 0.04, 1.0], dtype=torch.float64)
+
+    def transformed_point(value: torch.Tensor) -> torch.Tensor:
+        return (panda_link_transforms(value)[6] @ local_point)[:3]
+
+    analytic = torch.autograd.functional.jacobian(transformed_point, q)
+    epsilon = 1e-6
+    columns = []
+    for joint_index in range(7):
+        offset = torch.zeros_like(q)
+        offset[joint_index] = epsilon
+        plus = transformed_point((q + offset).detach())
+        minus = transformed_point((q - offset).detach())
+        columns.append((plus - minus) / (2.0 * epsilon))
+    numeric = torch.stack(columns, dim=1)
+
+    torch.testing.assert_close(analytic, numeric, atol=1e-6, rtol=1e-5)
+
+
 def test_panda_fk_validates_shapes() -> None:
     with pytest.raises(ValueError, match="q must have shape"):
         panda_end_effector_position(torch.zeros(6))
@@ -72,3 +127,5 @@ def test_panda_fk_validates_shapes() -> None:
         panda_end_effector_position(torch.zeros(7), torch.eye(3))
     with pytest.raises(ValueError, match="not broadcastable"):
         panda_end_effector_position(torch.zeros((2, 7)), torch.eye(4).repeat(3, 1, 1))
+    with pytest.raises(ValueError, match="gripper_open shape"):
+        panda_link_transforms(torch.zeros((2, 7)), gripper_open=torch.zeros(3))
