@@ -61,25 +61,17 @@ def test_rotated_box_torch_energy_matches_numpy_geometry() -> None:
         half_extents=[1.0, 0.25, 0.5],
         yaw=torch.pi / 2,
     )
-    points = torch.tensor(
-        [[[0.0, 0.75, 0.0], [0.75, 0.0, 0.0]]], dtype=torch.float64
-    )
+    points = torch.tensor([[[0.0, 0.75, 0.0], [0.75, 0.0, 0.0]]], dtype=torch.float64)
 
-    energy = avoidance_energy(
-        points, [AvoidRegion(region)], mode="hinge"
-    )
+    energy = avoidance_energy(points, [AvoidRegion(region)], mode="hinge")
 
     # First point is 0.25 m inside; second is outside.
     torch.testing.assert_close(energy, torch.tensor([0.25], dtype=torch.float64))
 
 
 def test_cylinder_torch_energy_matches_numpy_geometry() -> None:
-    region = CylinderRegion(
-        center=[0.0, 0.0, 0.5], radius=0.2, half_length=0.4
-    )
-    points = torch.tensor(
-        [[[0.0, 0.0, 0.5], [0.3, 0.0, 0.5]]], dtype=torch.float64
-    )
+    region = CylinderRegion(center=[0.0, 0.0, 0.5], radius=0.2, half_length=0.4)
+    points = torch.tensor([[[0.0, 0.0, 0.5], [0.3, 0.0, 0.5]]], dtype=torch.float64)
 
     energy = avoidance_energy(points, [AvoidRegion(region)], mode="hinge")
 
@@ -93,18 +85,108 @@ def test_avoidance_energy_validates_inputs_and_target() -> None:
         target="robot",
     )
 
-    with pytest.raises(ValueError, match="target='eef'"):
+    with pytest.raises(ValueError, match="does not match"):
         avoidance_energy(path, [robot_constraint])
+    with pytest.raises(ValueError, match="does not match"):
+        avoidance_energy(
+            path[:, :, None, :],
+            [AvoidRegion(SphereRegion(center=[0.0, 0.0, 0.0], radius=1.0))],
+            target="robot",
+        )
     with pytest.raises(ValueError, match="temperature"):
         avoidance_energy(path, [], temperature=0.0)
     with pytest.raises(ValueError, match="shape"):
         avoidance_energy(torch.zeros((2, 3)), [])
+    with pytest.raises(ValueError, match="shape"):
+        avoidance_energy(path, [], target="robot")
+
+
+def test_robot_energy_takes_exact_worst_point_across_horizon_and_points() -> None:
+    points = torch.tensor(
+        [
+            [
+                [[1.4, 0.0, 0.0], [0.8, 0.0, 0.0]],
+                [[0.3, 0.0, 0.0], [1.2, 0.0, 0.0]],
+            ]
+        ],
+        dtype=torch.float64,
+    )
+    constraint = AvoidRegion(
+        SphereRegion(center=[0.0, 0.0, 0.0], radius=1.0),
+        target="robot",
+        margin=0.1,
+        weight=2.0,
+    )
+
+    energy = avoidance_energy(points, [constraint], target="robot", mode="hinge")
+
+    # The unique worst point is 0.7 m inside the sphere plus the 0.1 m margin.
+    torch.testing.assert_close(energy, torch.tensor([1.6], dtype=torch.float64))
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        AvoidRegion(
+            SphereRegion(center=[0.0, 0.0, 0.0], radius=1.0),
+            target="robot",
+        ),
+        AvoidRegion(
+            BoxRegion(
+                center=[0.0, 0.0, 0.0],
+                half_extents=[1.0, 0.25, 0.5],
+                yaw=torch.pi / 4,
+            ),
+            target="robot",
+        ),
+        AvoidRegion(
+            CylinderRegion(center=[0.0, 0.0, 0.0], radius=0.5, half_length=0.5),
+            target="robot",
+        ),
+        AvoidProjection(
+            RectRegion2D(center=[0.0, 0.0], half_extents=[0.5, 0.5]),
+            target="robot",
+        ),
+    ],
+)
+def test_robot_energy_supports_every_region_shape(constraint: AvoidRegion) -> None:
+    points = torch.tensor([[[[0.1, 0.1, 0.1], [2.0, 2.0, 2.0]]]], dtype=torch.float64)
+
+    energy = avoidance_energy(points, [constraint], target="robot", mode="hinge")
+
+    assert energy.shape == (1,)
+    assert energy.item() > 0.0
+
+
+def test_robot_energy_gradient_matches_finite_difference() -> None:
+    points = torch.tensor(
+        [[[[0.25, 0.1, 0.05], [1.5, 0.0, 0.0]]]],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    constraint = AvoidRegion(
+        SphereRegion(center=[0.0, 0.0, 0.0], radius=1.0),
+        target="robot",
+    )
+
+    def energy_fn(value: torch.Tensor) -> torch.Tensor:
+        return avoidance_energy(value, [constraint], target="robot", mode="hinge").sum()
+
+    analytic = torch.autograd.grad(energy_fn(points), points)[0]
+    epsilon = 1e-6
+    numeric = torch.zeros_like(points)
+    for coordinate in range(3):
+        offset = torch.zeros_like(points)
+        offset[0, 0, 0, coordinate] = epsilon
+        numeric[0, 0, 0, coordinate] = (
+            energy_fn((points + offset).detach()) - energy_fn((points - offset).detach())
+        ) / (2.0 * epsilon)
+
+    torch.testing.assert_close(analytic, numeric, atol=1e-6, rtol=1e-5)
 
 
 def test_itps_eef_path_unnormalizes_actions_with_gradients() -> None:
-    rest_q = torch.tensor(
-        [0.0, 0.3926991, 0.0, -1.9634954, 0.0, 2.3561945, 0.7853982]
-    )
+    rest_q = torch.tensor([0.0, 0.3926991, 0.0, -1.9634954, 0.0, 2.3561945, 0.7853982])
     normalizer = LinearNormalizer(
         {
             "action": SingleFieldLinearNormalizer.create_manual(
@@ -134,18 +216,14 @@ def test_itps_cli_defaults_and_validation() -> None:
     assert args.itps_energy == "smooth"
     assert args.itps_barrier_temperature == 0.01
 
-    selected = parse_eval_args(
-        [*_base_args(), "--itps-energy", "hinge", "--itps-mcmc-steps", "2"]
-    )
+    selected = parse_eval_args([*_base_args(), "--itps-energy", "hinge", "--itps-mcmc-steps", "2"])
     assert selected.itps_energy == "hinge"
     assert selected.itps_mcmc_steps == 2
 
     with pytest.raises(ValueError, match="itps-guide-ratio"):
         parse_eval_args([*_base_args(), "--itps-guide-ratio", "-1"])
     with pytest.raises(ValueError, match="constraint-target eef"):
-        parse_eval_args(
-            [*_base_args(), "--methods", "itps", "--constraint-target", "robot"]
-        )
+        parse_eval_args([*_base_args(), "--methods", "itps", "--constraint-target", "robot"])
 
 
 def _base_args() -> list[str]:

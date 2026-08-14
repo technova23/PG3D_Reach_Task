@@ -15,35 +15,54 @@ from pg3d.constraints.geometry import (
 from pg3d.constraints.programs import AvoidProjection, AvoidRegion
 
 AvoidanceEnergyMode = Literal["smooth", "hinge"]
+AvoidanceTarget = Literal["eef", "robot"]
 AvoidanceConstraint = AvoidRegion | AvoidProjection
 
 
 def avoidance_energy(
-    eef_path: torch.Tensor,
+    points: torch.Tensor,
     constraints: Sequence[AvoidanceConstraint],
     *,
+    target: AvoidanceTarget = "eef",
     mode: AvoidanceEnergyMode = "smooth",
     temperature: float = 0.01,
 ) -> torch.Tensor:
-    """Return one differentiable EEF avoidance energy per batch item."""
-    if eef_path.ndim != 3 or eef_path.shape[-1] != 3:
-        raise ValueError(f"eef_path must have shape [B, T, 3], got {tuple(eef_path.shape)}")
+    """Return one differentiable EEF or whole-robot avoidance energy per batch item."""
+    if target == "eef":
+        expected_shape = "[B, T, 3]"
+        valid_shape = points.ndim == 3 and points.shape[-1] == 3
+    elif target == "robot":
+        expected_shape = "[B, T, N, 3]"
+        valid_shape = points.ndim == 4 and points.shape[-1] == 3 and points.shape[-2] > 0
+    else:
+        raise ValueError(f"unsupported avoidance target {target!r}")
+    if not valid_shape:
+        raise ValueError(
+            f"{target} points must have shape {expected_shape}, got {tuple(points.shape)}"
+        )
     if mode not in {"smooth", "hinge"}:
         raise ValueError(f"unsupported avoidance energy mode {mode!r}")
     if temperature <= 0.0:
         raise ValueError("temperature must be positive")
 
-    total = eef_path.sum(dim=(1, 2)) * 0.0
+    reduction_dims = tuple(range(1, points.ndim - 1))
+    total = points.sum(dim=tuple(range(1, points.ndim))) * 0.0
     for constraint in constraints:
-        if constraint.target != "eef":
-            raise ValueError("ITPS avoidance guidance supports only target='eef'")
-        signed_distance = _signed_distance(eef_path, constraint.region)
+        if constraint.target != target:
+            raise ValueError(
+                f"avoidance constraint target {constraint.target!r} does not match "
+                f"guidance target {target!r}"
+            )
+        signed_distance = _signed_distance(points, constraint.region)
         violation = float(constraint.margin) - signed_distance
         if mode == "hinge":
             point_energy = torch.clamp(violation, min=0.0)
         else:
             point_energy = float(temperature) * F.softplus(violation / float(temperature))
-        total = total + float(constraint.weight) * torch.amax(point_energy, dim=1)
+        total = total + float(constraint.weight) * torch.amax(
+            point_energy,
+            dim=reduction_dims,
+        )
     return total
 
 
