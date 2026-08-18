@@ -1,0 +1,71 @@
+[
+  {
+    "clearance_scale": 0.05,
+    "margin": 0.0,
+    "name": "u_shape_p1/u_shape_left_side",
+    "region": {
+      "center": [
+        0.016873173415660858,
+        -0.07399699836969376,
+        0.30000001192092896
+      ],
+      "half_extents": [
+        0.019999999552965164,
+        0.15000000596046448,
+        0.30000001192092896
+      ],
+      "type": "box",
+      "yaw": -3.1890476504948477
+    },
+    "target": "robot",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  },
+  {
+    "clearance_scale": 0.05,
+    "margin": 0.0,
+    "name": "u_shape_p1/u_shape_right_side",
+    "region": {
+      "center": [
+        -0.22285664081573486,
+        -0.06261207908391953,
+        0.30000001192092896
+      ],
+      "half_extents": [
+        0.019999999552965164,
+        0.15000000596046448,
+        0.30000001192092896
+      ],
+      "type": "box",
+      "yaw": -3.1890476504948477
+    },
+    "target": "robot",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  },
+  {
+    "clearance_scale": 0.05,
+    "margin": 0.0,
+    "name": "u_shape_p1/u_shape_back",
+    "region": {
+      "center": [
+        -0.10915856808423996,
+        -0.19815820455551147,
+        0.30000001192092896
+      ],
+      "half_extents": [
+        0.14000000059604645,
+        0.020000001415610313,
+        0.30000001192092896
+      ],
+      "type": "box",
+      "yaw": -3.1890476504948477
+    },
+    "target": "robot",
+    "tolerance": 1e-06,
+    "type": "avoid_region",
+    "weight": 1.0
+  }
+]

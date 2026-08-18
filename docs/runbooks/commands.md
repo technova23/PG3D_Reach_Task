@@ -963,6 +963,56 @@ The complete frozen mapping and provenance are in
 `configs/eval/e3_candidate_midpath_75cm_frozen_v1/fixture.json`. A physical placement
 or episode change requires a new version; do not edit the v1 fixture in place.
 
+## E10 U-shaped scene visualization
+
+Render the first P1 U-shaped obstacle in selected output episode 004 / dataset episode 1010. This
+is a short geometry and policy-point-cloud smoke, not a method-performance run:
+
+```bash
+./.venv/bin/python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --methods base \
+  --source dataset \
+  --episodes 1 \
+  --episode-indices-file configs/eval/e10_u_shape_smoke_episode004_v1/episode_indices.txt \
+  --constraints-dir configs/eval/e10_u_shape_smoke_episode004_v1/constraints/robot \
+  --constraint-target robot \
+  --geometry-mode exact \
+  --planning-horizon-chunks 1 \
+  --execution-horizon-chunks 1 \
+  --k-schedule 1 \
+  --seed 0 \
+  --device cuda \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.14 0.15 0.30 \
+  --avoid-clearance-scale 0.05 \
+  --embody-obstacle \
+  --obstacle-family u_shape \
+  --obstacle-point-quota 64 \
+  --obstacle-yaw-deg -182.718971039466 \
+  --obstacle-top-z 0.60 \
+  --precomputed-initial-clearance-margin 0.02 \
+  --robot-clearance-metric \
+  --terminate-on-obstacle-contact \
+  --max-steps 8 \
+  --post-success-steps 1 \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --output-dir artifacts/e10-u-shape-episode004-visualization \
+  --allow-failure
+```
+
+Inspect the result with:
+
+```bash
+rerun artifacts/e10-u-shape-episode004-visualization/rerun/base/episode_000.rrd
+```
+
+The Rerun view is the preferred inspection path because the camera can be orbited to see the open
+cavity. The MP4 uses the fixed paper camera and views the U mainly from behind.
+
 Build the fixed nominal-base-success subset from the locked pilot pool using a
 tabletop-supported carton:
 

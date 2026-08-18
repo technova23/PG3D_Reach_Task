@@ -486,6 +486,18 @@ precision/recall for predicted violations, and selected-versus-unselected candid
 calibration. This isolates whether failures arise from sampling, scoring, or model
 error.
 
+### E10 — Non-convex and delayed-consequence scenes
+
+After the convex box baseline, evaluate local-minimum, early-commitment, and whole-body posture
+scenes including a U-shaped cul-de-sac, a long wall with a distant opening, a false-passage fork,
+staggered gates, and an elbow trap. The dedicated plan defines the scene sweeps, obstacle-free ghost
+policy-input ablation, true multi-depth beam-search requirement, interpretation matrix, and
+completion gates:
+
+`docs/explainations/nonconvex_scene_experiment_plan.md`
+
+E10 is a new versioned follow-on benchmark and does not modify the frozen E3 protocol or test set.
+
 ## 6. Required logging schema
 
 Every episode row should contain, at minimum:

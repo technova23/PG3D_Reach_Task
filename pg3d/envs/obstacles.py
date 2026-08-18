@@ -43,6 +43,45 @@ CABINET_COMPONENTS: tuple[BoxObstacleComponent, ...] = (
     ),
 )
 
+U_SHAPE_REFERENCE_HALF_EXTENTS = (0.14, 0.15, 0.30)
+
+
+def u_shape_components(
+    half_extents: tuple[float, float, float] | np.ndarray,
+) -> tuple[BoxObstacleComponent, ...]:
+    """Build a tabletop-supported U from two side walls and one back wall.
+
+    The family-local opening faces ``-Y`` and the closed back lies at ``+Y``.
+    ``half_extents`` describes the complete U envelope. Wall thickness scales with
+    the envelope so difficulty sweeps can resize the family without introducing
+    separate hidden dimensions.
+    """
+    envelope = np.asarray(half_extents, dtype=np.float32)
+    if envelope.shape != (3,) or not np.all(np.isfinite(envelope)) or np.any(envelope <= 0.0):
+        raise ValueError("U-shape half-extents must contain three positive finite values")
+    half_x, half_y, half_z = (float(value) for value in envelope)
+    side_half_thickness = half_x / 7.0
+    back_half_thickness = half_y * (2.0 / 15.0)
+    side_center_x = half_x - side_half_thickness
+    back_center_y = half_y - back_half_thickness
+    return (
+        BoxObstacleComponent(
+            "left_side",
+            (side_half_thickness, half_y, half_z),
+            (-side_center_x, 0.0, 0.0),
+        ),
+        BoxObstacleComponent(
+            "right_side",
+            (side_half_thickness, half_y, half_z),
+            (side_center_x, 0.0, 0.0),
+        ),
+        BoxObstacleComponent(
+            "back",
+            (half_x, back_half_thickness, half_z),
+            (0.0, back_center_y, 0.0),
+        ),
+    )
+
 
 def scaled_cabinet_components(half_height: float) -> tuple[BoxObstacleComponent, ...]:
     """Scale the cabinet vertically while preserving its tabletop-supported shape."""
@@ -75,7 +114,7 @@ def transform_box_component(
     center: np.ndarray,
     yaw: float,
 ) -> tuple[np.ndarray, float]:
-    """Transform a cabinet component from family-local to world coordinates."""
+    """Transform an obstacle component from family-local to world coordinates."""
     center = np.asarray(center, dtype=np.float32).reshape(3)
     cos_yaw = float(np.cos(yaw))
     sin_yaw = float(np.sin(yaw))

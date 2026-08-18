@@ -1,0 +1,29 @@
+{
+  "schema_version": "pg3d.e10_u_shape_fixture.v1",
+  "fixture_id": "e10-u-shape-smoke-v1",
+  "status": "visualization_smoke",
+  "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
+  "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
+  "output_episode": 0,
+  "dataset_episode_index": 305,
+  "simulator_seed": 48572874,
+  "policy_seed": 916202559,
+  "source_fixture": "configs/eval/e3_candidate_midpath_75cm_frozen_v1",
+  "root_center": [
+    -0.19806933403015137,
+    0.09573230147361755,
+    0.30000001192092896
+  ],
+  "yaw_rad": -0.5536297122624259,
+  "yaw_deg": -31.72064592567916,
+  "envelope_half_extents_m": [
+    0.14,
+    0.15,
+    0.30
+  ],
+  "opening_direction": "toward episode start along local -Y",
+  "initial_robot_clearance_m": 0.032288968563079834,
+  "constraint_target": "robot",
+  "constraint_file": "constraints/robot/episode_000.json",
+  "definitive_benchmark": false
+}

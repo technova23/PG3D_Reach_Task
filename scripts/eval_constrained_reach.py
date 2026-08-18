@@ -54,8 +54,10 @@ from pg3d.envs.maniskill_adapter.panda_collision import (
 )
 from pg3d.envs.obstacles import (
     CABINET_COMPONENTS,
+    U_SHAPE_REFERENCE_HALF_EXTENTS,
     scaled_cabinet_components,
     transform_box_component,
+    u_shape_components,
 )
 from pg3d.envs.xarm_adapter import register_pg3d_xarm7_gripper_reach_envs
 from pg3d.eval import (
@@ -128,6 +130,7 @@ Entry = dict[str, np.ndarray | bool | float]
 _CARTON_HALF_EXTENTS = (0.055, 0.08, 0.16)
 _CYLINDER_DIMENSIONS = (0.055, 0.055, 0.12)
 _CABINET_ENVELOPE_HALF_EXTENTS = (0.08, 0.085, 0.20)
+_U_SHAPE_ENVELOPE_HALF_EXTENTS = U_SHAPE_REFERENCE_HALF_EXTENTS
 
 
 @dataclass(frozen=True)
@@ -1232,20 +1235,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--obstacle-family",
-        choices=["box", "carton", "cylinder", "cabinet"],
+        choices=["box", "carton", "cylinder", "cabinet", "u_shape"],
         default="box",
         help=(
             "Named embodied-obstacle family. Carton defaults to half-extents "
             f"{_CARTON_HALF_EXTENTS}; cylinder uses radius/half-length encoded as "
-            f"{_CYLINDER_DIMENSIONS}; cabinet uses a composite open structure. "
-            "Explicit --avoid-box-half-extents overrides box/carton only."
+            f"{_CYLINDER_DIMENSIONS}; cabinet uses a composite open structure; "
+            f"u_shape defaults to envelope half-extents {_U_SHAPE_ENVELOPE_HALF_EXTENTS}. "
+            "Explicit --avoid-box-half-extents overrides box/carton/u_shape only."
         ),
     )
     parser.add_argument(
         "--ground-embodied-obstacle",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Keep embodied box/carton/cylinder/cabinet actors supported by a plane.",
+        help="Keep embodied box/carton/cylinder/cabinet/u_shape actors supported by a plane.",
     )
     parser.add_argument(
         "--obstacle-support-plane-z",
@@ -1375,6 +1379,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.embody_obstacle and args.obstacle_family == "cabinet":
         args.avoid_shape = "box"
         args.avoid_box_half_extents = list(_CABINET_ENVELOPE_HALF_EXTENTS)
+    if args.embody_obstacle and args.obstacle_family == "u_shape":
+        args.avoid_shape = "box"
+        if args.avoid_box_half_extents is None:
+            args.avoid_box_half_extents = list(_U_SHAPE_ENVELOPE_HALF_EXTENTS)
     if args.embody_obstacle and args.obstacle_family == "carton":
         args.avoid_shape = "box"
         if args.avoid_box_half_extents is None:
@@ -3162,16 +3170,21 @@ def _finalize_constraints(
                 clearance_scale=float(args.avoid_clearance_scale),
             )
         )
-    if args.embody_obstacle and args.obstacle_family == "cabinet":
+    if args.embody_obstacle and args.obstacle_family in {"cabinet", "u_shape"}:
+        family = str(args.obstacle_family)
         if len(finalized) != 1 or not isinstance(finalized[0].region, BoxRegion):
-            raise ValueError("cabinet family requires one root BoxRegion before expansion")
+            raise ValueError(f"{family} family requires one root BoxRegion before expansion")
         root = finalized[0]
         root_region = root.region
-        components = scaled_cabinet_components(float(root_region.half_extents[2]))
+        components = (
+            scaled_cabinet_components(float(root_region.half_extents[2]))
+            if family == "cabinet"
+            else u_shape_components(root_region.half_extents)
+        )
         return [
             replace(
                 root,
-                name=f"{root.name}/cabinet_{component.name}",
+                name=f"{root.name}/{family}_{component.name}",
                 region=BoxRegion(
                     center=component_center,
                     half_extents=component.half_extents,
@@ -4395,9 +4408,34 @@ def _embodied_obstacle_reset_options(
             "pg3d_obstacle_center": cabinet_shelf.region.center.astype(float).tolist(),
             "pg3d_obstacle_yaw": float(cabinet_shelf.region.yaw),
         }
+    u_left = next(
+        (
+            constraint
+            for constraint in constraints
+            if constraint.name.endswith("/u_shape_left_side")
+            and isinstance(constraint.region, BoxRegion)
+        ),
+        None,
+    )
+    u_right = next(
+        (
+            constraint
+            for constraint in constraints
+            if constraint.name.endswith("/u_shape_right_side")
+            and isinstance(constraint.region, BoxRegion)
+        ),
+        None,
+    )
+    if u_left is not None and u_right is not None:
+        root_center = 0.5 * (u_left.region.center + u_right.region.center)
+        return {
+            "pg3d_obstacle_center": root_center.astype(float).tolist(),
+            "pg3d_obstacle_yaw": float(u_left.region.yaw),
+        }
     if len(constraints) != 1 or not isinstance(constraints[0].region, (BoxRegion, CylinderRegion)):
         raise ValueError(
-            "embodied obstacle evaluation requires exactly one box or cylinder constraint"
+            "embodied obstacle evaluation requires exactly one primitive or one supported "
+            "composite constraint set"
         )
     yaw = float(constraints[0].region.yaw) if isinstance(constraints[0].region, BoxRegion) else 0.0
     return {
@@ -4445,12 +4483,18 @@ def _validate_embodied_obstacle_geometry(
     configured = getattr(unwrapped, "pg3d_obstacle_half_extents", None)
     if configured is None:
         raise ValueError("control environment has no configured pg3d obstacle actor")
-    if getattr(unwrapped, "pg3d_obstacle_family", None) == "cabinet":
+    family = getattr(unwrapped, "pg3d_obstacle_family", None)
+    if family in {"cabinet", "u_shape"}:
         root_center = np.asarray(reset_options["pg3d_obstacle_center"], dtype=np.float32)
         root_yaw = float(reset_options["pg3d_obstacle_yaw"])
         expected_regions = []
-        configured_half_height = float(np.asarray(configured, dtype=np.float32)[2])
-        for component in scaled_cabinet_components(configured_half_height):
+        configured_dimensions = np.asarray(configured, dtype=np.float32)
+        components = (
+            scaled_cabinet_components(float(configured_dimensions[2]))
+            if family == "cabinet"
+            else u_shape_components(configured_dimensions)
+        )
+        for component in components:
             center, yaw = transform_box_component(component, center=root_center, yaw=root_yaw)
             expected_regions.append(
                 BoxRegion(
@@ -4467,7 +4511,7 @@ def _validate_embodied_obstacle_geometry(
             or not np.isclose(actual.yaw, expected.yaw, atol=1e-7, rtol=0.0)
             for actual, expected in zip(actual_regions, expected_regions, strict=False)
         ):
-            raise ValueError("cabinet actor components and serialized constraints differ")
+            raise ValueError(f"{family} actor components and serialized constraints differ")
         return
     region = constraints[0].region
     expected = (

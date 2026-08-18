@@ -18,6 +18,7 @@ from pg3d.envs.obstacles import (
     CABINET_COMPONENTS,
     scaled_cabinet_components,
     transform_box_component,
+    u_shape_components,
 )
 
 
@@ -93,6 +94,7 @@ class PG3DReachEnv(BaseEnv):
         self.pg3d_obstacle = None
         self.pg3d_obstacle_actors: list[Any] = []
         self.pg3d_cabinet_components = CABINET_COMPONENTS
+        self.pg3d_obstacle_components: tuple[Any, ...] = ()
         if self.pg3d_obstacle_half_extents is not None:
             half_extents = np.asarray(self.pg3d_obstacle_half_extents, dtype=np.float32)
             if half_extents.shape != (3,) or np.any(half_extents <= 0):
@@ -106,13 +108,31 @@ class PG3DReachEnv(BaseEnv):
             }
             if self.pg3d_obstacle_family == "cabinet":
                 self.pg3d_cabinet_components = scaled_cabinet_components(float(half_extents[2]))
-                for component in self.pg3d_cabinet_components:
+                self.pg3d_obstacle_components = self.pg3d_cabinet_components
+                for component in self.pg3d_obstacle_components:
                     actor = actors.build_box(
                         half_sizes=list(component.half_extents),
                         color=(
                             [0.35, 0.22, 0.12, 1.0]
                             if component.name != "open_door"
                             else [0.48, 0.30, 0.15, 1.0]
+                        ),
+                        **{
+                            **common,
+                            "name": f"pg3d_obstacle_{component.name}",
+                        },
+                    )
+                    self.pg3d_obstacle_actors.append(actor)
+                self.pg3d_obstacle = self.pg3d_obstacle_actors[0]
+            elif self.pg3d_obstacle_family == "u_shape":
+                self.pg3d_obstacle_components = u_shape_components(half_extents)
+                for component in self.pg3d_obstacle_components:
+                    actor = actors.build_box(
+                        half_sizes=list(component.half_extents),
+                        color=(
+                            [0.20, 0.42, 0.72, 1.0]
+                            if component.name != "back"
+                            else [0.14, 0.32, 0.62, 1.0]
                         ),
                         **{
                             **common,
@@ -196,12 +216,12 @@ class PG3DReachEnv(BaseEnv):
                         .reshape(1, 3)
                         .expand(batch_size, -1)
                     )
-                if self.pg3d_obstacle_family == "cabinet":
+                if self.pg3d_obstacle_family in {"cabinet", "u_shape"}:
                     root_center = obstacle_xyz[0].detach().cpu().numpy()
                     root_yaw = float(options.get("pg3d_obstacle_yaw", 0.0))
                     for actor, component in zip(
                         self.pg3d_obstacle_actors,
-                        self.pg3d_cabinet_components,
+                        self.pg3d_obstacle_components,
                         strict=True,
                     ):
                         component_center, component_yaw = transform_box_component(

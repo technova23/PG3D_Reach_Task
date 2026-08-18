@@ -16,6 +16,7 @@ def test_collision_validation_geometry_has_inside_and_outside_probe_cases() -> N
         "carton": (0.055, 0.08, 0.16),
         "cylinder": (0.055, 0.055, 0.12),
         "cabinet": (0.08, 0.085, 0.20),
+        "u_shape": (0.14, 0.15, 0.30),
     }
 
     for family, dimensions in dimensions_by_family.items():
@@ -45,4 +46,4 @@ def test_collision_validation_geometry_has_inside_and_outside_probe_cases() -> N
 def test_collision_validation_cli_defaults_cover_every_family() -> None:
     args = parse_args([])
 
-    assert args.families == ["box", "cabinet", "carton", "cylinder"]
+    assert args.families == ["box", "cabinet", "carton", "cylinder", "u_shape"]

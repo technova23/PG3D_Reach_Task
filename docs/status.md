@@ -202,6 +202,23 @@ The E3 data split is now frozen before constrained outcomes are examined. The fi
 and the following 50 are the definitive test pool. The exact dataset indices and
 simulator seeds are tracked in `configs/eval/e3_episode_split.json`; validation
 confirmed the three partitions are disjoint and match the current dataset metadata.
+A follow-on non-convex-scene benchmark plan now lives at
+`docs/explainations/nonconvex_scene_experiment_plan.md`. It starts from the completed
+obstacle-visible and base/ITPS comparisons and the currently running whole-body ITPS box
+evaluation, then prioritizes U-shaped cul-de-sacs, distant-opening walls, false-passage forks,
+staggered gates, and whole-body elbow/shelf traps. It also separates the proposed obstacle-free
+ghost policy-input ablation from multi-chunk continuation and true beam branching, so any gain can
+be attributed to the correct mechanism. This follow-on plan does not alter the frozen E3 protocol.
+The first E10 P1 scene is now implemented as the `u_shape` embodied-obstacle family: two side-wall
+boxes and one back-wall box share the same transformed actor and serialized constraint geometry.
+The preferred visualization fixture `configs/eval/e10_u_shape_smoke_episode004_v1` uses selected
+output episode 004 / dataset episode 1010, orients the opening toward the start and the closed back
+across the nominal route, and preserves 7.91 cm initial whole-robot clearance. Its live collision
+probe passed both cases, and the rendered smoke retained 171 U-obstacle points in the final policy
+tensor. The resulting MP4, native Rerun timeline, exact-input bundle, and top-down geometry preview
+live under `artifacts/e10-u-shape-episode004-visualization`. The earlier episode-000 smoke is retained
+as provenance but is no longer the preferred view because the same U dominates its smaller scene.
+This remains a visualization smoke, not a method comparison or frozen E10 difficulty setting.
 
 ## Current phase
 

@@ -2149,6 +2149,50 @@ def test_cabinet_family_expands_root_into_component_constraints(tmp_path: Path) 
     assert _constraint_top_z(constraints) == pytest.approx(0.4)
 
 
+def test_u_shape_family_expands_root_into_three_component_constraints(tmp_path: Path) -> None:
+    args = parse_eval_args(
+        [
+            "--dataset",
+            str(tmp_path / "dataset.zarr"),
+            "--checkpoint",
+            str(tmp_path / "checkpoint.pt"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--embody-obstacle",
+            "--obstacle-family",
+            "u_shape",
+            "--obstacle-yaw-deg",
+            "-30",
+        ]
+    )
+    root = AvoidRegion(
+        region=BoxRegion(center=[0.1, -0.2, 0.4], half_extents=[0.14, 0.15, 0.30]),
+        name="root",
+    )
+
+    constraints = _finalize_constraints([root], robot_points=None, args=args)
+    reset = _embodied_obstacle_reset_options(constraints)
+
+    assert args.avoid_box_half_extents == pytest.approx([0.14, 0.15, 0.30])
+    assert {constraint.name for constraint in constraints} == {
+        "root/u_shape_left_side",
+        "root/u_shape_right_side",
+        "root/u_shape_back",
+    }
+    assert reset["pg3d_obstacle_center"] == pytest.approx([0.1, -0.2, 0.3])
+    assert reset["pg3d_obstacle_yaw"] == pytest.approx(np.deg2rad(-30))
+    assert _constraint_bottom_z(constraints) == pytest.approx(0.0, abs=1e-7)
+    assert _constraint_top_z(constraints) == pytest.approx(0.6)
+
+    env = SimpleNamespace(
+        unwrapped=SimpleNamespace(
+            pg3d_obstacle_half_extents=(0.14, 0.15, 0.30),
+            pg3d_obstacle_family="u_shape",
+        )
+    )
+    _validate_embodied_obstacle_geometry(env, constraints)
+
+
 def test_grounded_embodied_region_keeps_bottom_on_support_plane() -> None:
     box = BoxRegion(center=[0.1, -0.2, 0.45], half_extents=[0.04, 0.06, 0.23])
     grounded = _ground_embodied_region(box, support_plane_z=0.0)

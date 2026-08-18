@@ -9,7 +9,11 @@ import numpy as np
 
 from pg3d.constraints import BoxRegion, CylinderRegion
 from pg3d.envs.maniskill_adapter import register_pg3d_reach_envs
-from pg3d.envs.obstacles import CABINET_COMPONENTS, transform_box_component
+from pg3d.envs.obstacles import (
+    CABINET_COMPONENTS,
+    transform_box_component,
+    u_shape_components,
+)
 from pg3d.utils.arrays import to_numpy
 
 _FAMILY_DIMENSIONS = {
@@ -17,6 +21,7 @@ _FAMILY_DIMENSIONS = {
     "carton": (0.055, 0.08, 0.16),
     "cylinder": (0.055, 0.055, 0.12),
     "cabinet": (0.08, 0.085, 0.20),
+    "u_shape": (0.14, 0.15, 0.30),
 }
 
 
@@ -153,14 +158,19 @@ def _family_regions(
                 half_length=dimensions[2],
             )
         ]
-    if family == "cabinet":
+    if family in {"cabinet", "u_shape"}:
+        components = (
+            CABINET_COMPONENTS
+            if family == "cabinet"
+            else u_shape_components(dimensions)
+        )
         return [
             BoxRegion(
                 center=component_center,
                 half_extents=component.half_extents,
                 yaw=component_yaw,
             )
-            for component in CABINET_COMPONENTS
+            for component in components
             for component_center, component_yaw in [
                 transform_box_component(component, center=center, yaw=0.0)
             ]
@@ -176,13 +186,22 @@ def _intersecting_probe_center(
     probe_radius: float,
 ) -> np.ndarray:
     """Place the probe across an exterior collision surface, not fully contained."""
-    if family == "cabinet":
-        shelf = next(
-            component for component in CABINET_COMPONENTS if component.name == "shelf"
+    if family in {"cabinet", "u_shape"}:
+        components = (
+            CABINET_COMPONENTS
+            if family == "cabinet"
+            else u_shape_components(dimensions)
         )
-        shelf_center, _ = transform_box_component(shelf, center=center, yaw=0.0)
-        return shelf_center + np.asarray(
-            [shelf.half_extents[0] + 0.5 * probe_radius, 0.0, 0.0],
+        probe_component = next(
+            component
+            for component in components
+            if component.name == ("shelf" if family == "cabinet" else "back")
+        )
+        component_center, _ = transform_box_component(
+            probe_component, center=center, yaw=0.0
+        )
+        return component_center + np.asarray(
+            [probe_component.half_extents[0] + 0.5 * probe_radius, 0.0, 0.0],
             dtype=np.float32,
         )
     radial_extent = dimensions[0]
