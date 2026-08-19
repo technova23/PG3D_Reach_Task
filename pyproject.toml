@@ -41,6 +41,7 @@ cpu = [
 # Primary workstation target:
 # RTX 5090 / CUDA 12.9 / Python 3.11.
 cu129 = [
+  "torch==2.11.0",
   "torchvision==0.26.0",
   "torchaudio==2.11.0",
 ]
