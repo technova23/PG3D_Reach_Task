@@ -21,7 +21,7 @@ def main() -> int:
 
     env: Any | None = None
     try:
-        env = gym.make("PickCube-v1", obs_mode="state", num_envs=1)
+        env = gym.make("PickCube-v1", obs_mode="state", num_envs=6)
         obs, info = env.reset(seed=0)
         print("env: PickCube-v1")
         print(f"observation_space: {env.observation_space}")
