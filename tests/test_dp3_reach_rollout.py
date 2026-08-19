@@ -308,6 +308,17 @@ def test_rerun35_export_retains_exact_policy_tensor_bundle(
                 ],
             }
         ],
+        inspection={
+            "nominal_tcp_path": np.zeros((2, 3), dtype=np.float32),
+            "witness_tcp_path": np.ones((2, 3), dtype=np.float32),
+            "witness_robot_points": np.ones((2, 10, 3), dtype=np.float32),
+            "witness_robot_link_indices": np.arange(10, dtype=np.int64),
+            "witness_clearance": np.asarray([0.04, 0.03], dtype=np.float32),
+            "start_position": [0.0, 0.0, 0.0],
+            "goal_position": [1.0, 1.0, 1.0],
+            "witness_side": "left",
+            "summary": {"minimum_clearance_m": 0.03},
+        },
     )
 
     with np.load(output.with_suffix(".policy_input.npz"), allow_pickle=False) as bundle:
@@ -323,6 +334,8 @@ def test_rerun35_export_retains_exact_policy_tensor_bundle(
         assert bundle["point_cloud"].shape == (1, 4, 3)
         assert bundle["itps_robot_points"].shape == (1, 2, 10, 3)
         np.testing.assert_array_equal(bundle["itps_robot_link_indices"], np.arange(10))
+        assert bundle["inspection_witness_robot_points"].shape == (2, 10, 3)
+        np.testing.assert_allclose(bundle["inspection_witness_clearance"], [0.04, 0.03])
     assert output.read_bytes() == b"rrd35"
     metadata = json.loads(output.with_suffix(".policy_input.json").read_text(encoding="utf-8"))
     assert metadata["rerun_writer_version"] == "0.35.0"
@@ -331,8 +344,49 @@ def test_rerun35_export_retains_exact_policy_tensor_bundle(
         "method": "reranking",
         "simulator_seed": 123,
     }
+    assert metadata["inspection"]["witness_side"] == "left"
+    assert metadata["inspection"]["summary"] == {"minimum_clearance_m": 0.03}
     assert "itps_robot_points" not in metadata["replans"][0]
     assert metadata["replans"][0]["itps_robot_points_bundle_index"] == 0
+
+
+def test_rerun_inspection_supports_geometry_only_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "episode_000.rrd"
+    fake_python = tmp_path / "python"
+    fake_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.rollout_dp3_reach_policy._rerun35_exporter_python",
+        lambda: fake_python,
+    )
+
+    def fake_run(command: list[str], *, check: bool) -> None:
+        assert check is True
+        Path(command[command.index("--output") + 1]).write_bytes(b"rrd35")
+
+    monkeypatch.setattr("scripts.rollout_dp3_reach_policy.subprocess.run", fake_run)
+    obstacle = np.asarray([[0.0, 0.0, 0.0], [0.1, 0.0, 0.1]], dtype=np.float32)
+
+    save_rerun_timeline(
+        output,
+        [_entry(1.0)],
+        inspection={
+            "nominal_tcp_path": np.zeros((2, 3), dtype=np.float32),
+            "obstacle_surface_points": obstacle,
+            "start_position": [0.0, 0.0, 0.0],
+            "goal_position": [1.0, 1.0, 1.0],
+            "summary": {"planner_status": "not_run"},
+        },
+    )
+
+    with np.load(output.with_suffix(".policy_input.npz"), allow_pickle=False) as bundle:
+        np.testing.assert_array_equal(bundle["inspection_obstacle_surface_points"], obstacle)
+        assert "inspection_witness_tcp_path" not in bundle.files
+    metadata = json.loads(output.with_suffix(".policy_input.json").read_text(encoding="utf-8"))
+    assert metadata["inspection"]["has_witness"] is False
+    assert metadata["inspection"]["has_obstacle_surface"] is True
 
 
 def test_rollout_script_import_keeps_simulator_lazy() -> None:

@@ -694,6 +694,7 @@ def save_rerun_timeline(
     goal_marker_points: int = 0,
     goal_marker_radius: float = DEFAULT_GOAL_MARKER_RADIUS,
     recording_identity: dict[str, Any] | None = None,
+    inspection: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     bundle_path = path.with_suffix(".policy_input.npz")
@@ -737,6 +738,9 @@ def save_rerun_timeline(
     if itps_robot_points is not None and itps_link_indices is not None:
         bundle_arrays["itps_robot_points"] = itps_robot_points
         bundle_arrays["itps_robot_link_indices"] = itps_link_indices
+    inspection_metadata: dict[str, Any] | None = None
+    if inspection is not None:
+        inspection_metadata = _pack_rerun_inspection(bundle_arrays, inspection)
     np.savez_compressed(bundle_path, **bundle_arrays)
     constraint_visuals: list[dict[str, Any]] = []
     if constraints:
@@ -758,6 +762,7 @@ def save_rerun_timeline(
                 "recording_identity": _jsonable(recording_identity or {}),
                 "constraint_visuals": constraint_visuals,
                 "replans": _jsonable(replan_metadata),
+                "inspection": _jsonable(inspection_metadata),
             },
             sort_keys=True,
         ),
@@ -778,6 +783,73 @@ def save_rerun_timeline(
         ],
         check=True,
     )
+
+
+def _pack_rerun_inspection(
+    bundle_arrays: dict[str, np.ndarray],
+    inspection: dict[str, Any],
+) -> dict[str, Any]:
+    """Pack optional placement-review paths and robot clouds into the neutral bundle."""
+    required = ("nominal_tcp_path",)
+    missing = [key for key in required if key not in inspection]
+    if missing:
+        raise ValueError(f"inspection is missing required fields: {missing}")
+    nominal = np.asarray(inspection["nominal_tcp_path"], dtype=np.float32)
+    if nominal.ndim != 2 or nominal.shape[1] != 3 or not len(nominal):
+        raise ValueError("inspection nominal_tcp_path must have shape [T, 3]")
+    if not np.isfinite(nominal).all():
+        raise ValueError("inspection nominal path must contain finite values")
+    bundle_arrays["inspection_nominal_tcp_path"] = nominal
+    witness_fields = (
+        "witness_tcp_path",
+        "witness_robot_points",
+        "witness_clearance",
+    )
+    present_witness_fields = [field in inspection for field in witness_fields]
+    if any(present_witness_fields) and not all(present_witness_fields):
+        raise ValueError("inspection witness path, robot points, and clearance are all-or-none")
+    witness = None
+    if all(present_witness_fields):
+        witness = np.asarray(inspection["witness_tcp_path"], dtype=np.float32)
+        robot = np.asarray(inspection["witness_robot_points"], dtype=np.float32)
+        clearance = np.asarray(inspection["witness_clearance"], dtype=np.float32).reshape(-1)
+        if witness.ndim != 2 or witness.shape[1] != 3 or not len(witness):
+            raise ValueError("inspection witness_tcp_path must have shape [T, 3]")
+        if robot.ndim != 3 or robot.shape[0] != witness.shape[0] or robot.shape[2] != 3:
+            raise ValueError("inspection witness_robot_points must have shape [T, N, 3]")
+        if clearance.shape != (witness.shape[0],):
+            raise ValueError("inspection witness_clearance must match witness_tcp_path length")
+        if any(not np.isfinite(array).all() for array in (witness, robot, clearance)):
+            raise ValueError("inspection witness arrays must contain finite values")
+        bundle_arrays["inspection_witness_tcp_path"] = witness
+        bundle_arrays["inspection_witness_robot_points"] = robot
+        bundle_arrays["inspection_witness_clearance"] = clearance
+        link_indices = inspection.get("witness_robot_link_indices")
+        if link_indices is not None:
+            indices = np.asarray(link_indices, dtype=np.int64).reshape(-1)
+            if indices.shape != (robot.shape[1],):
+                raise ValueError("inspection witness_robot_link_indices must match robot points")
+            bundle_arrays["inspection_witness_robot_link_indices"] = indices
+    obstacle_points = inspection.get("obstacle_surface_points")
+    if obstacle_points is not None:
+        obstacle = np.asarray(obstacle_points, dtype=np.float32)
+        if obstacle.ndim != 2 or obstacle.shape[1] != 3 or not len(obstacle):
+            raise ValueError("inspection obstacle_surface_points must have shape [N, 3]")
+        if not np.isfinite(obstacle).all():
+            raise ValueError("inspection obstacle surface must contain finite values")
+        bundle_arrays["inspection_obstacle_surface_points"] = obstacle
+    start = np.asarray(inspection.get("start_position", nominal[0]), dtype=np.float32).reshape(3)
+    goal = np.asarray(inspection.get("goal_position", nominal[-1]), dtype=np.float32).reshape(3)
+    if not np.isfinite(start).all() or not np.isfinite(goal).all():
+        raise ValueError("inspection start and goal positions must be finite")
+    return {
+        "summary": _jsonable(inspection.get("summary", {})),
+        "start_position": start.astype(float).tolist(),
+        "goal_position": goal.astype(float).tolist(),
+        "witness_side": inspection.get("witness_side"),
+        "has_witness": witness is not None,
+        "has_obstacle_surface": obstacle_points is not None,
+    }
 
 
 def _pack_itps_replan_geometry(

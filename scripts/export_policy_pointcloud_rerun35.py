@@ -54,6 +54,36 @@ def export(bundle_path: Path, metadata_path: Path, output_path: Path) -> None:
             if "itps_robot_link_indices" in bundle.files
             else None
         )
+        inspection_nominal = (
+            bundle["inspection_nominal_tcp_path"].copy()
+            if "inspection_nominal_tcp_path" in bundle.files
+            else None
+        )
+        inspection_witness = (
+            bundle["inspection_witness_tcp_path"].copy()
+            if "inspection_witness_tcp_path" in bundle.files
+            else None
+        )
+        inspection_robot = (
+            bundle["inspection_witness_robot_points"].copy()
+            if "inspection_witness_robot_points" in bundle.files
+            else None
+        )
+        inspection_clearance = (
+            bundle["inspection_witness_clearance"].copy()
+            if "inspection_witness_clearance" in bundle.files
+            else None
+        )
+        inspection_link_indices = (
+            bundle["inspection_witness_robot_link_indices"].copy()
+            if "inspection_witness_robot_link_indices" in bundle.files
+            else None
+        )
+        inspection_obstacle_surface = (
+            bundle["inspection_obstacle_surface_points"].copy()
+            if "inspection_obstacle_surface_points" in bundle.files
+            else None
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with rr.RecordingStream("pg3d_dp3_reach_policy_rollout") as recording:
@@ -83,6 +113,46 @@ def export(bundle_path: Path, metadata_path: Path, output_path: Path) -> None:
                 rr.LineStrips3D(visual["line_strips"], colors=visual["color"]),
                 static=True,
             )
+        inspection = metadata.get("inspection")
+        if inspection is not None:
+            recording.log(
+                "inspection/summary",
+                rr.TextDocument(json.dumps(inspection.get("summary", {}), sort_keys=True)),
+                static=True,
+            )
+            recording.log(
+                "inspection/start",
+                rr.Points3D([inspection["start_position"]], colors=[255, 0, 0], radii=0.012),
+                static=True,
+            )
+            recording.log(
+                "inspection/goal",
+                rr.Points3D([inspection["goal_position"]], colors=[0, 255, 0], radii=0.012),
+                static=True,
+            )
+            if inspection_nominal is None:
+                raise RuntimeError("inspection metadata has no bundled nominal TCP path")
+            recording.log(
+                "inspection/nominal_tcp_path",
+                rr.LineStrips3D([inspection_nominal], colors=[128, 128, 128], radii=0.003),
+                static=True,
+            )
+            if inspection_witness is not None:
+                recording.log(
+                    "inspection/witness_tcp_path",
+                    rr.LineStrips3D([inspection_witness], colors=[0, 220, 255], radii=0.005),
+                    static=True,
+                )
+            if inspection_obstacle_surface is not None:
+                recording.log(
+                    "inspection/proposed_u_surface",
+                    rr.Points3D(
+                        inspection_obstacle_surface,
+                        colors=[180, 90, 20],
+                        radii=0.003,
+                    ),
+                    static=True,
+                )
         executed: list[np.ndarray] = []
         for step in range(points.shape[0]):
             recording.set_time("step", sequence=step)
@@ -160,6 +230,47 @@ def export(bundle_path: Path, metadata_path: Path, output_path: Path) -> None:
                         f"{int(worst['constraint_index']):03d}",
                         rr.Points3D([worst["position"]], colors=[255, 0, 0], radii=0.008),
                     )
+        if inspection is not None and inspection.get("has_witness", False):
+            if (
+                inspection_robot is None
+                or inspection_clearance is None
+                or inspection_witness is None
+            ):
+                raise RuntimeError("inspection metadata has no bundled witness geometry")
+            link_palette = np.asarray(
+                [
+                    [31, 119, 180],
+                    [255, 127, 14],
+                    [44, 160, 44],
+                    [214, 39, 40],
+                    [148, 103, 189],
+                    [140, 86, 75],
+                    [227, 119, 194],
+                    [127, 127, 127],
+                    [188, 189, 34],
+                    [23, 190, 207],
+                ],
+                dtype=np.uint8,
+            )
+            robot_colors = (
+                [0, 128, 255]
+                if inspection_link_indices is None
+                else link_palette[inspection_link_indices]
+            )
+            for witness_step, cloud in enumerate(inspection_robot):
+                recording.set_time("witness_step", sequence=witness_step)
+                recording.log(
+                    "inspection/witness_robot",
+                    rr.Points3D(cloud, colors=robot_colors, radii=0.003),
+                )
+                recording.log(
+                    "inspection/witness_tcp",
+                    rr.Points3D([inspection_witness[witness_step]], colors=[0, 220, 255]),
+                )
+                recording.log(
+                    "inspection/witness_clearance_m",
+                    rr.Scalars(float(inspection_clearance[witness_step])),
+                )
 
 
 def _validate(path: Path) -> int:

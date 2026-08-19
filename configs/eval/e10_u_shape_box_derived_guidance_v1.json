@@ -1,0 +1,26 @@
+{
+  "schema_version": "pg3d.e10_u_shape_box_guidance.v1",
+  "fixture_id": "e10-u-shape-box-derived-review-v1",
+  "object_geometry_status": "finalized",
+  "finalized_on": "2026-08-19",
+  "change_policy": "Do not edit v1 in place; create a new versioned fixture for geometry changes.",
+  "source_fixture": "configs/eval/e3_candidate_midpath_75cm_frozen_v1/fixture.json",
+  "shared_rules": {
+    "center_rule": "preserve source-box center plus center_delta_xy_m",
+    "envelope_rule": "preserve source-box outer width/depth unless full_size_xy_m is edited",
+    "height_m": 0.75,
+    "orientation_rule": "local -Y opening faces the recorded start plus yaw_delta_deg"
+  },
+  "episodes": [
+    {"output_index": 0, "center_delta_xy_m": [0.0, 0.0], "full_size_xy_m": [0.22, 0.16], "yaw_delta_deg": 0.0},
+    {"output_index": 1, "center_delta_xy_m": [0.0, 0.0], "full_size_xy_m": [0.22, 0.32], "yaw_delta_deg": 0.0},
+    {"output_index": 2, "center_delta_xy_m": [0.0, 0.0], "full_size_xy_m": [0.22, 0.32], "yaw_delta_deg": 0.0},
+    {"output_index": 3, "center_delta_xy_m": [0.029977366, -0.001165129], "full_size_xy_m": [0.22, 0.16], "yaw_delta_deg": 0.0},
+    {"output_index": 4, "center_delta_xy_m": [0.0, 0.0], "full_size_xy_m": [0.22, 0.32], "yaw_delta_deg": 0.0},
+    {"output_index": 5, "center_delta_xy_m": [0.0, 0.0], "full_size_xy_m": [0.22, 0.16], "yaw_delta_deg": 0.0},
+    {"output_index": 6, "center_delta_xy_m": [0.0, 0.0], "full_size_xy_m": [0.22, 0.16], "yaw_delta_deg": 0.0},
+    {"output_index": 7, "center_delta_xy_m": [0.0, 0.0], "full_size_xy_m": [0.055, 0.16], "yaw_delta_deg": 0.0},
+    {"output_index": 8, "center_delta_xy_m": [0.0, 0.0], "full_size_xy_m": [0.22, 0.16], "yaw_delta_deg": 0.0},
+    {"output_index": 9, "center_delta_xy_m": [0.0, 0.0], "full_size_xy_m": [0.22, 0.16], "yaw_delta_deg": 0.0}
+  ]
+}

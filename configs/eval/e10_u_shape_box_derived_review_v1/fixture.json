@@ -1,0 +1,1272 @@
+{
+  "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
+  "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
+  "episode_count": 10,
+  "episodes": [
+    {
+      "back_distance_m": 0.36584398727254847,
+      "back_first_chunk_ratio": 9.842741199144065,
+      "components": [
+        {
+          "center": [
+            -0.2694087028503418,
+            0.15738040208816528,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": -0.7126530464203196
+        },
+        {
+          "center": [
+            -0.12672995030879974,
+            0.03408420830965042,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": -0.7126530464203196
+        },
+        {
+          "center": [
+            -0.15273618698120117,
+            0.14819197356700897,
+            0.375
+          ],
+          "half_extents": [
+            0.10999999940395355,
+            0.010666666428248088,
+            0.375
+          ],
+          "name": "back",
+          "yaw": -0.7126530464203196
+        }
+      ],
+      "dataset_episode_index": 305,
+      "direct_path_back_clearance_m": -0.010628120973706245,
+      "eef_constraint_file": "constraints/eef/episode_000.json",
+      "envelope_half_extents_m": [
+        0.10999999940395355,
+        0.07999999821186066,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.03716891258955002,
+      "full_size_m": [
+        0.2199999988079071,
+        0.1599999964237213,
+        0.75
+      ],
+      "goal_position": [
+        -0.13536468148231506,
+        0.28326845169067383,
+        0.2796685993671417
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.0,
+          0.0
+        ],
+        "full_size_xy_m": [
+          0.22,
+          0.16
+        ],
+        "output_index": 0,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": 1.4852826127680726e-17,
+      "mouth_distance_m": 0.20584399084882715,
+      "mouth_first_chunk_ratio": 5.538068684492531,
+      "mouth_width_m": 0.1571428562913622,
+      "nominal_path_back_clearance_m": 0.06433380395174026,
+      "output_index": 0,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 916202559,
+      "rerun_file": "rerun/episode_000.rrd",
+      "robot_constraint_file": "constraints/robot/episode_000.json",
+      "root_center": [
+        -0.19806933403015137,
+        0.09573230147361755,
+        0.375
+      ],
+      "simulator_seed": 48572874,
+      "source_box": {
+        "center": [
+          -0.19806933403015137,
+          0.09573230147361755,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        -0.38496655225753784,
+        -0.12054579704999924,
+        0.35867977142333984
+      ],
+      "topdown_file": "topdown/episode_000.png",
+      "usable_cavity_depth_m": 0.13866666356722515,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": -40.83201181702505,
+      "yaw_rad": -0.7126530464203196
+    },
+    {
+      "back_distance_m": 0.5404833387045803,
+      "back_first_chunk_ratio": 157.20118244780494,
+      "components": [
+        {
+          "center": [
+            0.007943406701087952,
+            -0.05537015199661255,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.1599999964237213,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": 2.6701927142404847
+        },
+        {
+          "center": [
+            -0.16006116569042206,
+            0.0302665363997221,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.1599999964237213,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": 2.6701927142404847
+        },
+        {
+          "center": [
+            -0.13903212547302246,
+            -0.1360945701599121,
+            0.375
+          ],
+          "half_extents": [
+            0.10999999940395355,
+            0.021333332856496176,
+            0.375
+          ],
+          "name": "back",
+          "yaw": 2.6701927142404847
+        }
+      ],
+      "dataset_episode_index": 317,
+      "direct_path_back_clearance_m": -0.021321116015315056,
+      "eef_constraint_file": "constraints/eef/episode_001.json",
+      "envelope_half_extents_m": [
+        0.10999999940395355,
+        0.1599999964237213,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.0034381633158773184,
+      "full_size_m": [
+        0.2199999988079071,
+        0.3199999928474426,
+        0.75
+      ],
+      "goal_position": [
+        -0.23197799921035767,
+        -0.3548082411289215,
+        0.5341688990592957
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.0,
+          0.0
+        ],
+        "full_size_xy_m": [
+          0.22,
+          0.32
+        ],
+        "output_index": 1,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": -1.2336401659660217e-16,
+      "mouth_distance_m": 0.2204833458571377,
+      "mouth_first_chunk_ratio": 64.12823522342678,
+      "mouth_width_m": 0.1571428562913622,
+      "nominal_path_back_clearance_m": -0.016878172755241394,
+      "output_index": 1,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 4274160928,
+      "rerun_file": "rerun/episode_001.rrd",
+      "robot_constraint_file": "constraints/robot/episode_001.json",
+      "root_center": [
+        -0.07605887949466705,
+        -0.0125518087297678,
+        0.375
+      ],
+      "simulator_seed": 48572879,
+      "source_box": {
+        "center": [
+          -0.07605887949466705,
+          -0.0125518087297678,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        0.09673153609037399,
+        0.3264335095882416,
+        0.30780065059661865
+      ],
+      "topdown_file": "topdown/episode_001.png",
+      "usable_cavity_depth_m": 0.2773333271344503,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": 152.99077301256165,
+      "yaw_rad": 2.6701927142404847
+    },
+    {
+      "back_distance_m": 0.5417673267981353,
+      "back_first_chunk_ratio": 16.822119275925868,
+      "components": [
+        {
+          "center": [
+            -0.2831571102142334,
+            -0.051859889179468155,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.1599999964237213,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": -0.05599301551305702
+        },
+        {
+          "center": [
+            -0.09488121420145035,
+            -0.0624130554497242,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.1599999964237213,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": -0.05599301551305702
+        },
+        {
+          "center": [
+            -0.18125885725021362,
+            0.0813128650188446,
+            0.375
+          ],
+          "half_extents": [
+            0.10999999940395355,
+            0.021333332856496176,
+            0.375
+          ],
+          "name": "back",
+          "yaw": -0.05599301551305702
+        }
+      ],
+      "dataset_episode_index": 974,
+      "direct_path_back_clearance_m": -0.021293828263878822,
+      "eef_constraint_file": "constraints/eef/episode_002.json",
+      "envelope_half_extents_m": [
+        0.10999999940395355,
+        0.1599999964237213,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.03220565244555473,
+      "full_size_m": [
+        0.2199999988079071,
+        0.3199999928474426,
+        0.75
+      ],
+      "goal_position": [
+        -0.16046756505966187,
+        0.32299166917800903,
+        0.3195701241493225
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.0,
+          0.0
+        ],
+        "full_size_xy_m": [
+          0.22,
+          0.32
+        ],
+        "output_index": 2,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": -8.847584500395236e-18,
+      "mouth_distance_m": 0.22176733395069265,
+      "mouth_first_chunk_ratio": 6.885975507734284,
+      "mouth_width_m": 0.1571428562913622,
+      "nominal_path_back_clearance_m": -0.01969381421804428,
+      "output_index": 2,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 62126402,
+      "rerun_file": "rerun/episode_002.rrd",
+      "robot_constraint_file": "constraints/robot/episode_002.json",
+      "root_center": [
+        -0.18901915848255157,
+        -0.057136472314596176,
+        0.375
+      ],
+      "simulator_seed": 48573006,
+      "source_box": {
+        "center": [
+          -0.18901915848255157,
+          -0.057136472314596176,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        -0.2103842943906784,
+        -0.43830549716949463,
+        0.4043293595314026
+      ],
+      "topdown_file": "topdown/episode_002.png",
+      "usable_cavity_depth_m": 0.2773333271344503,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": -3.2081634711087132,
+      "yaw_rad": -0.05599301551305702
+    },
+    {
+      "back_distance_m": 0.26697267112895484,
+      "back_first_chunk_ratio": 7.210497294291505,
+      "components": [
+        {
+          "center": [
+            -0.1293502002954483,
+            0.07434170693159103,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": -1.6096437403548125
+        },
+        {
+          "center": [
+            -0.13667388260364532,
+            -0.11408744007349014,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": -1.6096437403548125
+        },
+        {
+          "center": [
+            -0.06373102217912674,
+            -0.022565610706806183,
+            0.375
+          ],
+          "half_extents": [
+            0.10999999940395355,
+            0.010666666428248088,
+            0.375
+          ],
+          "name": "back",
+          "yaw": -1.6096437403548125
+        }
+      ],
+      "dataset_episode_index": 986,
+      "direct_path_back_clearance_m": -0.010606162250041962,
+      "eef_constraint_file": "constraints/eef/episode_003.json",
+      "envelope_half_extents_m": [
+        0.10999999940395355,
+        0.07999999821186066,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.03702555596828461,
+      "full_size_m": [
+        0.2199999988079071,
+        0.1599999964237213,
+        0.75
+      ],
+      "goal_position": [
+        0.0770876407623291,
+        -0.09131118655204773,
+        0.3737885653972626
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.029977366,
+          -0.001165129
+        ],
+        "full_size_xy_m": [
+          0.22,
+          0.16
+        ],
+        "output_index": 3,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": 1.542426979179257e-17,
+      "mouth_distance_m": 0.10697267470523356,
+      "mouth_first_chunk_ratio": 2.889157823770812,
+      "mouth_width_m": 0.1571428562913622,
+      "nominal_path_back_clearance_m": 0.08588926494121552,
+      "output_index": 3,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 3073537515,
+      "rerun_file": "rerun/episode_003.rrd",
+      "robot_constraint_file": "constraints/robot/episode_003.json",
+      "root_center": [
+        -0.13301204144954681,
+        -0.019872866570949554,
+        0.375
+      ],
+      "simulator_seed": 48573007,
+      "source_box": {
+        "center": [
+          -0.16298940777778625,
+          -0.01870773732662201,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        -0.3198436498641968,
+        -0.012611288577318192,
+        0.2716291546821594
+      ],
+      "topdown_file": "topdown/episode_003.png",
+      "usable_cavity_depth_m": 0.13866666356722515,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": -92.22579284198247,
+      "yaw_rad": -1.6096437403548125
+    },
+    {
+      "back_distance_m": 0.5250500940996146,
+      "back_first_chunk_ratio": 11.98681702719489,
+      "components": [
+        {
+          "center": [
+            -0.008960053324699402,
+            -0.06138795614242554,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.1599999964237213,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": -3.068169002948212
+        },
+        {
+          "center": [
+            -0.197023406624794,
+            -0.07522112131118774,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.1599999964237213,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": -3.068169002948212
+        },
+        {
+          "center": [
+            -0.0928194671869278,
+            -0.20659758150577545,
+            0.375
+          ],
+          "half_extents": [
+            0.10999999940395355,
+            0.021333332856496176,
+            0.375
+          ],
+          "name": "back",
+          "yaw": -3.068169002948212
+        }
+      ],
+      "dataset_episode_index": 1010,
+      "direct_path_back_clearance_m": -0.021306365728378296,
+      "eef_constraint_file": "constraints/eef/episode_004.json",
+      "envelope_half_extents_m": [
+        0.10999999940395355,
+        0.1599999964237213,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.04380229488015175,
+      "full_size_m": [
+        0.2199999988079071,
+        0.3199999928474426,
+        0.75
+      ],
+      "goal_position": [
+        -0.1644848734140396,
+        -0.43520236015319824,
+        0.4620882570743561
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.0,
+          0.0
+        ],
+        "full_size_xy_m": [
+          0.22,
+          0.32
+        ],
+        "output_index": 4,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": -1.3840403049157878e-16,
+      "mouth_distance_m": 0.205050101252172,
+      "mouth_first_chunk_ratio": 4.681263888415282,
+      "mouth_width_m": 0.1571428562913622,
+      "nominal_path_back_clearance_m": 0.1541833132505417,
+      "output_index": 4,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 4021621599,
+      "rerun_file": "rerun/episode_004.rrd",
+      "robot_constraint_file": "constraints/robot/episode_004.json",
+      "root_center": [
+        -0.1029917299747467,
+        -0.06830453872680664,
+        0.375
+      ],
+      "simulator_seed": 48573016,
+      "source_box": {
+        "center": [
+          -0.1029917299747467,
+          -0.06830453872680664,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        -0.12977096438407898,
+        0.29576200246810913,
+        0.24493207037448883
+      ],
+      "topdown_file": "topdown/episode_004.png",
+      "usable_cavity_depth_m": 0.2773333271344503,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": -175.79313470179437,
+      "yaw_rad": -3.068169002948212
+    },
+    {
+      "back_distance_m": 0.4454774576219838,
+      "back_first_chunk_ratio": 45.27267159295006,
+      "components": [
+        {
+          "center": [
+            -0.2888268232345581,
+            -0.06756104528903961,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": 0.7925813189615543
+        },
+        {
+          "center": [
+            -0.15644794702529907,
+            0.06673343479633331,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": 0.7925813189615543
+        },
+        {
+          "center": [
+            -0.2720143496990204,
+            0.048258841037750244,
+            0.375
+          ],
+          "half_extents": [
+            0.10999999940395355,
+            0.010666666428248088,
+            0.375
+          ],
+          "name": "back",
+          "yaw": 0.7925813189615543
+        }
+      ],
+      "dataset_episode_index": 1034,
+      "direct_path_back_clearance_m": -0.010563667863607407,
+      "eef_constraint_file": "constraints/eef/episode_005.json",
+      "envelope_half_extents_m": [
+        0.10999999940395355,
+        0.07999999821186066,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.009839875623583794,
+      "full_size_m": [
+        0.2199999988079071,
+        0.1599999964237213,
+        0.75
+      ],
+      "goal_position": [
+        -0.39874857664108276,
+        0.1014414131641388,
+        0.6140425205230713
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.0,
+          0.0
+        ],
+        "full_size_xy_m": [
+          0.22,
+          0.16
+        ],
+        "output_index": 5,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": -3.837431647773752e-17,
+      "mouth_distance_m": 0.2854774611982625,
+      "mouth_first_chunk_ratio": 29.012303825674618,
+      "mouth_width_m": 0.1571428562913622,
+      "nominal_path_back_clearance_m": -0.008500276133418083,
+      "output_index": 5,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 3283500616,
+      "rerun_file": "rerun/episode_005.rrd",
+      "robot_constraint_file": "constraints/robot/episode_005.json",
+      "root_center": [
+        -0.2226373851299286,
+        -0.0004138017538934946,
+        0.375
+      ],
+      "simulator_seed": 48573020,
+      "source_box": {
+        "center": [
+          -0.2226373851299286,
+          -0.0004138017538934946,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        0.03764387592673302,
+        -0.25698238611221313,
+        0.4977569580078125
+      ],
+      "topdown_file": "topdown/episode_005.png",
+      "usable_cavity_depth_m": 0.13866666356722515,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": 45.41156449740919,
+      "yaw_rad": 0.7925813189615543
+    },
+    {
+      "back_distance_m": 0.39851914083558543,
+      "back_first_chunk_ratio": 9.948271403299435,
+      "components": [
+        {
+          "center": [
+            -0.21523341536521912,
+            -0.10769632458686829,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": -0.4781334250827953
+        },
+        {
+          "center": [
+            -0.04780927300453186,
+            -0.19446232914924622,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": -0.4781334250827953
+        },
+        {
+          "center": [
+            -0.09961950778961182,
+            -0.0895213633775711,
+            0.375
+          ],
+          "half_extents": [
+            0.10999999940395355,
+            0.010666666428248088,
+            0.375
+          ],
+          "name": "back",
+          "yaw": -0.4781334250827953
+        }
+      ],
+      "dataset_episode_index": 1069,
+      "direct_path_back_clearance_m": -0.010629450902342796,
+      "eef_constraint_file": "constraints/eef/episode_006.json",
+      "envelope_half_extents_m": [
+        0.10999999940395355,
+        0.07999999821186066,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.04005913436412811,
+      "full_size_m": [
+        0.2199999988079071,
+        0.1599999964237213,
+        0.75
+      ],
+      "goal_position": [
+        0.07048163563013077,
+        -0.008441769517958164,
+        0.5475877523422241
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.0,
+          0.0
+        ],
+        "full_size_xy_m": [
+          0.22,
+          0.16
+        ],
+        "output_index": 6,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": -1.351180505451282e-17,
+      "mouth_distance_m": 0.23851914441186411,
+      "mouth_first_chunk_ratio": 5.954176199709688,
+      "mouth_width_m": 0.1571428562913622,
+      "nominal_path_back_clearance_m": -0.008159116841852665,
+      "output_index": 6,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 2953062871,
+      "rerun_file": "rerun/episode_006.rrd",
+      "robot_constraint_file": "constraints/robot/episode_006.json",
+      "root_center": [
+        -0.1315213441848755,
+        -0.15107932686805725,
+        0.375
+      ],
+      "simulator_seed": 48573030,
+      "source_box": {
+        "center": [
+          -0.1315213441848755,
+          -0.15107932686805725,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        -0.27807924151420593,
+        -0.43387824296951294,
+        0.3375232517719269
+      ],
+      "topdown_file": "topdown/episode_006.png",
+      "usable_cavity_depth_m": 0.13866666356722515,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": -27.395027301378708,
+      "yaw_rad": -0.4781334250827953
+    },
+    {
+      "back_distance_m": 0.2922313778812537,
+      "back_first_chunk_ratio": 5.992753958497895,
+      "components": [
+        {
+          "center": [
+            -0.25155365467071533,
+            0.21800988912582397,
+            0.375
+          ],
+          "half_extents": [
+            0.003928571407284055,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": -0.8465217915139194
+        },
+        {
+          "center": [
+            -0.22031717002391815,
+            0.18270081281661987,
+            0.375
+          ],
+          "half_extents": [
+            0.003928571407284055,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": -0.8465217915139194
+        },
+        {
+          "center": [
+            -0.18400612473487854,
+            0.24629507958889008,
+            0.375
+          ],
+          "half_extents": [
+            0.027499999850988388,
+            0.010666666428248088,
+            0.375
+          ],
+          "name": "back",
+          "yaw": -0.8465217915139194
+        }
+      ],
+      "dataset_episode_index": 1117,
+      "direct_path_back_clearance_m": 0.03947852924466133,
+      "eef_constraint_file": "constraints/eef/episode_007.json",
+      "envelope_half_extents_m": [
+        0.027499999850988388,
+        0.07999999821186066,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.048764120787382126,
+      "full_size_m": [
+        0.054999999701976776,
+        0.1599999964237213,
+        0.75
+      ],
+      "goal_position": [
+        -0.21957293152809143,
+        0.3160764276981354,
+        0.20734411478042603
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.0,
+          0.0
+        ],
+        "full_size_xy_m": [
+          0.055,
+          0.16
+        ],
+        "output_index": 7,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": -5.878260919487442e-17,
+      "mouth_distance_m": 0.13223138145753238,
+      "mouth_first_chunk_ratio": 2.7116531442057226,
+      "mouth_width_m": 0.03928571407284055,
+      "nominal_path_back_clearance_m": 0.018712317571043968,
+      "output_index": 7,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 1860412786,
+      "rerun_file": "rerun/episode_007.rrd",
+      "robot_constraint_file": "constraints/robot/episode_007.json",
+      "root_center": [
+        -0.23593541979789734,
+        0.20035535097122192,
+        0.375
+      ],
+      "simulator_seed": 48573036,
+      "source_box": {
+        "center": [
+          -0.23593541979789734,
+          0.20035535097122192,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        -0.39489254355430603,
+        0.059732481837272644,
+        0.59028559923172
+      ],
+      "topdown_file": "topdown/episode_007.png",
+      "usable_cavity_depth_m": 0.13866666356722515,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": -48.502125919600964,
+      "yaw_rad": -0.8465217915139194
+    },
+    {
+      "back_distance_m": 0.37432635922843255,
+      "back_first_chunk_ratio": 103.81675617905404,
+      "components": [
+        {
+          "center": [
+            -0.17179864645004272,
+            -0.03289712220430374,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": -0.14313484840203317
+        },
+        {
+          "center": [
+            0.014844387769699097,
+            -0.05979619175195694,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": -0.14313484840203317
+        },
+        {
+          "center": [
+            -0.06858696788549423,
+            0.022277645766735077,
+            0.375
+          ],
+          "half_extents": [
+            0.10999999940395355,
+            0.010666666428248088,
+            0.375
+          ],
+          "name": "back",
+          "yaw": -0.14313484840203317
+        }
+      ],
+      "dataset_episode_index": 1129,
+      "direct_path_back_clearance_m": -0.01057359017431736,
+      "eef_constraint_file": "constraints/eef/episode_008.json",
+      "envelope_half_extents_m": [
+        0.10999999940395355,
+        0.07999999821186066,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.003605644917115569,
+      "full_size_m": [
+        0.2199999988079071,
+        0.1599999964237213,
+        0.75
+      ],
+      "goal_position": [
+        -0.03641849011182785,
+        0.24397146701812744,
+        0.5938130021095276
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.0,
+          0.0
+        ],
+        "full_size_xy_m": [
+          0.22,
+          0.16
+        ],
+        "output_index": 8,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": -4.6672911467790785e-17,
+      "mouth_distance_m": 0.21432636280471123,
+      "mouth_first_chunk_ratio": 59.441893955594296,
+      "mouth_width_m": 0.1571428562913622,
+      "nominal_path_back_clearance_m": 0.05637994781136513,
+      "output_index": 8,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 4256662015,
+      "rerun_file": "rerun/episode_008.rrd",
+      "robot_constraint_file": "constraints/robot/episode_008.json",
+      "root_center": [
+        -0.07847712934017181,
+        -0.04634665697813034,
+        0.375
+      ],
+      "simulator_seed": 48573038,
+      "source_box": {
+        "center": [
+          -0.07847712934017181,
+          -0.04634665697813034,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        -0.12046178430318832,
+        -0.3376631438732147,
+        0.6281309127807617
+      ],
+      "topdown_file": "topdown/episode_008.png",
+      "usable_cavity_depth_m": 0.13866666356722515,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": -8.201022714681356,
+      "yaw_rad": -0.14313484840203317
+    },
+    {
+      "back_distance_m": 0.3862504364277918,
+      "back_first_chunk_ratio": 20.464408015186226,
+      "components": [
+        {
+          "center": [
+            0.02162168174982071,
+            0.14688606560230255,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "left_side",
+          "yaw": -3.014557279050169
+        },
+        {
+          "center": [
+            -0.1654302179813385,
+            0.12299520522356033,
+            0.375
+          ],
+          "half_extents": [
+            0.01571428562913622,
+            0.07999999821186066,
+            0.375
+          ],
+          "name": "right_side",
+          "yaw": -3.014557279050169
+        },
+        {
+          "center": [
+            -0.06312014907598495,
+            0.06616600602865219,
+            0.375
+          ],
+          "half_extents": [
+            0.10999999940395355,
+            0.010666666428248088,
+            0.375
+          ],
+          "name": "back",
+          "yaw": -3.014557279050169
+        }
+      ],
+      "dataset_episode_index": 1138,
+      "direct_path_back_clearance_m": -0.01064031571149826,
+      "eef_constraint_file": "constraints/eef/episode_009.json",
+      "envelope_half_extents_m": [
+        0.10999999940395355,
+        0.07999999821186066,
+        0.375
+      ],
+      "first_chunk_distance_m": 0.01887425407767296,
+      "full_size_m": [
+        0.2199999988079071,
+        0.1599999964237213,
+        0.75
+      ],
+      "goal_position": [
+        -0.051445167511701584,
+        -0.1898840367794037,
+        0.274394690990448
+      ],
+      "guidance": {
+        "center_delta_xy_m": [
+          0.0,
+          0.0
+        ],
+        "full_size_xy_m": [
+          0.22,
+          0.16
+        ],
+        "output_index": 9,
+        "yaw_delta_deg": 0.0
+      },
+      "lateral_offset_from_start_m": -6.102541471363182e-17,
+      "mouth_distance_m": 0.22625044000407046,
+      "mouth_first_chunk_ratio": 11.98725200333667,
+      "mouth_width_m": 0.1571428562913622,
+      "nominal_path_back_clearance_m": 0.1075066551566124,
+      "output_index": 9,
+      "planner_status": "not_run",
+      "policy_obstacle_visibility_status": "not_measured",
+      "policy_seed": 3641704370,
+      "rerun_file": "rerun/episode_009.rrd",
+      "robot_constraint_file": "constraints/robot/episode_009.json",
+      "root_center": [
+        -0.0719042643904686,
+        0.13494063913822174,
+        0.375
+      ],
+      "simulator_seed": 48573041,
+      "source_box": {
+        "center": [
+          -0.0719042643904686,
+          0.13494063913822174,
+          0.375
+        ],
+        "full_size": [
+          0.10999999940395355,
+          0.1599999964237213,
+          0.75
+        ],
+        "half_extents": [
+          0.054999999701976776,
+          0.07999999821186066,
+          0.375
+        ],
+        "yaw_rad": 0.0
+      },
+      "start_position": [
+        -0.11070434749126434,
+        0.43872326612472534,
+        0.4840167164802551
+      ],
+      "topdown_file": "topdown/episode_009.png",
+      "usable_cavity_depth_m": 0.13866666356722515,
+      "whole_robot_clearance_status": "not_validated",
+      "yaw_deg": -172.72140919001586,
+      "yaw_rad": -3.014557279050169
+    }
+  ],
+  "fixture_id": "e10-u-shape-box-derived-review-v1",
+  "guidance_file": "configs/eval/e10_u_shape_box_derived_guidance_v1.json",
+  "object_geometry": {
+    "change_policy": "Do not edit v1 in place; create a new versioned fixture for geometry changes.",
+    "finalized_on": "2026-08-19",
+    "status": "finalized"
+  },
+  "rules": {
+    "center_rule": "preserve source-box center plus center_delta_xy_m",
+    "envelope_rule": "preserve source-box outer width/depth unless full_size_xy_m is edited",
+    "height_m": 0.75,
+    "orientation_rule": "local -Y opening faces the recorded start plus yaw_delta_deg"
+  },
+  "schema_version": "pg3d.e10_u_shape_box_derived_review.v1",
+  "source_fixture": "configs/eval/e3_candidate_midpath_75cm_frozen_v1/fixture.json",
+  "status": "object_geometry_finalized",
+  "validation": {
+    "comparison_trials_run": [],
+    "live_physx_run": false,
+    "motion_planner_run": false,
+    "policy_obstacle_visibility_measured": false,
+    "rerun_policy_cloud_source": "saved obstacle-free dataset reset",
+    "rerun_u_surface_source": "deterministic proposed-geometry surface sample",
+    "whole_robot_clearance_validated": false
+  }
+}

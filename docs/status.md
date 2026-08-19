@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-08-14
+Last updated: 2026-08-19
 
 ## Current objective
 
@@ -219,6 +219,97 @@ tensor. The resulting MP4, native Rerun timeline, exact-input bundle, and top-do
 live under `artifacts/e10-u-shape-episode004-visualization`. The earlier episode-000 smoke is retained
 as provenance but is no longer the preferred view because the same U dominates its smaller scene.
 This remains a visualization smoke, not a method comparison or frozen E10 difficulty setting.
+An outcome-blind ten-episode review builder now implements the proposed per-episode U search,
+whole-arm endpoint and witness gates, live three-component MPLib/PhysX validation, matched
+EEF/robot constraints, witness archives, top-down previews, and native Rerun 0.35 inspection
+overlays. The builder preserves the frozen E3 episode order and paired seeds and deliberately runs
+no rejection, reranking, or ITPS comparison. The literal proposed placement normalization is
+blocked, however: the completed episode-000 CUDA preflight measured a 4.607 cm first-chunk TCP
+displacement, and every one of its 294 prescribed primary-plus-fallback candidates violated both
+the 3 cm initial and goal whole-arm clearance gates. The build correctly stopped without emitting
+a ten-episode review fixture or misleading Reruns. The mouth/back distance search must be revised
+before E10 placement review can proceed; the 3 cm safety gate should remain unchanged.
+The active replacement workflow now starts from the already frozen E3 boxes instead of searching
+placements with MPLib in the loop. `configs/eval/e10_u_shape_box_derived_review_v1` contains ten
+planner-free U proposals that preserve each source-box center and `0.11 x 0.16 x 0.75 m` outer
+envelope, with the mouth independently oriented toward that episode's recorded start. Per-episode
+XY size, center offset, and yaw offset live in
+`configs/eval/e10_u_shape_box_derived_guidance_v1.json`, so visual revisions require only data
+edits and regeneration. Ten native Rerun 0.35 files and top-down previews are under
+`artifacts/e10-u-shape-box-derived-review-v1`. Their policy cloud is explicitly the saved
+obstacle-free dataset reset, while `inspection/proposed_u_surface` is a deterministic geometry
+sample; no planner path, PhysX result, whole-arm clearance, policy visibility count, or comparison
+outcome is claimed. The literal baseline mouth was 7.86 cm wide. The first user-guided revision
+doubles width for episodes 000--003, doubles depth for 001--002, and moves episode 003 by 3 cm
+directly away from its start. Those four mouths are now 15.71 cm; cavities 001--002 are 27.73 cm
+deep. The second user-guided revision doubles width for episodes 004--006 and 008--009, doubles
+depth for 004, and halves episode 007's width. Episode 004 is now `0.22 x 0.32 x 0.75 m`;
+005--006 and 008--009 are `0.22 x 0.16 x 0.75 m`; episode 007 is
+`0.055 x 0.16 x 0.75 m`. Its literal half-width envelope leaves only a 3.93 cm mouth, which was
+retained for visual inspection rather than silently clamped. MPLib validation stayed deferred
+until the user approved all ten placements.
+The approved placements have now received a first bounded MPLib validation without any geometry
+changes. `scripts/validate_u_shape_fixture_planner.py` runs each episode in a fresh subprocess,
+keeps MPLib's 1 s per-RRT-call budget, tries only the 3 cm and zero planner margins on each side,
+and kills the whole worker after 120 s. The ten-episode run completed with 3 validated live
+witnesses (episodes 004, 008, and 009), one enforced timeout (000), three initial-clearance
+failures (001 at 1.74 cm, 002 at -1.22 cm, and 005 at -1.47 cm), and three immediate no-route
+results (003, 006, and 007). Successful witnesses maintained 5.45, 4.50, and 3.54 cm minimum exact
+whole-robot clearance respectively, had no contact, and held success for 16 steps. Their joint/TCP
+paths, native Reruns with cyan executed witnesses, top-down previews, per-episode diagnostics, and
+the complete report are under `artifacts/e10-u-shape-box-derived-planner-v1`. This is geometry
+feasibility validation only, not a DP3 method comparison.
+
+A conventional direct configuration-space test now complements the waypoint diagnostic.
+`scripts/run_conventional_u_shape_planner.py` asks RRTConnect to connect each recorded start joint
+state directly to its successful dataset terminal joint state, with three 5 s attempts, no
+Cartesian waypoint, no initial-clearance prefilter, and the same 120 s worker kill. With no
+planning inflation, MPLib returned paths for episodes 001, 002, 005, 008, and 009, but exact Panda
+surface checks found shallow obstacle penetration on every path. With 3 cm obstacle inflation,
+MPLib returned paths for 001, 002, 008, and 009. Episodes 001, 008, and 009 were exactly
+contact-free, with minimum clearances of 1.74, 2.63, and 1.84 cm; none maintained the stricter 3 cm
+clearance target. Episode 002 begins 1.22 cm inside the U, exits by planned state 4, and thereafter
+stays at least 0.35 cm clear. No direct route was found for 000, 003, 004, 005, 006, or 007 within
+the bounded attempts; episode 004's earlier validated waypoint witness demonstrates that a direct
+RRT failure is not an infeasibility proof. These conventional paths were geometrically graded but
+not executed in live PhysX. The zero-margin and 3 cm-margin artifacts are under
+`artifacts/e10-u-shape-conventional-planner-v1` and
+`artifacts/e10-u-shape-conventional-planner-margin3cm-v1` respectively.
+
+The direct test was subsequently extended from 5 s to three 60 s RRTConnect attempts per episode.
+Testing the recorded terminal joints reproduced the same four paths and revealed that the frozen
+terminal joint configurations themselves collide with the new U in episodes 000, 003, 004, 006,
+and 007. Because the reach task constrains TCP position rather than arm configuration or gripper
+orientation, `scripts/run_conventional_u_shape_planner.py` now supports `dataset_pose` and
+`position_ik` goal modes. The definitive positive test uses 40 deterministic goal orientations,
+hundreds of collision-free IK configurations per episode, a 3 cm-inflated planning model, and
+exact Panda surface-cloud grading. It found position-to-position paths for nine episodes: 000,
+001, 002, 004, 005, 006, 007, 008, and 009. Paths 000, 001, 004, 006, 007, 008, and 009 are
+contact-free from their recorded starts. Episodes 002 and 005 start in collision and become
+permanently clear at planned states 20 and 18, retaining 0.98 and 0.56 cm minimum clearance
+thereafter; they count only under the user's explicit invalid-start exemption. Episodes 004, 006,
+007, 008, and 009 maintain at least 3 cm exact clearance throughout. Every positive endpoint is
+within 7 micrometres of the Cartesian task goal. Episode 003 had 269 collision-free IK goals but
+found no route in three 60 s attempts with 3 cm inflation, three 60 s attempts at physical obstacle
+size, or three further 60 s physical-size attempts with a smaller 3 cm RRT extension range. This
+540 s negative search is strong empirical evidence, not a proof of non-existence; sampling-based
+timeouts cannot establish that theorem. Position-only artifacts are under
+`artifacts/e10-u-shape-conventional-position-ik-margin3cm-extended-v1`, with the two episode-003
+negative sweeps in their separately named artifact directories. These paths remain planned and
+geometrically graded rather than live PhysX executions.
+
+The ten box-derived U-object geometries are now finalized and frozen as version 1. The authoritative
+dimensions, centers, yaws, component geometry, and matched EEF/robot constraints live in
+`configs/eval/e10_u_shape_box_derived_guidance_v1.json` and
+`configs/eval/e10_u_shape_box_derived_review_v1`; any geometry change requires a new version rather
+than an in-place edit. This freezes the objects, not the validity label of every environment:
+episodes 002 and 005 remain invalid-start diagnostics, and episode 003 remains an unresolved-route
+diagnostic. The predeclared primary stratum is the seven contact-free-start episodes with found
+position-only witnesses: 000, 001, 004, 006, 007, 008, and 009. The immediate experiment is
+whole-body ITPS versus exact world-model reranking with planning horizon 3 and execution horizon 1.
+The long-wall, fork, chicane, hook/C, elbow-trap, and doorway/shelf families are deferred for later
+implementation and finalization. The revised scope and reporting boundaries are recorded in
+`docs/explainations/nonconvex_scene_experiment_plan.md`.
 
 ## Current phase
 

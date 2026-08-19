@@ -1,334 +1,203 @@
-# Non-convex and delayed-consequence scene experiment plan
+# Non-convex U-scene experiment plan
 
-Status: proposed follow-on benchmark plan
+Status: active U-object evaluation plan; other scene families deferred
 
-Date: 2026-08-14
+Originally proposed: 2026-08-14
 
-Scope: constrained Franka/Panda reach after the box-obstacle ITPS baseline
+Revised: 2026-08-19
 
 Related protocol: `docs/explainations/itps_reranking_experiment_plan.md`
 
-## 1. Purpose
+## 1. Current scope
 
-The existing box environments mainly test local collision avoidance. They do not fully exercise
-the main reason to perform policy-conditioned, multi-chunk imagination: an action can look safe
-and goal-directed now while committing the robot to a dead end or an expensive future state.
+The immediate non-convex experiment is the fixed ten-object U-shape suite in
+`configs/eval/e10_u_shape_box_derived_review_v1`. The next comparison is:
 
-The next benchmark suite should therefore contain scenes where success requires at least one of:
+- whole-body ITPS with its existing one-chunk diffusion horizon; and
+- whole-body world-model reranking with planning horizon 3 and execution horizon 1.
 
-- leaving the direct goal path before a collision is imminent;
-- committing early to one of several route classes;
-- temporarily moving laterally or away from the goal;
-- maintaining a consistent decision across several action chunks; or
-- selecting an early whole-arm posture that preserves future clearance.
+This replaces the earlier plan that made obstacle-free policy input, true beam search, and several
+additional scene families part of the immediate experiment. Those remain possible extensions, but
+they are not prerequisites for evaluating the finalized U objects.
 
-The principal hypothesis is:
+The scientific question for this phase is deliberately narrower:
 
-> Obstacle-free, policy-native point-cloud imagination with multi-chunk beam search can preserve
-> task-directed DP3 proposals while identifying delayed geometric consequences that local
-> inference-time guidance or one-chunk reranking cannot reliably resolve.
+> Given the same fixed U geometry, start state, goal, constraint program, checkpoint, and policy
+> seed, does three-chunk world-model continuation reranking improve stable task-and-constraint
+> success over ITPS?
 
-This is a hypothesis to test, not a conclusion to assume.
+The result must be described as a comparison with continuation-based reranking. The current
+implementation branches over first-chunk candidates and samples one continuation per surviving
+branch at later chunks; it is not a full beam search that expands every retained node by `K` at
+every depth.
 
-## 2. Proposed method separation
+## 2. Finalized U-object geometry
 
-The follow-on method should separate nominal policy observations from constraint evaluation.
+The ten U-object geometries are finalized and frozen as version 1. Their authoritative assets are:
 
-### Policy/proposal environment
+- geometry guidance: `configs/eval/e10_u_shape_box_derived_guidance_v1.json`;
+- fixture identities and dimensions: `configs/eval/e10_u_shape_box_derived_review_v1/fixture.json`;
+- matched whole-robot constraints:
+  `configs/eval/e10_u_shape_box_derived_review_v1/constraints/robot`; and
+- matched EEF constraints:
+  `configs/eval/e10_u_shape_box_derived_review_v1/constraints/eef`.
 
-- Use an obstacle-free ghost environment for every DP3 query, including the root query and every
-  imagined continuation.
-- Match the obstacle-free training observation as closely as possible: robot, nominal scene, goal
-  marker, point count, crop, sampling, and observation history.
-- Do not add constraint-obstacle points to the policy input.
-- At each real replan, synchronize the ghost root joint state from the executed robot state. The
-  control environment's exteroceptive point cloud is not supplied to DP3.
+Every object is a three-box U with a fixed height of `0.75 m`. Its opening faces the recorded
+episode start. The frozen XY envelopes are:
 
-### Constraint evaluator
-
-- Keep the actual obstacle geometry outside the policy.
-- Use the same mesh, signed-distance, or exact primitive representation for every compared method.
-- Evaluate whole-robot clearance along every imagined trajectory.
-- Permit obstacle-free ghost rollouts to pass through obstacles counterfactually; reject or penalize
-  them only through the external constraint evaluator.
-
-### Control environment
-
-- Execute only the selected action prefix.
-- Retain authoritative collision, clearance, task-success, and stable-hold grading.
-- Return the executed joint state for the next receding-horizon root.
-
-This factorization treats DP3 as a nominal task-motion prior and beam search as the mechanism that
-composes it with new geometric constraints.
-
-## 3. Required comparison and current starting point
-
-Use one locked checkpoint, paired episodes, shared policy seeds, identical constraint geometry,
-and identical execution horizons.
-
-| ID | Method/input condition | Purpose | State on 2026-08-14 |
-| --- | --- | --- | --- |
-| A | Base DP3 | Nominal task baseline | Existing evaluation completed |
-| B | ITPS | Inference-time steering baseline | Existing evaluation completed; whole-body box run is currently in progress |
-| C | Reranking with control-environment point clouds containing obstacle points | Existing obstacle-visible composition baseline | Completed |
-| D | Reranking with obstacle-free ghost observations and the same one-chunk cost/search | Isolate the effect of keeping policy input nominal | Not yet run |
-| E | Multi-chunk continuation with obstacle-free ghost observations but no branching after the first chunk | Isolate longer conditional rollout from beam search | Current simple horizon mechanism exists; matched new-scene ablation not yet run |
-| F | Multi-chunk beam search with obstacle-free ghost observations | Proposed full method | Not yet implemented/run |
-
-The decisive comparison is E versus F for branching, and C versus D for obstacle-free policy
-conditioning. A versus B versus F is the final method comparison. Do not attribute gains to point
-cloud feedback if they appear only after changing the cost geometry, compute budget, or execution
-horizon.
-
-## 4. Scene-design rules
-
-Every scene must satisfy these rules before method outcomes are inspected:
-
-1. The initial and goal configurations are collision-free.
-2. At least one whole-robot collision-free path exists with a recorded minimum clearance.
-3. The obstacle actor and the geometry supplied to all cost evaluators are identical.
-4. The key wrong decision occurs before its failure becomes obvious within one policy chunk.
-5. Difficulty parameters and levels are declared before the definitive run.
-6. Start/goal pairs and policy seeds are paired across all methods.
-7. A motion-planner or carefully validated scripted path provides a feasibility witness.
-8. An offline candidate-support check establishes whether DP3 samples any useful lateral/postural
-   diversity. Beam search cannot recover a route outside the proposal distribution.
-9. The scene must diagnose a stated failure mechanism, rather than merely being visually complex.
-10. Dynamic obstacles and manipulation are excluded from this reach benchmark because the current
-    world model does not predict their dynamics.
-
-Obstacle dimensions should be scaled so the delayed consequence lies beyond the ordinary ITPS
-action horizon but within the proposed multi-chunk search horizon. Each family should sweep one or
-two interpretable dimensions instead of relying on a single hand-picked instance.
-
-## 5. Prioritized scene families
-
-### P1 — U-shaped cul-de-sac
-
-Construct the U from three matched box primitives. Place the goal so the nominal direct path enters
-the closed portion of the U. The successful route must move laterally toward the opening before
-resuming goal progress.
-
-Expected ITPS pressure: local clearance gradients can push the trajectory deeper into the cavity or
-fail to provide the early escape commitment.
-
-Sweep:
-
-- cavity depth relative to one action chunk's travel;
-- mouth width and whole-robot clearance;
-- left/right opening offset; and
-- goal depth/alignment behind the closed wall.
-
-Important control: include an easy shallow U that ITPS should solve. If every level is an extreme
-trap, the suite will not reveal a meaningful performance frontier.
-
-Initial visualization smoke (2026-08-14): `configs/eval/e10_u_shape_smoke_v1` places a
-`0.28 x 0.30 x 0.60 m` three-box U in dataset episode 305. Its opening faces the start, the nominal
-start-goal line enters the cavity and crosses the closed back, and the stored initial whole-robot
-clearance is 3.23 cm. The simulator actor/serialized-SDF collision probe agrees in intersecting and
-separated cases. This is a geometry and observation smoke only, not a frozen difficulty level or
-method result.
-
-The preferred visualization was then moved to selected output episode 004 / dataset episode 1010
-in `configs/eval/e10_u_shape_smoke_episode004_v1`, because the same envelope dominates the episode
-000 workspace view. Episode 004 provides 7.91 cm initial whole-robot clearance and a longer, clearer
-start-to-goal approach through the cavity toward the closed back. The original episode-000 artifact
-is retained only as provenance for the first smoke.
-
-### P2 — Long wall with a distant opening
-
-Place a long wall across the direct path with its only opening far to the left or right. The direct
-signed-distance gradient is predominantly normal to the wall and supplies little information about
-which tangential direction reaches the opening.
-
-Expected ITPS pressure: retreat from the wall, oscillation, or slow local sliding without committing
-to the distant opening.
-
-Sweep:
-
-- opening side;
-- lateral opening distance;
-- wall length;
-- opening width; and
-- whether one or both ends are reachable within the episode horizon.
-
-This is the simplest scene for demonstrating that local collision gradients can lack useful route
-information.
-
-### P3 — False-passage fork
-
-Create two initially feasible corridors. Make the wider or more goal-aligned corridor terminate in a
-dead end beyond one chunk, while the less direct corridor reaches the goal.
-
-Expected ITPS pressure: the wrong corridor initially has better goal progress and clearance, and the
-failure becomes visible only after an early route commitment.
-
-Sweep:
-
-- dead-end depth;
-- width advantage of the false corridor;
-- decision-point distance from the start; and
-- lateral cost of entering the valid corridor.
-
-This is the most direct test of policy-conditioned future observation: future continuations should
-expose the dead end before its first action prefix is executed.
-
-### P4 — Staggered gates or chicane
-
-Use two or three walls whose openings alternate left and right, forming an S-shaped route.
-
-Expected ITPS pressure: successive local corrections can undo one another, and receding-horizon
-guidance may continually return toward the nominal direct path.
-
-Sweep:
-
-- number of gates;
-- spacing in units of action chunks;
-- alternating lateral offset; and
-- gate width.
-
-This scene tests whether the search preserves a consistent multi-step decision rather than merely
-finding one good avoidance action.
-
-### P5 — T-wall or asymmetric hook/C obstacle
-
-A T-wall combines an early stem with a later cap. A hook or C shape provides one open route and one
-closed route around a concavity.
-
-Expected ITPS pressure: the first local deflection appears safe but leads toward the cap or closed
-side. Symmetric variants can also produce ambiguous or cancelling gradients.
-
-Sweep:
-
-- stem/cavity depth;
-- cap length or hook angle;
-- asymmetry of the two apparent routes; and
-- target offset.
-
-Use these only after the U and distant-opening wall; they exercise similar local-minimum mechanisms
-with more geometric complexity.
-
-### P6 — Whole-body elbow trap
-
-Keep the TCP's direct path clear while placing a post or side wall where the elbow or forearm will
-collide later. Arrange the start so multiple early joint postures have similar TCP progress but only
-one preserves future link clearance.
-
-Expected ITPS pressure: simultaneous link gradients may choose a locally safe posture that becomes
-infeasible later, especially when the decisive link is not yet near the obstacle.
-
-Sweep:
-
-- post position and radius;
-- whether the threatened link is elbow, forearm, wrist, or hand;
-- timing of the future collision; and
-- clearance difference between alternative postures.
-
-This is the first scene that specifically tests the scientific value of whole-robot point-cloud
-imagination rather than EEF path planning.
-
-### P7 — Doorway, shelf, or overhang reach
-
-Place the target beyond a portal or inside an open shelf. The TCP fits through the opening, but the
-arm must select an appropriate posture before entering so the elbow, wrist, and hand remain clear.
-
-Expected ITPS pressure: gradients from opposing surfaces can conflict, and late posture correction
-may be impossible after entering the narrow region.
-
-Sweep:
-
-- opening width and height;
-- shelf depth;
-- target depth;
-- overhang height; and
-- required entry posture.
-
-This family is valuable but should follow the elbow trap because it combines route choice, narrow
-passage, and whole-body posture in one harder diagnosis.
-
-## 6. Recommended execution order
-
-1. Finish and archive the running whole-body ITPS box experiment as the convex baseline.
-2. Implement reusable composite-scene construction from matched box/cylinder primitives.
-3. Build and validate one fixed U-shaped scene.
-4. Add the distant-opening wall and false-passage fork.
-5. Run small paired pilots for A, B, D, E, and F; use these only for integration and parameter
-   selection.
-6. Add the staggered-gate family after beam search works on the fork.
-7. Add the elbow trap as the first whole-body-specific scene.
-8. Freeze difficulty levels, start/goal instances, seeds, compute budgets, and artifact selection.
-9. Run a held-out definitive suite without tuning on its outcomes.
-10. Add doorway/shelf and additional C/T variants only after the core claims are interpretable.
-
-## 7. Beam-search requirements
-
-At depth `d`, expand each retained node with `K` stochastic DP3 continuations, evaluate the resulting
-`B * K` children, and retain the top `B`. Do not call a collection of independent first-chunk
-branches with one continuation each a beam search.
-
-Each node should retain:
-
-- ghost joint state and policy observation history;
-- complete action prefix;
-- cumulative constraint, goal-progress, and motion costs;
-- minimum predicted whole-robot clearance;
-- parent identity and route/homotopy diagnostic when available; and
-- terminal-value or reachability estimate.
-
-The score must prevent safe inaction from winning. Use hard feasibility first, followed by a
-predeclared combination of terminal goal distance or progress, clearance preference, path length,
-and smoothness. Record every component. Compare methods under both their standard settings and a
-measured compute-matched budget.
-
-## 8. Measurements and diagnostics
-
-Use the main protocol's stable combined success as the primary endpoint. Also report:
-
-- goal reach and stable hold;
-- whole-robot and TCP constraint satisfaction;
-- minimum clearance, violation depth/duration/integral, and first collision link;
-- first incorrect route commitment and whether recovery remained possible;
-- beam survival by route class at every depth;
-- candidate feasibility fraction and fallback count;
-- predicted-versus-executed clearance and TCP/robot path error;
-- terminal goal distance and time to first goal;
-- action-selection latency, denoiser evaluations, geometry evaluations, and peak memory; and
-- task failure conditioned on safety, so stationary safe failures are explicit.
-
-For the obstacle-free-input ablation, additionally record policy-input semantics and compare action
-sample diversity between obstacle-visible control observations and obstacle-free ghost observations.
-At minimum, report lateral endpoint dispersion, pairwise action-chunk distance, and the fraction of
-samples belonging to each feasible route class.
-
-## 9. Interpretation matrix
-
-| Observation | Interpretation |
+| Episodes | Full XY envelope |
 | --- | --- |
-| D outperforms C | Removing unseen obstacle points from DP3 input helps preserve the nominal proposal distribution |
-| E outperforms D | Policy-conditioned multi-chunk imagination adds value beyond one-chunk scoring |
-| F outperforms E | Branching across later decisions, rather than horizon alone, is necessary |
-| ITPS matches F on shallow U but falls behind on fork/deep U | Evidence supports the delayed-decision/local-minimum hypothesis |
-| F is safe but rarely reaches | The objective may reward inaction, or DP3 lacks detour support |
-| All methods fail and offline samples contain no valid route | The scene tests proposal support, not search quality |
-| Predicted success fails in execution | World-model or controller-tracking error is the bottleneck |
-| F wins only with much greater compute | Report a success/latency frontier rather than an unqualified method win |
+| 000, 003, 005, 006, 008, 009 | `0.22 x 0.16 m` |
+| 001, 002, 004 | `0.22 x 0.32 m` |
+| 007 | `0.055 x 0.16 m` |
 
-The paper claim should be narrowed if the evidence supports only obstacle-free input, only longer
-horizon, or only beam branching. These mechanisms must not be bundled into one unexplained gain.
+Episode 003 additionally retains its finalized `3 cm` center translation away from the recorded
+start. The stored yaw values and all other centers are frozen exactly as serialized.
 
-## 10. Completion gate
+“Finalized” means these object dimensions, poses, component geometry, and constraint files are no
+longer tuning variables for this experiment. Do not edit the v1 guidance or fixture in place. Any
+later geometry change requires a new fixture ID and versioned guidance/config directory.
 
-A scene family is ready for definitive evaluation only when:
+Object finalization does not assert that every start/goal pair is valid for a primary benchmark.
+Environment validity and method outcomes remain separately measured facts.
 
-- actor geometry and evaluator geometry agree in intersecting and separated probes;
-- a whole-robot collision-free witness path is saved;
-- the intended delayed consequence occurs beyond one ordinary policy chunk;
-- difficulty settings and seeds are frozen;
-- all compared methods use paired roots, constraints, policy seeds, and budgets;
-- MP4 and Rerun artifacts expose the policy input, imagined candidates/beam, selected trajectory,
-  executed trajectory, and clearance timeline; and
-- the artifact manifest links every retained qualitative example to its exact metrics row and
-  configuration.
+## 3. Known environment-validity strata
 
-This suite extends the existing box protocol. It does not retroactively change the frozen E3 test;
-any change to policy input or primary method settings requires a new, versioned experiment protocol.
+Existing exact Panda surface-cloud and position-only RRTConnect checks establish the following
+pre-evaluation strata without using ITPS or reranking outcomes:
+
+- **Primary valid-start/witness set:** episodes 000, 001, 004, 006, 007, 008, and 009 have
+  contact-free recorded starts and a found position-to-position path.
+- **Invalid-start diagnostics:** episodes 002 and 005 start inside the finalized U geometry. They
+  may be executed for failure diagnostics, but they must not enter the primary success-rate
+  denominator.
+- **Unresolved-route diagnostic:** episode 003 has a contact-free start and many collision-free IK
+  goals, but no route was found in the completed 540-second bounded search. This is strong negative
+  evidence, not a proof of infeasibility, so it also remains outside the primary witnessed-set
+  aggregate.
+
+Report results for all ten objects for transparency, then report the seven-episode primary
+valid-start/witness stratum separately. Do not relabel an invalid start or unresolved route based
+on a favorable policy outcome.
+
+## 4. Locked method comparison
+
+Use the locked 100k checkpoint and the dataset episodes, simulator seeds, and policy seeds stored
+in the fixture. Both methods must receive the same episode-specific root, goal, U geometry, robot
+constraint program, and seed.
+
+### ITPS
+
+- constraint target: whole robot;
+- guide ratio: 60;
+- MCMC inner steps: 4;
+- energy: smooth barrier;
+- barrier temperature: `0.01`;
+- collision-surface points: 1024; and
+- execution horizon: one chunk.
+
+ITPS does not acquire a three-chunk world-model horizon merely because the evaluator is invoked
+with `planning_horizon_chunks=3`. It continues to guide the normalized diffusion trajectory over
+its ordinary action horizon.
+
+### World-model reranking
+
+- constraint target: whole robot;
+- exact robot geometry mode;
+- planning horizon: 3 chunks;
+- execution horizon: 1 chunk;
+- candidate fallback schedule: `16, 32, 64`; and
+- receding-horizon replanning after each executed chunk.
+
+The current policy input and continuation behavior should be reported exactly as implemented.
+Obstacle-free policy conditioning, later-depth branching, DDIM-eta changes, and alternate candidate
+diversity mechanisms are separate ablations and must not be silently bundled into this comparison.
+
+## 5. Execution and artifact rules
+
+The ten U objects have different sizes, so the control environment must be constructed with the
+matching episode-specific envelope. Running one fixed-size actor across all ten constraints is
+invalid. Preserve fixture output indices 000--009 so the order-independent policy seeds remain the
+stored paired seeds.
+
+Use:
+
+- maximum task horizon: 150 simulator steps;
+- stable-success hold: 16 steps;
+- immediate termination on PhysX contact or non-positive whole-robot signed clearance;
+- whole-robot clearance grading at every executed step;
+- MP4 and native Rerun output for both methods on every object;
+- exact policy-input bundles and constraint fingerprints;
+- candidate and selected predicted paths in Rerun;
+- action-selection timing, denoiser/geometry counts, and peak CUDA allocation; and
+- one artifact manifest per episode-specific run.
+
+Run each object in its own process with the matching envelope while preserving its fixture output
+index. Because each process emits its own summary, combine the twenty method rows only after
+validating paired identities and excluding no rows silently.
+
+## 6. Outcomes and reporting
+
+The primary endpoint is stable combined task-and-constraint success on the seven-episode witnessed
+valid-start stratum. All-ten-object results are diagnostic and must identify episodes 002, 003, and
+005 explicitly.
+
+Also report:
+
+- reach and stable-hold success;
+- whole-robot and TCP constraint satisfaction;
+- minimum clearance and violation depth, duration, integral, and event count;
+- first collision source and step;
+- final and minimum target distance;
+- candidate feasibility fraction and fallback reason;
+- executed TCP/joint path length, smoothness, and replan discontinuity;
+- action-selection latency and measured denoiser/geometry work; and
+- paired per-episode differences, without presenting a seven-episode pilot interval as a
+  definitive population claim.
+
+Before interpreting a reranking failure, inspect candidate support. If no sampled first-chunk route
+leaves the U's failing route class, the result diagnoses the proposal distribution rather than the
+ranking rule alone.
+
+## 7. Interpretation boundaries
+
+| Observation | Supported interpretation |
+| --- | --- |
+| H3/E1 reranking improves over ITPS on witnessed U scenes | Longer policy-conditioned geometric lookahead helps on these finalized U objects |
+| Both methods fail and reranking samples contain no viable route | The current DP3 proposal support is the limiting factor |
+| Reranking predicts safe candidates that collide in execution | World-model geometry or controller tracking is the limiting factor |
+| ITPS matches reranking | Three-chunk continuation did not add measurable value at the tested budget |
+| A gain appears only with substantially more compute | Report a success/latency frontier, not an unqualified method win |
+
+This experiment cannot by itself establish that true beam search is necessary, that obstacle-free
+policy input is beneficial, or that the result generalizes to other non-convex scene families.
+
+## 8. Deferred scene-family backlog
+
+The following families remain design directions only and will be implemented and finalized later:
+
+1. long wall with a distant opening;
+2. false-passage fork;
+3. staggered gates or chicane;
+4. T-wall, hook, or C-shaped obstacle;
+5. whole-body elbow or forearm trap; and
+6. doorway, shelf, or overhang reach.
+
+No dimensions, placements, seeds, or completion order are frozen for these families. They should
+receive new versioned fixtures and their own geometry/validity review before method outcomes are
+examined. Their implementation is not part of the current U-object evaluation completion gate.
+
+## 9. Completion gate for this phase
+
+This phase is complete when:
+
+1. all ten frozen object geometries are instantiated with actor/evaluator agreement;
+2. ITPS and H3/E1 reranking produce paired rows for all ten fixture identities;
+3. videos, Rerun timelines, exact-input bundles, and manifests validate for every method/object;
+4. the primary seven-episode valid-start/witness result and the all-ten diagnostic result are both
+   reported with their denominators; and
+5. failures are attributed only after inspecting candidate support, predicted clearance, executed
+   clearance, and compute diagnostics.
+
+This plan does not modify the frozen E3 protocol. The U suite is a separate, versioned follow-on
+experiment.

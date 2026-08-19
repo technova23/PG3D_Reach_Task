@@ -965,6 +965,136 @@ or episode change requires a new version; do not edit the v1 fixture in place.
 
 ## E10 U-shaped scene visualization
 
+Build the fast, planner-free review baseline by replacing each frozen E3 box with a U of the same
+center and outer envelope:
+
+```bash
+./.venv/bin/python scripts/build_box_derived_u_shape_fixture.py
+```
+
+The versioned geometry source is
+`configs/eval/e10_u_shape_box_derived_guidance_v1.json`. Each episode records
+`full_size_xy_m`, `center_delta_xy_m`, and `yaw_delta_deg`; height stays fixed at 0.75 m. Version 1
+is finalized and must not be edited in place. The following command reproducibly regenerates the
+same finalized fixture; geometry changes require new versioned guidance and output paths:
+
+```bash
+./.venv/bin/python scripts/build_box_derived_u_shape_fixture.py --overwrite
+```
+
+Outputs are written to `configs/eval/e10_u_shape_box_derived_review_v1` and
+`artifacts/e10-u-shape-box-derived-review-v1`. The object geometry is frozen, while the ten Reruns
+remain geometry-only inspection artifacts:
+the policy-input cloud is the saved obstacle-free dataset reset, the brown
+`inspection/proposed_u_surface` entity is sampled from the proposed U, and the gray line is the
+saved demonstration TCP path. There is intentionally no cyan MPLib witness in these review files;
+planner and live-validation artifacts are stored separately. Object finalization does not imply
+that every start/goal environment passed the benchmark-validity gates.
+
+Run bounded MPLib/PhysX validation on the unchanged reviewed geometry:
+
+```bash
+./.venv/bin/python scripts/validate_u_shape_fixture_planner.py \
+  --episode-timeout-seconds 120 \
+  --overwrite
+```
+
+Each episode runs in a fresh subprocess. The parent kills its entire worker process group after
+the configured hard timeout, records `timeout`, and continues with the remaining episodes. Each
+MPLib RRTConnect call retains its own 1 s search budget; the fixed validator tries left/right routes
+at 3 cm and zero planning margins, while exact path and live-replay acceptance always require 3 cm
+whole-robot clearance. Geometry is never resized or moved by this command. Results go to
+`artifacts/e10-u-shape-box-derived-planner-v1`; successful episodes include witness NPZs, cyan-path
+Reruns, and top-down previews.
+
+Run the conventional direct configuration-space RRTConnect test, without hand-authored Cartesian
+waypoints or an initial-clearance prefilter:
+
+```bash
+./.venv/bin/python scripts/run_conventional_u_shape_planner.py \
+  --rrt-planning-time-seconds 5 \
+  --attempts 3 \
+  --episode-timeout-seconds 120 \
+  --overwrite
+```
+
+For a more conservative planning model, inflate every U component by 3 cm:
+
+```bash
+./.venv/bin/python scripts/run_conventional_u_shape_planner.py \
+  --output-dir artifacts/e10-u-shape-conventional-planner-margin3cm-v1 \
+  --collision-margin 0.03 \
+  --rrt-planning-time-seconds 5 \
+  --attempts 3 \
+  --episode-timeout-seconds 120 \
+  --overwrite
+```
+
+The target is the terminal joint state from the successful frozen dataset demonstration. The
+saved cyan paths are planned, unexecuted RRT results; the report separately records whether exact
+Panda surface-cloud grading found contact and whether the full path retained 3 cm clearance.
+
+For the reach task's actual position-only endpoint, sample end-effector orientations and
+collision-free IK configurations before direct planning. This avoids incorrectly treating a
+colliding demonstration terminal joint configuration as evidence that the Cartesian goal is
+unreachable:
+
+```bash
+./.venv/bin/python scripts/run_conventional_u_shape_planner.py \
+  --output-dir artifacts/e10-u-shape-conventional-position-ik-margin3cm-extended-v1 \
+  --goal-mode position_ik \
+  --collision-margin 0.03 \
+  --rrt-range 0.1 \
+  --rrt-planning-time-seconds 60 \
+  --attempts 3 \
+  --episode-timeout-seconds 240 \
+  --overwrite
+```
+
+For a remaining negative episode, repeat at physical obstacle size and then with a smaller RRT
+extension step. A returned and exactly graded path proves existence; exhausting these finite
+sampling budgets does not prove non-existence:
+
+```bash
+./.venv/bin/python scripts/run_conventional_u_shape_planner.py \
+  --output-dir artifacts/e10-u-shape-conventional-position-ik-episode003-range3cm-extended-v1 \
+  --goal-mode position_ik \
+  --collision-margin 0.0 \
+  --rrt-range 0.03 \
+  --rrt-planning-time-seconds 60 \
+  --attempts 3 \
+  --episode-timeout-seconds 240 \
+  --episode-start 3 \
+  --episode-limit 1 \
+  --overwrite
+```
+
+The older automatic search/planner builder remains available for provenance and future
+experiments, but it is not the active interactive placement workflow.
+
+Build the outcome-blind ten-episode placement review candidate from the frozen E3 identities:
+
+```bash
+./.venv/bin/python scripts/build_u_shape_fixture.py \
+  --source-fixture configs/eval/e3_candidate_midpath_75cm_frozen_v1/fixture.json \
+  --config-dir configs/eval/e10_u_shape_10ep_review_v1 \
+  --artifact-dir artifacts/e10-u-shape-10ep-review-v1 \
+  --device cuda \
+  --overwrite
+```
+
+The command first replays the locked base policy without an obstacle, then applies the fixed
+width/distance/offset search and the 3 cm start/goal/witness gates. It writes each completed
+nominal rollout immediately under `artifacts/e10-u-shape-10ep-review-v1/nominal` so an expensive
+precondition is available for diagnosis if placement fails. A failed episode writes its complete
+candidate audit under `artifacts/e10-u-shape-10ep-review-v1/rejections` and exits instead of
+creating a shortened fixture. The literal v1 search is currently infeasible at episode 000: all
+294 primary-plus-fallback candidates violate both endpoint whole-arm clearance gates, so the ten
+review Reruns must not be claimed or promoted until the placement search is revised and rerun.
+
+For a one-episode implementation smoke, use `--episode-limit 1`; this is diagnostic only and must
+not be promoted as a review fixture.
+
 Render the first P1 U-shaped obstacle in selected output episode 004 / dataset episode 1010. This
 is a short geometry and policy-point-cloud smoke, not a method-performance run:
 
