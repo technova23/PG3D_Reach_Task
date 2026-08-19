@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import TypedDict
 
@@ -166,10 +167,20 @@ class SimpleDP3(BasePolicy):
             if num_inference_steps is not None
             else self.noise_scheduler.config.num_train_timesteps
         )
+        # DDIM remains deterministic after the initial x_T draw unless eta is
+        # explicitly raised for an inference experiment.
+        self.ddim_eta = 0.0
 
     def set_normalizer(self, normalizer: LinearNormalizer) -> None:
         """Replace fitted normalization statistics without rebuilding the policy."""
         self.normalizer = copy.deepcopy(normalizer)
+
+    def set_ddim_eta(self, eta: float) -> None:
+        """Set DDIM reverse-process stochasticity for ordinary policy sampling."""
+        value = float(eta)
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("DDIM eta must be finite and in [0, 1]")
+        self.ddim_eta = value
 
     def set_scheduler(
         self,
@@ -230,7 +241,15 @@ class SimpleDP3(BasePolicy):
                 timestep=timestep,
                 global_cond=global_cond,
             )
-            trajectory = self.noise_scheduler.step(model_output, timestep, trajectory).prev_sample
+            step_kwargs: dict[str, object] = {"generator": generator}
+            if isinstance(self.noise_scheduler, DDIMScheduler):
+                step_kwargs["eta"] = self.ddim_eta
+            trajectory = self.noise_scheduler.step(
+                model_output,
+                timestep,
+                trajectory,
+                **step_kwargs,
+            ).prev_sample
         trajectory[condition_mask] = condition_data[condition_mask]
         return trajectory
 

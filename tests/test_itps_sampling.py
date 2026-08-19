@@ -141,6 +141,7 @@ def test_itps_uses_isolated_ddim_scheduler() -> None:
 
 def test_itps_is_reproducible_and_matches_one_step_ddim() -> None:
     policy = _tiny_policy()
+    policy.set_ddim_eta(1.0)
     policy.model = _RecordingZeroModel()
     condition = torch.zeros((1, 2, 7))
     mask = torch.zeros_like(condition, dtype=torch.bool)
@@ -174,6 +175,42 @@ def test_itps_is_reproducible_and_matches_one_step_ddim() -> None:
 
     torch.testing.assert_close(actual, repeated)
     torch.testing.assert_close(actual, expected)
+
+
+def test_ordinary_ddim_eta_one_is_reproducible_and_changes_sample() -> None:
+    policy = _tiny_policy()
+    policy.model = _RecordingZeroModel()
+    condition = torch.zeros((1, 2, 7))
+    mask = torch.zeros_like(condition, dtype=torch.bool)
+
+    policy.set_ddim_eta(0.0)
+    eta_zero = policy.conditional_sample(
+        condition,
+        mask,
+        generator=torch.Generator().manual_seed(23),
+    )
+    policy.set_ddim_eta(1.0)
+    eta_one = policy.conditional_sample(
+        condition,
+        mask,
+        generator=torch.Generator().manual_seed(23),
+    )
+    repeated = policy.conditional_sample(
+        condition,
+        mask,
+        generator=torch.Generator().manual_seed(23),
+    )
+
+    torch.testing.assert_close(eta_one, repeated)
+    assert not torch.equal(eta_zero, eta_one)
+
+
+def test_ddim_eta_validation() -> None:
+    policy = _tiny_policy()
+
+    for value in (-0.1, 1.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="DDIM eta"):
+            policy.set_ddim_eta(value)
 
 
 def test_predict_action_itps_returns_standard_slice(monkeypatch: pytest.MonkeyPatch) -> None:

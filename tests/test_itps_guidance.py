@@ -385,6 +385,7 @@ def test_itps_robot_replan_diagnostics_capture_cloud_and_worst_point() -> None:
 
 def test_itps_cli_defaults_and_validation() -> None:
     args = parse_eval_args(_base_args())
+    assert args.ddim_eta == 0.0
     assert args.itps_guide_ratio == 60.0
     assert args.itps_mcmc_steps == 4
     assert args.itps_energy == "smooth"
@@ -398,6 +399,10 @@ def test_itps_cli_defaults_and_validation() -> None:
 
     with pytest.raises(ValueError, match="itps-guide-ratio"):
         parse_eval_args([*_base_args(), "--itps-guide-ratio", "-1"])
+    selected = parse_eval_args([*_base_args(), "--ddim-eta", "1"])
+    assert selected.ddim_eta == 1.0
+    with pytest.raises(ValueError, match="ddim-eta"):
+        parse_eval_args([*_base_args(), "--ddim-eta", "1.1"])
     robot = parse_eval_args([*_base_args(), "--methods", "itps", "--constraint-target", "robot"])
     assert robot.constraint_target == "robot"
     assert robot.geometry_mode == "fast"

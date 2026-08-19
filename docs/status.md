@@ -307,6 +307,9 @@ episodes 002 and 005 remain invalid-start diagnostics, and episode 003 remains a
 diagnostic. The predeclared primary stratum is the seven contact-free-start episodes with found
 position-only witnesses: 000, 001, 004, 006, 007, 008, and 009. The immediate experiment is
 whole-body ITPS versus exact world-model reranking with planning horizon 3 and execution horizon 1.
+Ordinary DP3 candidate sampling for this comparison now uses explicit DDIM eta `1.0` to add
+reverse-process variance; ITPS retains its isolated released eta `0.0` transition, so the setting
+does not silently alter the baseline.
 The long-wall, fork, chicane, hook/C, elbow-trap, and doorway/shelf families are deferred for later
 implementation and finalization. The revised scope and reporting boundaries are recorded in
 `docs/explainations/nonconvex_scene_experiment_plan.md`.

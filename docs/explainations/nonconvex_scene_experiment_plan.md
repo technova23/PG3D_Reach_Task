@@ -93,7 +93,8 @@ constraint program, and seed.
 - MCMC inner steps: 4;
 - energy: smooth barrier;
 - barrier temperature: `0.01`;
-- collision-surface points: 1024; and
+- collision-surface points: 1024;
+- isolated DDIM eta: `0.0`, preserving the released ITPS transition; and
 - execution horizon: one chunk.
 
 ITPS does not acquire a three-chunk world-model horizon merely because the evaluator is invoked
@@ -106,12 +107,14 @@ its ordinary action horizon.
 - exact robot geometry mode;
 - planning horizon: 3 chunks;
 - execution horizon: 1 chunk;
-- candidate fallback schedule: `16, 32, 64`; and
+- candidate fallback schedule: `16, 32, 64`;
+- DDIM eta: `1.0` for additional reverse-process sampling variance; and
 - receding-horizon replanning after each executed chunk.
 
 The current policy input and continuation behavior should be reported exactly as implemented.
-Obstacle-free policy conditioning, later-depth branching, DDIM-eta changes, and alternate candidate
-diversity mechanisms are separate ablations and must not be silently bundled into this comparison.
+Obstacle-free policy conditioning, later-depth branching, eta values other than the locked `1.0`,
+and alternate candidate-diversity mechanisms are separate ablations and must not be silently
+bundled into this comparison.
 
 ## 5. Execution and artifact rules
 

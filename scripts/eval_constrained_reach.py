@@ -145,6 +145,7 @@ class ITPSGuidanceConfig:
     def to_json(self) -> dict[str, float | int | str]:
         return {
             "scheduler": "ddim",
+            "eta": 0.0,
             "guide_ratio": self.guide_ratio,
             "mcmc_steps": self.mcmc_steps,
             "energy": self.energy,
@@ -453,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
         device=device,
         prefer_ema=args.checkpoint_model == "ema",
     )
+    policy.set_ddim_eta(args.ddim_eta)
     action_mode = _action_mode(str(metadata.get("action_mode", "abs_joint")))
     crop_config = crop_config_from_metadata(metadata)
     if args.embody_obstacle:
@@ -821,6 +823,7 @@ def main(argv: list[str] | None = None) -> int:
         "execution_horizon_chunks": args.execution_horizon_chunks,
         "geometry_mode": args.geometry_mode,
         "k_schedule": list(args.k_schedule),
+        "ddim_eta": float(args.ddim_eta),
         "itps": itps_config.to_json(),
         "constraint_source": _constraint_source_summary(args),
         "placement_selection": {
@@ -999,6 +1002,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--geometry-mode", choices=["fast", "exact"], default="fast")
     parser.add_argument("--k-schedule", type=int, nargs="+", default=[16, 32, 64])
     parser.add_argument("--policy-batch-size", type=int, default=64)
+    parser.add_argument(
+        "--ddim-eta",
+        type=float,
+        default=0.0,
+        help=(
+            "DDIM reverse-process stochasticity for base/rejection/reranking samples. "
+            "Use 1.0 for the U-scene diversity run. ITPS keeps its isolated eta=0 path."
+        ),
+    )
     parser.add_argument("--goal-thresh", type=float, default=None)
     parser.add_argument(
         "--constraint-placement",
@@ -1438,6 +1450,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--k-schedule values must be positive")
     if args.policy_batch_size <= 0:
         raise ValueError("--policy-batch-size must be positive")
+    if not np.isfinite(args.ddim_eta) or not 0.0 <= args.ddim_eta <= 1.0:
+        raise ValueError("--ddim-eta must be finite and in [0, 1]")
     if args.itps_guide_ratio < 0.0:
         raise ValueError("--itps-guide-ratio must be non-negative")
     if args.itps_mcmc_steps <= 0:
@@ -4725,6 +4739,8 @@ def _method_config(
     }
     if method in {"rejection", "reranking"}:
         config["k_schedule"] = [int(value) for value in args.k_schedule]
+    if method != "itps":
+        config["ddim_eta"] = float(args.ddim_eta)
     if method == "itps":
         config["itps"] = itps_config.to_json()
     return config
@@ -5017,8 +5033,10 @@ def _init_wandb(
                 "planning_horizon_chunks": args.planning_horizon_chunks,
                 "execution_horizon_chunks": args.execution_horizon_chunks,
                 "k_schedule": list(args.k_schedule),
+                "ddim_eta": float(args.ddim_eta),
                 "itps": {
                     "scheduler": "ddim",
+                    "eta": 0.0,
                     "guide_ratio": float(args.itps_guide_ratio),
                     "mcmc_steps": int(args.itps_mcmc_steps),
                     "energy": str(args.itps_energy),

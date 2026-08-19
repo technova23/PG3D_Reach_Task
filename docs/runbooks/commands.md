@@ -612,6 +612,11 @@ the same fixed seeds and the same saved direct-path avoid-region constraints. Co
 planning is a strong reach baseline and is not implemented in this scaffold, so do not over-claim
 reach-only results.
 
+Ordinary base/rejection/reranking sampling exposes DDIM reverse-process stochasticity through
+`--ddim-eta`. The default remains `0.0` for historical and frozen-protocol compatibility. Use
+`--ddim-eta 1.0` for the finalized U-object H3/E1 comparison. This flag does not change ITPS, whose
+released annealed-MCMC sampler keeps an isolated DDIM eta of `0.0`.
+
 Avoidance scoring now separates hard feasibility from soft clearance preference. For minimum
 signed distance `d`, margin `m`, and clearance scale `s`, the primary cost adds
 `s^2 / (s + max(d - m, 0))` to the existing maximum penetration. It is positive for every finite
