@@ -118,7 +118,7 @@ from scripts.rollout_dp3_reach_policy import (
     select_rollout_specs,
 )
 
-EvalMethod = Literal["base", "rejection", "reranking", "itps"]
+EvalMethod = Literal["base", "beam", "rejection", "reranking", "itps"]
 GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
 _CARTON_HALF_EXTENTS = (0.055, 0.08, 0.16)
@@ -295,6 +295,70 @@ class EvalDecisionSummary:
     candidate_feasible: int
     candidate_total: int
     selection_reason: str | None
+
+
+@dataclass
+class BeamNode:
+    """One node in the long-horizon beam frontier.
+
+    The node keeps enough state to expand the next depth and to reconstruct
+    intermediate predictions later for visualization or debugging.
+    """
+
+    depth: int
+    current_entry: Entry
+    obs_window: list[Entry]
+    action_chunks: list[ActionChunk]
+    rollouts: list[ImaginedRollout]
+    candidates: list[CandidateDiagnostics]
+    cumulative_score: float
+    selected_candidate: CandidateDiagnostics | None
+    parent_index: int | None = None
+    branch_index: int | None = None
+
+    @property
+    def last_rollout(self) -> ImaginedRollout | None:
+        """Return the most recent imagined rollout for this beam node."""
+        return self.rollouts[-1] if self.rollouts else None
+
+    @property
+    def action_chunk(self) -> ActionChunk:
+        """Return the final chunk selected for this node."""
+        if self.selected_candidate is not None:
+            return self.selected_candidate.action_chunk
+        if not self.action_chunks:
+            raise RuntimeError("beam node has no selected action chunk")
+        return self.action_chunks[-1]
+
+    def to_rollout(self) -> ImaginedRollout:
+        """Concatenate the node prefix into one rollout for final scoring."""
+        if not self.rollouts:
+            raise RuntimeError("beam node has no rollouts to concatenate")
+        return concatenate_rollouts(
+            self.rollouts,
+            metadata={
+                "beam_depth": int(self.depth),
+                "beam_parent_index": self.parent_index,
+                "beam_branch_index": self.branch_index,
+            },
+        )
+
+    def to_debug_record(self) -> dict[str, Any]:
+        """Serialize the node for optional depth-by-depth inspection."""
+        return {
+            "depth": int(self.depth),
+            "parent_index": self.parent_index,
+            "branch_index": self.branch_index,
+            "cumulative_score": float(self.cumulative_score),
+            "selected_candidate_index": (
+                None if self.selected_candidate is None else int(self.selected_candidate.index)
+            ),
+            "selected_candidate_score": (
+                None if self.selected_candidate is None else float(self.selected_candidate.total_score)
+            ),
+            "action_horizons": [int(chunk.horizon) for chunk in self.action_chunks],
+            "rollout_horizons": [int(rollout.action_chunk.horizon) for rollout in self.rollouts],
+        }
 
 
 class DP3ChunkPolicyAdapter:
@@ -927,7 +991,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        choices=["base", "rejection", "reranking", "itps"],
+        choices=["base", "beam", "rejection", "reranking", "itps"],
         default=["base", "rejection", "reranking"],
     )
     parser.add_argument("--itps-guide-ratio", type=float, default=60.0)
@@ -2232,6 +2296,8 @@ def _select_decision(
     timer: TimingRecorder,
     compute_counts: ComputeOperationCounts,
     itps_config: ITPSGuidanceConfig,
+    beam_width: int = 8,
+    branch_factor: int = 32,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
 ) -> EvalDecisionSummary:
@@ -2261,6 +2327,41 @@ def _select_decision(
             candidate_feasible=0,
             candidate_total=0,
             selection_reason="itps",
+        )
+    if method == "beam":
+        if world_model is None or provider is None:
+            raise RuntimeError("beam search requires a world model and ghost provider")
+        if match_current_robot_points:
+            provider.set_robot_point_budget_from_mask(
+                np.asarray(current_entry["robot_mask"], dtype=bool),
+                point_valid_mask=np.asarray(current_entry["point_valid_mask"], dtype=bool),
+            )
+        with timer.time("candidate_scoring", method=method, geometry_mode=geometry_mode):
+            result = _select_beam_search(
+                method=method,
+                adapter=adapter,
+                world_model=world_model,
+                provider=provider,
+                current_entry=current_entry,
+                obs_window=obs_window,
+                scene=scene,
+                constraints=constraints,
+                crop_config=crop_config,
+                goal_thresh=goal_thresh,
+                planning_horizon_chunks=planning_horizon_chunks,
+                geometry_mode=geometry_mode,
+                beam_width=beam_width,
+                branch_factor=branch_factor,
+                rng=rng,
+                timer=timer,
+            )
+        feasible = sum(1 for candidate in result.candidates if candidate.feasible)
+        return EvalDecisionSummary(
+            selected_chunk=result.action_chunk,
+            result=result,
+            candidate_feasible=feasible,
+            candidate_total=len(result.candidates),
+            selection_reason=result.selection_reason,
         )
     if world_model is None or provider is None:
         raise RuntimeError("controller methods require a world model and ghost provider")
@@ -2314,6 +2415,279 @@ def _select_decision(
     )
 
 
+def _select_beam_search(
+    *,
+    method: EvalMethod,
+    adapter: DP3ChunkPolicyAdapter,
+    world_model: GeometricWorldModel,
+    provider: ManiSkillGhostPandaGeometryProvider,
+    current_entry: Entry,
+    obs_window: list[Entry],
+    scene: Any,
+    constraints: list[Any],
+    crop_config: PointCloudCropConfig,
+    goal_thresh: float,
+    planning_horizon_chunks: int,
+    geometry_mode: GeometryMode,
+    beam_width: int,
+    branch_factor: int,
+    rng: np.random.Generator,
+    timer: TimingRecorder,
+) -> ControllerResult:
+    if beam_width <= 0:
+        raise ValueError("beam_width must be positive")
+    if branch_factor <= 0:
+        raise ValueError("branch_factor must be positive")
+    if world_model is None or provider is None:
+        raise RuntimeError("beam search requires a world model and ghost provider")
+
+    # Seed the frontier with one root node that represents the current state.
+    frontier: list[BeamNode] = [
+        BeamNode(
+            depth=0,
+            current_entry=_copy_entry(current_entry),
+            obs_window=_copy_window(obs_window),
+            action_chunks=[],
+            rollouts=[],
+            candidates=[],
+            cumulative_score=0.0,
+            selected_candidate=None,
+            parent_index=None,
+            branch_index=None,
+        )
+    ]
+
+    for depth in range(planning_horizon_chunks):
+        # Expand every frontier node, then prune back to the requested beam width.
+        expanded = _build_beam_candidates(
+            adapter=adapter,
+            world_model=world_model,
+            provider=provider,
+            current_entry=current_entry,
+            obs_window=obs_window,
+            scene=scene,
+            constraints=constraints,
+            crop_config=crop_config,
+            goal_thresh=goal_thresh,
+            planning_horizon_chunks=planning_horizon_chunks,
+            geometry_mode=geometry_mode,
+            beam_width=beam_width,
+            branch_factor=branch_factor,
+            rng=rng,
+            timer=timer,
+            frontier=frontier,
+            depth=depth,
+            method=method,
+            directional_sign=0,
+            directional_weight=1.0,
+        )
+        if not expanded:
+            break
+        frontier = sorted(expanded, key=lambda node: node.cumulative_score)[:beam_width]
+
+    if not frontier:
+        raise RuntimeError("beam search produced no candidate action chunks")
+
+    final_candidates = [
+        _beam_node_to_candidate(
+            node,
+            index=idx,
+            attempted_k=branch_factor,
+            scene=scene,
+            constraints=constraints,
+        )
+        for idx, node in enumerate(frontier)
+    ]
+    feasible_candidates = [candidate for candidate in final_candidates if candidate.feasible]
+    if feasible_candidates:
+        final_candidate = min(feasible_candidates, key=lambda candidate: candidate.total_score)
+        selection_reason = "beam_best_feasible"
+    else:
+        final_candidate = min(
+            final_candidates,
+            key=lambda candidate: (candidate.constraint_penalty, candidate.total_score),
+        )
+        selection_reason = "beam_least_bad_fallback"
+    final_candidate.selection_reason = selection_reason
+    return ControllerResult(
+        selected=final_candidate,
+        candidates=final_candidates,
+        attempted_k_values=[branch_factor for _ in range(max(planning_horizon_chunks, 1))],
+        selection_reason=selection_reason,
+    )
+
+def _build_beam_candidates(
+    *,
+    adapter: DP3ChunkPolicyAdapter,
+    world_model: GeometricWorldModel,
+    provider: ManiSkillGhostPandaGeometryProvider,
+    current_entry: Entry,
+    obs_window: list[Entry],
+    scene: Any,
+    constraints: list[Any],
+    crop_config: PointCloudCropConfig,
+    goal_thresh: float,
+    planning_horizon_chunks: int,
+    geometry_mode: GeometryMode,
+    beam_width: int,
+    branch_factor: int,
+    rng: np.random.Generator,
+    timer: TimingRecorder,
+    frontier: list[BeamNode],
+    depth: int,
+    method: EvalMethod,
+    directional_sign: int = 0,
+    directional_weight: float = 1.0,
+) -> list[BeamNode]:
+    del beam_width, current_entry, obs_window, planning_horizon_chunks, method
+    if branch_factor <= 0:
+        raise ValueError("branch_factor must be positive")
+
+    # Each frontier node expands independently; the returned nodes are already
+    # scored and ready for pruning by the caller.
+    next_frontier: list[BeamNode] = []
+    for parent_index, node in enumerate(frontier):
+        candidate_chunks = adapter.sample_action_chunks(node.obs_window, k=branch_factor, rng=rng)
+        sibling_rollouts: list[ImaginedRollout] = []
+        sibling_chunks: list[ActionChunk] = []
+        sibling_entries: list[Entry] = []
+        sibling_windows: list[list[Entry]] = []
+        for branch_index, next_chunk in enumerate(candidate_chunks):
+            if geometry_mode == "exact":
+                rollout = world_model.imagine(
+                    entry_to_world_model_observation(node.current_entry),
+                    next_chunk,
+                    metadata={
+                        "beam_depth": int(depth),
+                        "beam_branch": int(branch_index),
+                        "beam_parent": int(parent_index),
+                    },
+                )
+                next_entry = node.current_entry
+                next_window = _copy_window(node.obs_window)
+                for step_idx in range(rollout.action_chunk.horizon):
+                    next_entry = world_model_entry_from_rollout_step(
+                        rollout,
+                        step_idx,
+                        previous_entry=next_entry,
+                        crop_config=crop_config,
+                        goal_thresh=goal_thresh,
+                    )
+                    next_window = append_obs_window(
+                        next_window,
+                        next_entry,
+                        n_obs_steps=int(adapter.policy.n_obs_steps),
+                    )
+            else:
+                rollout = _fast_imagine_rollout(
+                    provider=provider,
+                    observation=entry_to_world_model_observation(node.current_entry),
+                    action_chunk=next_chunk,
+                    metadata={
+                        "beam_depth": int(depth),
+                        "beam_branch": int(branch_index),
+                        "beam_parent": int(parent_index),
+                    },
+                    timer=timer,
+                )
+                next_entry = node.current_entry
+                next_window = _copy_window(node.obs_window)
+                # Store the intermediate imagined states so a caller can visualize
+                # depth-by-depth beam predictions after the run.
+                if rollout.action_chunk.horizon > 0:
+                    feedback_start = max(0, rollout.action_chunk.horizon - int(adapter.policy.n_obs_steps))
+                    for step_idx in range(feedback_start, rollout.action_chunk.horizon):
+                        next_entry = _render_feedback_entry(
+                            provider=provider,
+                            rollout=rollout,
+                            step_index=step_idx,
+                            previous_entry=next_entry,
+                            crop_config=crop_config,
+                            goal_thresh=goal_thresh,
+                            timer=timer,
+                        )
+                        next_window = append_obs_window(
+                            next_window,
+                            next_entry,
+                            n_obs_steps=int(adapter.policy.n_obs_steps),
+                        )
+
+            sibling_rollouts.append(rollout)
+            sibling_chunks.append(next_chunk)
+            sibling_entries.append(next_entry)
+            sibling_windows.append(next_window)
+
+        # Compute consensus across the sibling batch before scoring the prefix nodes.
+        sibling_consensus = consensus_deviations(sibling_chunks)
+        for branch_index, (next_chunk, rollout, consensus) in enumerate(
+            zip(sibling_chunks, sibling_rollouts, sibling_consensus, strict=True)
+        ):
+            prefix_node = BeamNode(
+                depth=depth + 1,
+                current_entry=sibling_entries[branch_index],
+                obs_window=sibling_windows[branch_index],
+                action_chunks=[*node.action_chunks, next_chunk],
+                rollouts=[*node.rollouts, rollout],
+                candidates=[*node.candidates],
+                cumulative_score=0.0,
+                selected_candidate=None,
+                parent_index=parent_index,
+                branch_index=branch_index,
+            )
+            prefix_candidate = _beam_node_to_candidate(
+                prefix_node,
+                index=parent_index * branch_factor + branch_index,
+                attempted_k=branch_factor,
+                scene=scene,
+                constraints=constraints,
+                consensus_override=consensus,
+                directional_sign=directional_sign,
+                directional_weight=directional_weight,
+            )
+            # Beam pruning uses the same notion of feasibility and total score as
+            # reranking, but retains ancestry in the node wrapper.
+            next_frontier.append(
+                BeamNode(
+                    depth=depth + 1,
+                    current_entry=sibling_entries[branch_index],
+                    obs_window=sibling_windows[branch_index],
+                    action_chunks=[*node.action_chunks, next_chunk],
+                    rollouts=[*node.rollouts, rollout],
+                    candidates=[*node.candidates, prefix_candidate],
+                    cumulative_score=float(prefix_candidate.total_score),
+                    selected_candidate=prefix_candidate,
+                    parent_index=parent_index,
+                    branch_index=branch_index,
+                )
+            )
+    return next_frontier
+
+
+def _beam_node_to_candidate(
+    node: BeamNode,
+    *,
+    index: int,
+    attempted_k: int,
+    scene: Any,
+    constraints: list[AvoidRegion],
+    consensus_override: float | None = None,
+    directional_sign: int = 0,
+    directional_weight: float = 1.0,
+) -> CandidateDiagnostics:
+    """Score the full beam prefix represented by one frontier node."""
+    rollout = node.to_rollout()
+    consensus = 0.0 if consensus_override is None else float(consensus_override)
+    return _candidate_diagnostics(
+        index=index,
+        attempted_k=attempted_k,
+        action_chunk=rollout.action_chunk,
+        rollout=rollout,
+        scene=scene,
+        constraints=constraints,
+        consensus_deviation=consensus,
+        directional_sign=directional_sign,
+        directional_weight=directional_weight,
+    )
 def _select_multichunk(
     *,
     method: EvalMethod,
@@ -2750,8 +3124,16 @@ def _rerun_replan_record(
                     "index": int(candidate.index),
                     "eef_path": eef_path,
                     "feasible": bool(candidate.feasible),
+                    # Cost/score of the candidate node as scored during beam/reranking.
+                    # For beam search this is the total score of the full prefix represented
+                    # by this node, not just the last action chunk.
                     "score": float(candidate.total_score),
+                    "node_score": float(candidate.total_score),
                     "constraint_penalty": float(candidate.constraint_penalty),
+                    "goal_distance": float(candidate.goal_distance)
+                    if candidate.goal_distance is not None
+                    else None,
+                    "smoothness": float(candidate.smoothness),
                 }
             )
         selected_path = np.concatenate(
@@ -2775,6 +3157,21 @@ def _rerun_replan_record(
         "selection_reason": decision.selection_reason,
         "selected_index": selected_index,
         "selected_eef_path": selected_path,
+        "selected_score": (
+            None
+            if decision.result is None
+            else float(decision.result.selected.total_score)
+        ),
+        "selected_node_score": (
+            None
+            if decision.result is None
+            else float(decision.result.selected.total_score)
+        ),
+        "selected_constraint_penalty": (
+            None
+            if decision.result is None
+            else float(decision.result.selected.constraint_penalty)
+        ),
         "candidates": candidates,
     }
 
