@@ -53,11 +53,11 @@ class WorldModel(Protocol):
 class ScoreWeights:
     """Weights for soft candidate scoring terms."""
 
-    goal_distance: float = 1.0
+    goal_distance: float = 0.0
     constraint: float = 1.0
-    smoothness: float = 0.1
-    consensus: float = 0.01
-    policy_surrogate: float = 1.0
+    smoothness: float = 0.0
+    consensus: float = 0.0
+    policy_surrogate: float = 0.0
 
 
 @dataclass
