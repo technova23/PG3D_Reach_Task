@@ -42,6 +42,14 @@ both `--constraint-target eef` and `--constraint-target robot`. Whole-body mode 
 ManiSkill Panda collision geometry once at startup, excludes fixed link0 from gradient guidance,
 and retains full-robot initial-clearance, contact-termination, and executed safety grading.
 Sketch input remains out of scope.
+Beam search is now integrated directly into the current evaluator as the separate `beam` method,
+ported manually from `c05bae9` without the beam branch's mesh, dependency, lockfile, or smoke-script
+commits. It batches DP3 sampling across repeated frontier observation windows, rolls world-model
+children out sequentially, scores the complete prefix at every depth, and prunes feasible prefixes
+before least-violating infeasible fallbacks. Width and branch factor are configurable (defaults 8
+and 32). Episode metrics retain reranking-comparable final-frontier feasibility while separate beam
+telemetry and decision/Rerun metadata record all expansion counts plus retained paths and ancestry.
+Whole-robot beam guidance requires exact geometry.
 The active DP3 architecture now has one canonical module implementation at
 `pg3d/policies/dp3/modules.py`; two unreferenced legacy copies at the top of `pg3d/policies/`
 were removed before writing line-referenced diffusion-policy documentation.

@@ -125,7 +125,7 @@ from scripts.rollout_dp3_reach_policy import (
     select_rollout_specs,
 )
 
-EvalMethod = Literal["base", "rejection", "reranking", "itps"]
+EvalMethod = Literal["base", "beam", "rejection", "reranking", "itps"]
 GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
 _CARTON_HALF_EXTENTS = (0.055, 0.08, 0.16)
@@ -322,6 +322,120 @@ class EvalDecisionSummary:
     candidate_feasible: int
     candidate_total: int
     selection_reason: str | None
+    beam_trace: BeamSearchTrace | None = None
+
+
+@dataclass
+class BeamNode:
+    """One retained prefix in the long-horizon beam frontier."""
+
+    node_id: str
+    parent_id: str | None
+    depth: int
+    current_entry: Entry
+    obs_window: list[Entry]
+    action_chunks: list[ActionChunk]
+    rollouts: list[ImaginedRollout]
+    candidate: CandidateDiagnostics | None = None
+
+    @property
+    def feasible(self) -> bool:
+        return _beam_candidate(self).feasible
+
+    @property
+    def constraint_penalty(self) -> float:
+        return _beam_candidate(self).constraint_penalty
+
+    @property
+    def full_prefix_score(self) -> float:
+        return _beam_candidate(self).total_score
+
+    def to_rollout(self) -> ImaginedRollout:
+        if not self.rollouts:
+            raise RuntimeError("beam node has no imagined rollouts")
+        return concatenate_rollouts(
+            self.rollouts,
+            metadata={
+                "beam_depth": int(self.depth),
+                "beam_node_id": self.node_id,
+                "beam_parent_id": self.parent_id,
+            },
+        )
+
+
+@dataclass(frozen=True)
+class BeamRetainedNodeTrace:
+    node_id: str
+    parent_id: str | None
+    candidate_index: int
+    feasible: bool
+    score: float
+    constraint_penalty: float
+    eef_path: np.ndarray
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "parent_id": self.parent_id,
+            "candidate_index": int(self.candidate_index),
+            "feasible": bool(self.feasible),
+            "score": float(self.score),
+            "constraint_penalty": float(self.constraint_penalty),
+            "eef_path": self.eef_path,
+        }
+
+
+@dataclass(frozen=True)
+class BeamDepthTrace:
+    depth: int
+    expanded: int
+    feasible: int
+    retained: tuple[BeamRetainedNodeTrace, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "depth": int(self.depth),
+            "expanded": int(self.expanded),
+            "feasible": int(self.feasible),
+            "retained_count": len(self.retained),
+            "retained": [node.to_json() for node in self.retained],
+        }
+
+
+@dataclass(frozen=True)
+class BeamSearchTrace:
+    width: int
+    branch_factor: int
+    depths: tuple[BeamDepthTrace, ...]
+    selected_node_id: str
+    selected_lineage: tuple[str, ...]
+    selected_score: float
+    selected_constraint_penalty: float
+    selected_feasible: bool
+
+    @property
+    def expanded_total(self) -> int:
+        return sum(depth.expanded for depth in self.depths)
+
+    @property
+    def retained_total(self) -> int:
+        return sum(len(depth.retained) for depth in self.depths)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "width": int(self.width),
+            "branch_factor": int(self.branch_factor),
+            "expanded_total": int(self.expanded_total),
+            "retained_total": int(self.retained_total),
+            "depths": [depth.to_json() for depth in self.depths],
+            "selected": {
+                "node_id": self.selected_node_id,
+                "lineage": list(self.selected_lineage),
+                "score": float(self.selected_score),
+                "constraint_penalty": float(self.selected_constraint_penalty),
+                "feasible": bool(self.selected_feasible),
+            },
+        }
 
 
 class DP3ChunkPolicyAdapter:
@@ -675,6 +789,8 @@ def main(argv: list[str] | None = None) -> int:
                         execution_horizon_chunks=args.execution_horizon_chunks,
                         geometry_mode=args.geometry_mode,
                         k_schedule=tuple(args.k_schedule),
+                        beam_width=args.beam_width,
+                        beam_branch_factor=args.beam_branch_factor,
                         gripper_open=args.gripper_open,
                         match_current_robot_points=args.match_current_robot_points,
                         video=write_video,
@@ -824,6 +940,11 @@ def main(argv: list[str] | None = None) -> int:
         "execution_horizon_chunks": args.execution_horizon_chunks,
         "geometry_mode": args.geometry_mode,
         "k_schedule": list(args.k_schedule),
+        "beam": {
+            "width": int(args.beam_width),
+            "branch_factor": int(args.beam_branch_factor),
+            "expansion_formula": "B + (D - 1) * W * B",
+        },
         "ddim_eta": float(args.ddim_eta),
         "itps": itps_config.to_json(),
         "constraint_source": _constraint_source_summary(args),
@@ -965,7 +1086,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        choices=["base", "rejection", "reranking", "itps"],
+        choices=["base", "beam", "rejection", "reranking", "itps"],
         default=["base", "rejection", "reranking"],
     )
     parser.add_argument("--itps-guide-ratio", type=float, default=60.0)
@@ -1002,6 +1123,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--execution-horizon-chunks", type=int, default=1)
     parser.add_argument("--geometry-mode", choices=["fast", "exact"], default="fast")
     parser.add_argument("--k-schedule", type=int, nargs="+", default=[16, 32, 64])
+    parser.add_argument(
+        "--beam-width",
+        type=int,
+        default=8,
+        help="Maximum retained beam prefixes after each planning depth (default: 8).",
+    )
+    parser.add_argument(
+        "--beam-branch-factor",
+        type=int,
+        default=32,
+        help="DP3 continuations sampled per retained beam prefix (default: 32).",
+    )
     parser.add_argument("--policy-batch-size", type=int, default=64)
     parser.add_argument(
         "--ddim-eta",
@@ -1461,6 +1594,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     if not args.k_schedule or any(k <= 0 for k in args.k_schedule):
         raise ValueError("--k-schedule values must be positive")
+    if args.beam_width <= 0:
+        raise ValueError("--beam-width must be positive")
+    if args.beam_branch_factor <= 0:
+        raise ValueError("--beam-branch-factor must be positive")
     if args.policy_batch_size <= 0:
         raise ValueError("--policy-batch-size must be positive")
     if not np.isfinite(args.ddim_eta) or not 0.0 <= args.ddim_eta <= 1.0:
@@ -1532,7 +1669,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         and (not np.isfinite(args.gripper_open) or not 0.0 <= args.gripper_open <= 0.04)
     ):
         raise ValueError("whole-body ITPS requires --gripper-open within [0, 0.04]")
-    guidance_methods = {"rejection", "reranking"}
+    guidance_methods = {"beam", "rejection", "reranking"}
     if (
         args.constraint_target == "robot"
         and args.geometry_mode == "fast"
@@ -1540,7 +1677,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ):
         raise ValueError(
             "--constraint-target robot requires --geometry-mode exact for guidance methods "
-            "(rejection/reranking): fast geometry imagines no robot point cloud, so whole-robot "
+            "(beam/rejection/reranking): fast geometry imagines no robot point cloud, so "
+            "whole-robot "
             "guidance would be a silent no-op. Re-run with --geometry-mode exact, or use "
             "--constraint-target eef, or restrict --methods to base."
         )
@@ -1582,6 +1720,8 @@ def run_eval_episode(
     execution_horizon_chunks: int,
     geometry_mode: GeometryMode,
     k_schedule: tuple[int, ...],
+    beam_width: int = 8,
+    beam_branch_factor: int = 32,
     gripper_open: float,
     match_current_robot_points: bool,
     video: bool,
@@ -1700,6 +1840,9 @@ def run_eval_episode(
     candidate_feasible = 0
     candidate_total = 0
     fallback_count = 0
+    beam_expanded_nodes = 0
+    beam_feasible_nodes = 0
+    beam_retained_nodes = 0
     action_selection_times: list[float] = []
     executed_action_targets: list[np.ndarray] = []
     replan_start_action_indices: list[int] = []
@@ -1748,6 +1891,8 @@ def run_eval_episode(
                         planning_horizon_chunks=planning_horizon_chunks,
                         geometry_mode=geometry_mode,
                         k_schedule=k_schedule,
+                        beam_width=beam_width,
+                        beam_branch_factor=beam_branch_factor,
                         match_current_robot_points=match_current_robot_points,
                         rng=rng,
                         timer=timer,
@@ -1771,8 +1916,15 @@ def run_eval_episode(
             if decision.result is not None:
                 candidate_feasible += decision.candidate_feasible
                 candidate_total += decision.candidate_total
-                if decision.selection_reason == "least_bad_fallback":
+                if decision.selection_reason in {
+                    "least_bad_fallback",
+                    "beam_least_bad_fallback",
+                }:
                     fallback_count += 1
+            if decision.beam_trace is not None:
+                beam_expanded_nodes += decision.beam_trace.expanded_total
+                beam_feasible_nodes += sum(depth.feasible for depth in decision.beam_trace.depths)
+                beam_retained_nodes += decision.beam_trace.retained_total
             _write_decision(
                 decisions_file,
                 method=method,
@@ -1999,6 +2151,14 @@ def run_eval_episode(
         replan_start_action_indices=replan_start_action_indices,
     )
     row.update(compute_counts.to_metric_row(replans=replans))
+    if method == "beam":
+        row.update(
+            {
+                "beam_expanded_nodes": int(beam_expanded_nodes),
+                "beam_feasible_nodes": int(beam_feasible_nodes),
+                "beam_retained_nodes": int(beam_retained_nodes),
+            }
+        )
     row.update(
         {
             "physical_collision": physical_collision,
@@ -2330,6 +2490,8 @@ def _select_decision(
     planning_horizon_chunks: int,
     geometry_mode: GeometryMode,
     k_schedule: tuple[int, ...],
+    beam_width: int = 8,
+    beam_branch_factor: int = 32,
     match_current_robot_points: bool,
     rng: np.random.Generator,
     timer: TimingRecorder,
@@ -2368,6 +2530,43 @@ def _select_decision(
             candidate_feasible=0,
             candidate_total=0,
             selection_reason="itps",
+        )
+    if method == "beam":
+        if world_model is None or provider is None:
+            raise RuntimeError("beam search requires a world model and ghost provider")
+        if match_current_robot_points:
+            provider.set_robot_point_budget_from_mask(
+                np.asarray(current_entry["robot_mask"], dtype=bool),
+                point_valid_mask=np.asarray(current_entry["point_valid_mask"], dtype=bool),
+            )
+        with timer.time("candidate_scoring", method=method, geometry_mode=geometry_mode):
+            result, beam_trace = _select_beam_search(
+                adapter=adapter,
+                world_model=world_model,
+                provider=provider,
+                current_entry=current_entry,
+                obs_window=obs_window,
+                scene=scene,
+                constraints=constraints,
+                crop_config=crop_config,
+                goal_thresh=goal_thresh,
+                planning_horizon_chunks=planning_horizon_chunks,
+                geometry_mode=geometry_mode,
+                beam_width=beam_width,
+                branch_factor=beam_branch_factor,
+                rng=rng,
+                timer=timer,
+                directional_sign=directional_sign,
+                directional_weight=directional_weight,
+            )
+        feasible = sum(1 for candidate in result.candidates if candidate.feasible)
+        return EvalDecisionSummary(
+            selected_chunk=result.action_chunk,
+            result=result,
+            candidate_feasible=feasible,
+            candidate_total=len(result.candidates),
+            selection_reason=result.selection_reason,
+            beam_trace=beam_trace,
         )
     if world_model is None or provider is None:
         raise RuntimeError("controller methods require a world model and ghost provider")
@@ -2418,6 +2617,308 @@ def _select_decision(
         candidate_feasible=feasible,
         candidate_total=len(result.candidates),
         selection_reason=result.selection_reason,
+    )
+
+
+def _select_beam_search(
+    *,
+    adapter: DP3ChunkPolicyAdapter,
+    world_model: GeometricWorldModel,
+    provider: ManiSkillGhostPandaGeometryProvider,
+    current_entry: Entry,
+    obs_window: list[Entry],
+    scene: Any,
+    constraints: list[AvoidRegion],
+    crop_config: PointCloudCropConfig,
+    goal_thresh: float,
+    planning_horizon_chunks: int,
+    geometry_mode: GeometryMode,
+    beam_width: int,
+    branch_factor: int,
+    rng: np.random.Generator,
+    timer: TimingRecorder,
+    directional_sign: int = 0,
+    directional_weight: float = 1.0,
+) -> tuple[ControllerResult, BeamSearchTrace]:
+    """Expand and feasible-first prune a DP3 continuation beam."""
+    if beam_width <= 0:
+        raise ValueError("beam_width must be positive")
+    if branch_factor <= 0:
+        raise ValueError("branch_factor must be positive")
+    if planning_horizon_chunks <= 0:
+        raise ValueError("planning_horizon_chunks must be positive")
+
+    frontier = [
+        BeamNode(
+            node_id="root",
+            parent_id=None,
+            depth=0,
+            current_entry=_copy_entry(current_entry),
+            obs_window=_copy_window(obs_window),
+            action_chunks=[],
+            rollouts=[],
+        )
+    ]
+    depth_traces: list[BeamDepthTrace] = []
+    candidate_index = 0
+    for depth in range(1, planning_horizon_chunks + 1):
+        expanded, candidate_index = _expand_beam_frontier(
+            frontier=frontier,
+            depth=depth,
+            next_candidate_index=candidate_index,
+            adapter=adapter,
+            world_model=world_model,
+            provider=provider,
+            scene=scene,
+            constraints=constraints,
+            crop_config=crop_config,
+            goal_thresh=goal_thresh,
+            geometry_mode=geometry_mode,
+            branch_factor=branch_factor,
+            rng=rng,
+            timer=timer,
+            directional_sign=directional_sign,
+            directional_weight=directional_weight,
+        )
+        if not expanded:
+            raise RuntimeError(f"beam search produced no nodes at depth {depth}")
+        frontier = _prune_beam_nodes(expanded, beam_width=beam_width)
+        depth_traces.append(
+            BeamDepthTrace(
+                depth=depth,
+                expanded=len(expanded),
+                feasible=sum(
+                    1 for node in expanded if node.candidate is not None and node.candidate.feasible
+                ),
+                retained=tuple(_beam_node_trace(node) for node in frontier),
+            )
+        )
+
+    final_candidates = [node.candidate for node in frontier if node.candidate is not None]
+    if not final_candidates:
+        raise RuntimeError("beam search produced no final candidates")
+    feasible = [candidate for candidate in final_candidates if candidate.feasible]
+    if feasible:
+        selected = min(feasible, key=lambda candidate: candidate.total_score)
+        reason = "beam_best_feasible"
+    else:
+        selected = min(
+            final_candidates,
+            key=lambda candidate: (candidate.constraint_penalty, candidate.total_score),
+        )
+        reason = "beam_least_bad_fallback"
+    selected_node = next(
+        node
+        for node in frontier
+        if node.candidate is not None and node.candidate.index == selected.index
+    )
+    parent_by_id = {
+        retained.node_id: retained.parent_id
+        for depth_trace in depth_traces
+        for retained in depth_trace.retained
+    }
+    lineage = [selected_node.node_id]
+    while parent_by_id.get(lineage[-1]) not in {None, "root"}:
+        lineage.append(str(parent_by_id[lineage[-1]]))
+    lineage.reverse()
+    return (
+        _controller_result(
+            selected,
+            final_candidates,
+            [branch_factor] * planning_horizon_chunks,
+            reason,
+        ),
+        BeamSearchTrace(
+            width=beam_width,
+            branch_factor=branch_factor,
+            depths=tuple(depth_traces),
+            selected_node_id=selected_node.node_id,
+            selected_lineage=tuple(lineage),
+            selected_score=selected.total_score,
+            selected_constraint_penalty=selected.constraint_penalty,
+            selected_feasible=selected.feasible,
+        ),
+    )
+
+
+def _expand_beam_frontier(
+    *,
+    frontier: list[BeamNode],
+    depth: int,
+    next_candidate_index: int,
+    adapter: DP3ChunkPolicyAdapter,
+    world_model: GeometricWorldModel,
+    provider: ManiSkillGhostPandaGeometryProvider,
+    scene: Any,
+    constraints: list[AvoidRegion],
+    crop_config: PointCloudCropConfig,
+    goal_thresh: float,
+    geometry_mode: GeometryMode,
+    branch_factor: int,
+    rng: np.random.Generator,
+    timer: TimingRecorder,
+    directional_sign: int,
+    directional_weight: float,
+) -> tuple[list[BeamNode], int]:
+    """Batch policy sampling across all parents, then imagine each child."""
+    parent_indices = [
+        parent_index for parent_index in range(len(frontier)) for _ in range(branch_factor)
+    ]
+    policy_windows = [frontier[parent_index].obs_window for parent_index in parent_indices]
+    chunks = adapter.sample_action_chunks_for_windows(policy_windows, rng=rng)
+    if len(chunks) != len(parent_indices):
+        raise RuntimeError("beam policy sampling returned an unexpected candidate count")
+
+    expanded: list[BeamNode] = []
+    for local_index, (parent_index, chunk) in enumerate(zip(parent_indices, chunks, strict=True)):
+        parent = frontier[parent_index]
+        rollout, next_entry, next_window = _imagine_beam_child(
+            parent=parent,
+            chunk=chunk,
+            depth=depth,
+            branch_index=local_index % branch_factor,
+            world_model=world_model,
+            provider=provider,
+            crop_config=crop_config,
+            goal_thresh=goal_thresh,
+            geometry_mode=geometry_mode,
+            timer=timer,
+        )
+        candidate_index = next_candidate_index + local_index
+        node = BeamNode(
+            node_id=f"d{depth}:n{candidate_index}",
+            parent_id=parent.node_id,
+            depth=depth,
+            current_entry=next_entry,
+            obs_window=next_window,
+            action_chunks=[*parent.action_chunks, chunk],
+            rollouts=[*parent.rollouts, rollout],
+        )
+        expanded.append(node)
+    for parent_index in range(len(frontier)):
+        start = parent_index * branch_factor
+        siblings = expanded[start : start + branch_factor]
+        consensus = consensus_deviations([node.action_chunks[-1] for node in siblings])
+        for node, consensus_deviation in zip(siblings, consensus, strict=True):
+            prefix_rollout = node.to_rollout()
+            node.candidate = _candidate_diagnostics(
+                index=int(node.node_id.rsplit("n", maxsplit=1)[1]),
+                attempted_k=branch_factor,
+                action_chunk=prefix_rollout.action_chunk,
+                rollout=prefix_rollout,
+                scene=scene,
+                constraints=constraints,
+                consensus_deviation=consensus_deviation,
+                directional_sign=directional_sign,
+                directional_weight=directional_weight,
+            )
+    return expanded, next_candidate_index + len(expanded)
+
+
+def _imagine_beam_child(
+    *,
+    parent: BeamNode,
+    chunk: ActionChunk,
+    depth: int,
+    branch_index: int,
+    world_model: GeometricWorldModel,
+    provider: ManiSkillGhostPandaGeometryProvider,
+    crop_config: PointCloudCropConfig,
+    goal_thresh: float,
+    geometry_mode: GeometryMode,
+    timer: TimingRecorder,
+) -> tuple[ImaginedRollout, Entry, list[Entry]]:
+    metadata = {
+        "beam_depth": int(depth),
+        "beam_branch": int(branch_index),
+        "beam_parent_id": parent.node_id,
+    }
+    if geometry_mode == "exact":
+        rollout = world_model.imagine(
+            entry_to_world_model_observation(parent.current_entry),
+            chunk,
+            metadata=metadata,
+        )
+        next_entry = parent.current_entry
+        next_window = _copy_window(parent.obs_window)
+        for step_index in range(rollout.action_chunk.horizon):
+            next_entry = world_model_entry_from_rollout_step(
+                rollout,
+                step_index,
+                previous_entry=next_entry,
+                crop_config=crop_config,
+                goal_thresh=goal_thresh,
+            )
+            next_window = append_obs_window(
+                next_window,
+                next_entry,
+                n_obs_steps=len(parent.obs_window),
+            )
+        return rollout, next_entry, next_window
+
+    rollout = _fast_imagine_rollout(
+        provider=provider,
+        observation=entry_to_world_model_observation(parent.current_entry),
+        action_chunk=chunk,
+        metadata=metadata,
+        timer=timer,
+    )
+    next_entry = parent.current_entry
+    next_window = _copy_window(parent.obs_window)
+    feedback_start = max(0, rollout.action_chunk.horizon - len(parent.obs_window))
+    for step_index in range(feedback_start, rollout.action_chunk.horizon):
+        next_entry = _render_feedback_entry(
+            provider=provider,
+            rollout=rollout,
+            step_index=step_index,
+            previous_entry=next_entry,
+            crop_config=crop_config,
+            goal_thresh=goal_thresh,
+            timer=timer,
+        )
+        next_window = append_obs_window(
+            next_window,
+            next_entry,
+            n_obs_steps=len(parent.obs_window),
+        )
+    return rollout, next_entry, next_window
+
+
+def _prune_beam_nodes(nodes: list[BeamNode], *, beam_width: int) -> list[BeamNode]:
+    """Retain feasible prefixes first, then least-violating infeasible prefixes."""
+    if beam_width <= 0:
+        raise ValueError("beam_width must be positive")
+    scored = [(node, node.candidate) for node in nodes if node.candidate is not None]
+    feasible = [node for node, candidate in scored if candidate.feasible]
+    feasible.sort(key=lambda node: _beam_candidate(node).total_score)
+    infeasible = [node for node, candidate in scored if not candidate.feasible]
+    infeasible.sort(
+        key=lambda node: (
+            _beam_candidate(node).constraint_penalty,
+            _beam_candidate(node).total_score,
+        )
+    )
+    return [*feasible, *infeasible][:beam_width]
+
+
+def _beam_candidate(node: BeamNode) -> CandidateDiagnostics:
+    if node.candidate is None:
+        raise RuntimeError("beam node has no candidate diagnostics")
+    return node.candidate
+
+
+def _beam_node_trace(node: BeamNode) -> BeamRetainedNodeTrace:
+    candidate = node.candidate
+    if candidate is None:
+        raise RuntimeError("retained beam node has no candidate diagnostics")
+    return BeamRetainedNodeTrace(
+        node_id=node.node_id,
+        parent_id=node.parent_id,
+        candidate_index=candidate.index,
+        feasible=candidate.feasible,
+        score=candidate.total_score,
+        constraint_penalty=candidate.constraint_penalty,
+        eef_path=np.asarray(candidate.rollout.eef_path, dtype=np.float32).copy(),
     )
 
 
@@ -2880,6 +3381,8 @@ def _write_decision(
     }
     if method == "itps":
         row["itps"] = dict(decision.selected_chunk.metadata)
+    if decision.beam_trace is not None:
+        row["beam"] = decision.beam_trace.to_json()
     if result is not None:
         scores = [candidate.total_score for candidate in result.candidates]
         row.update(
@@ -2954,6 +3457,8 @@ def _rerun_replan_record(
         "selected_eef_path": selected_path,
         "candidates": candidates,
     }
+    if decision.beam_trace is not None:
+        record["beam"] = decision.beam_trace.to_json()
     if constraint_target == "robot" and collision_model is not None:
         record.update(
             _itps_robot_replan_diagnostics(
@@ -4778,6 +5283,14 @@ def _method_config(
     }
     if method in {"rejection", "reranking"}:
         config["k_schedule"] = [int(value) for value in args.k_schedule]
+    if method == "beam":
+        config.update(
+            {
+                "beam_width": int(args.beam_width),
+                "beam_branch_factor": int(args.beam_branch_factor),
+                "expansion_formula": "B + (D - 1) * W * B",
+            }
+        )
     if method != "itps":
         config["ddim_eta"] = float(args.ddim_eta)
     if method == "itps":

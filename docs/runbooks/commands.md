@@ -1800,6 +1800,36 @@ clouds when a future imagined state must be fed back into DP3 for multi-chunk pl
 `--geometry-mode exact` on a 1-episode spot check when validating that the fast path agrees with
 the original full-render path.
 
+Beam search is available as a separate evaluator method. The root expands `B` candidates and each
+later depth expands `W * B`, so the exact number of scored nodes per replan is
+`B + (D - 1) * W * B`, where `D` is `--planning-horizon-chunks`, `W` is `--beam-width`, and `B` is
+`--beam-branch-factor`. The defaults (`W=8`, `B=32`) are intended for experiments, not smoke
+validation. A lightweight one-episode command is:
+
+```bash
+uv run python scripts/eval_constrained_reach.py \
+  --dataset "$VAL_DATASET" \
+  --checkpoint-dir "$CKPTS" \
+  --methods beam \
+  --source dataset \
+  --episodes 1 \
+  --device cuda \
+  --planning-horizon-chunks 2 \
+  --execution-horizon-chunks 1 \
+  --beam-width 2 \
+  --beam-branch-factor 4 \
+  --geometry-mode fast \
+  --ddim-eta 0 \
+  --profile \
+  --output-dir artifacts/constrained-reach-beam-smoke \
+  --allow-failure
+```
+
+Beam returns the selected concatenated planning prefix, but the evaluator executes only the first
+configured execution chunk before observing the live environment and replanning. Decision and
+Rerun metadata store retained frontier paths and ancestry at every depth, not every pruned path.
+For `--constraint-target robot`, beam requires `--geometry-mode exact`, just like reranking.
+
 Exact-vs-fast spot check:
 
 ```bash

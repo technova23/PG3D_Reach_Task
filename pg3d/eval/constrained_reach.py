@@ -25,7 +25,7 @@ from pg3d.constraints.core import mean_squared_norm
 from pg3d.utils.serialization import jsonable
 from pg3d.world_model import ActionChunk, ImaginedRollout
 
-EvalMethod = Literal["base", "rejection", "reranking", "itps"]
+EvalMethod = Literal["base", "beam", "rejection", "reranking", "itps"]
 ArtifactSelection = Literal["periodic", "random", "all"]
 SUCCESS_RATE_METRICS: tuple[tuple[str, str], ...] = (
     ("reach_success", "Reach"),
@@ -1002,6 +1002,9 @@ def summarize_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "peak_gpu_memory_delta_bytes",
             "smoothness",
             "candidate_feasibility_fraction",
+            "beam_expanded_nodes",
+            "beam_feasible_nodes",
+            "beam_retained_nodes",
         ]:
             method_summary.update(_mean_std(key, method_rows))
         summary[method] = method_summary

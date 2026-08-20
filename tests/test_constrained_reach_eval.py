@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 
+from pg3d.composition import CandidateDiagnostics
 from pg3d.constraints import AvoidRegion, BoxRegion, CylinderRegion
 from pg3d.envs.maniskill_adapter.dataset import PointCloudCropConfig
 from pg3d.eval import (
@@ -58,8 +60,10 @@ from scripts.build_nominal_path_constraints import (
     parse_args as parse_builder_args,
 )
 from scripts.eval_constrained_reach import (
+    BeamNode,
     ComputeOperationCounts,
     DP3ChunkPolicyAdapter,
+    EvalDecisionSummary,
     ITPSGuidanceConfig,
     _annotate_episode_video_frames,
     _artifact_file_record,
@@ -80,19 +84,24 @@ from scripts.eval_constrained_reach import (
     _finalize_constraints,
     _ground_embodied_region,
     _local_path_points_xy,
+    _method_config,
     _obs_windows_to_torch,
     _obstacle_contact_source,
     _point_at_arc_fraction_xy,
     _policy_obstacle_point_count,
+    _prune_beam_nodes,
     _read_episode_indices_file,
+    _rerun_replan_record,
     _resolve_grounded_embodied_obstacle_height,
     _robot_obstacle_contact_pairs,
     _seed_torch,
+    _select_beam_search,
     _select_decision,
     _termination_reason,
     _validate_embodied_obstacle_geometry,
     _validate_precomputed_initial_clearance,
     _write_artifact_manifest,
+    _write_decision,
     validate_artifact_manifest,
 )
 from scripts.eval_constrained_reach import (
@@ -2334,6 +2343,204 @@ def test_fast_multichunk_renders_only_feedback_states() -> None:
     assert provider.robot_cloud_calls == 6
 
 
+def test_beam_cli_defaults_and_method_configuration(tmp_path: Path) -> None:
+    common = [
+        "--checkpoint",
+        str(tmp_path / "policy.pt"),
+        "--dataset",
+        str(tmp_path / "dataset.zarr"),
+        "--output-dir",
+        str(tmp_path / "eval"),
+        "--methods",
+        "beam",
+        "--planning-horizon-chunks",
+        "3",
+        "--ddim-eta",
+        "0.25",
+    ]
+    args = parse_eval_args(common)
+
+    assert args.beam_width == 8
+    assert args.beam_branch_factor == 32
+    config = _method_config(args, method="beam", itps_config=ITPSGuidanceConfig())
+    assert config["planning_horizon_chunks"] == 3
+    assert config["ddim_eta"] == pytest.approx(0.25)
+    assert config["beam_width"] == 8
+    assert config["beam_branch_factor"] == 32
+    assert config["expansion_formula"] == "B + (D - 1) * W * B"
+    assert json.loads(json.dumps(config))["beam_width"] == 8
+
+    for flag in ("--beam-width", "--beam-branch-factor"):
+        with pytest.raises(ValueError, match=flag):
+            parse_eval_args([*common, flag, "0"])
+
+
+def test_whole_robot_beam_rejects_fast_geometry(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="geometry-mode exact"):
+        parse_eval_args(
+            [
+                "--checkpoint",
+                str(tmp_path / "policy.pt"),
+                "--dataset",
+                str(tmp_path / "dataset.zarr"),
+                "--output-dir",
+                str(tmp_path / "eval"),
+                "--methods",
+                "beam",
+                "--constraint-target",
+                "robot",
+                "--geometry-mode",
+                "fast",
+            ]
+        )
+
+
+def test_beam_pruning_is_feasible_first_and_enforces_width() -> None:
+    nodes = [
+        _beam_node_for_pruning("infeasible-low", feasible=False, penalty=0.1, score=0.1),
+        _beam_node_for_pruning("feasible-high", feasible=True, penalty=2.0, score=2.0),
+        _beam_node_for_pruning("feasible-low", feasible=True, penalty=1.0, score=1.0),
+        _beam_node_for_pruning("infeasible-high", feasible=False, penalty=0.2, score=0.0),
+    ]
+
+    retained = _prune_beam_nodes(nodes, beam_width=3)
+
+    assert [node.node_id for node in retained] == [
+        "feasible-low",
+        "feasible-high",
+        "infeasible-low",
+    ]
+
+
+@pytest.mark.parametrize("geometry_mode", ["exact", "fast"])
+def test_beam_expansion_uses_imagined_parent_windows_and_records_ancestry(
+    geometry_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directional_signs: list[int] = []
+
+    def _directional(
+        _rollout: ImaginedRollout,
+        _target: np.ndarray,
+        *,
+        sign: int,
+    ) -> float:
+        directional_signs.append(sign)
+        return 0.0
+
+    monkeypatch.setattr("scripts.eval_constrained_reach.directional_preference", _directional)
+    adapter = _FakeBeamAdapter()
+    provider = _FakeFastProvider()
+    result, trace = _select_beam_search(
+        adapter=adapter,  # type: ignore[arg-type]
+        world_model=_FakeExactWorldModel(),  # type: ignore[arg-type]
+        provider=provider,  # type: ignore[arg-type]
+        current_entry=_entry(),
+        obs_window=_window(),
+        scene=scene_context_for_constraints(
+            target_position=[1.0, 0.0, 0.2],
+            constraints=[],
+        ),
+        constraints=[],
+        crop_config=PointCloudCropConfig(
+            bounds=np.asarray([[-1, 2], [-1, 1], [0, 1]], dtype=np.float32),
+            num_points=4,
+        ),
+        goal_thresh=0.01,
+        planning_horizon_chunks=2,
+        geometry_mode=geometry_mode,  # type: ignore[arg-type]
+        beam_width=2,
+        branch_factor=3,
+        rng=np.random.default_rng(7),
+        timer=TimingRecorder(enabled=False),
+        directional_sign=1,
+        directional_weight=2.0,
+    )
+
+    assert trace.expanded_total == 3 + 2 * 3
+    assert [depth.expanded for depth in trace.depths] == [3, 6]
+    assert all(len(depth.retained) <= 2 for depth in trace.depths)
+    assert [depth["retained_count"] for depth in trace.to_json()["depths"]] == [2, 2]
+    assert len(result.candidates) == 2
+    assert result.action_chunk.horizon == 4
+    assert result.action_chunk.actions[:2].shape == (2, 7)
+    assert directional_signs == [1] * trace.expanded_total
+    assert adapter.window_batches == [3, 6]
+    assert all(value != 0.0 for value in adapter.observed_parent_q[1])
+    assert trace.selected_lineage[-1] == trace.selected_node_id
+    assert len(trace.selected_lineage) == 2
+    selected_parent = next(
+        node for node in trace.depths[0].retained if node.node_id == trace.selected_lineage[0]
+    )
+    np.testing.assert_allclose(
+        result.action_chunk.actions[:2, 0],
+        selected_parent.eef_path[:, 0],
+    )
+
+    decision = EvalDecisionSummary(
+        selected_chunk=result.action_chunk,
+        result=result,
+        candidate_feasible=sum(candidate.feasible for candidate in result.candidates),
+        candidate_total=len(result.candidates),
+        selection_reason=result.selection_reason,
+        beam_trace=trace,
+    )
+    decisions_file = io.StringIO()
+    _write_decision(
+        decisions_file,
+        method="beam",
+        spec=RolloutSpec(output_index=0, seed=7, source="fresh"),
+        replan_index=0,
+        step=0,
+        decision=decision,
+    )
+    decision_json = json.loads(decisions_file.getvalue())
+    rerun_json = json.loads(
+        json.dumps(
+            _rerun_replan_record(
+                decision,
+                provider=provider,  # type: ignore[arg-type]
+                current_entry=_entry(),
+                constraints=[],
+                constraint_target="eef",
+                collision_model=None,
+                step=0,
+                replan_index=0,
+                timer=TimingRecorder(enabled=False),
+            ),
+            default=lambda value: value.tolist() if isinstance(value, np.ndarray) else value,
+        )
+    )
+    assert decision_json["beam"]["selected"]["lineage"] == list(trace.selected_lineage)
+    assert rerun_json["beam"] == decision_json["beam"]
+    assert decision_json["candidate_total"] == len(trace.depths[-1].retained)
+
+
+def test_beam_is_deterministic_for_fixed_rng_seed() -> None:
+    selected_actions = []
+    for _ in range(2):
+        result, _trace = _select_beam_search(
+            adapter=_FakeBeamAdapter(),  # type: ignore[arg-type]
+            world_model=_FakeExactWorldModel(),  # type: ignore[arg-type]
+            provider=_FakeFastProvider(),  # type: ignore[arg-type]
+            current_entry=_entry(),
+            obs_window=_window(),
+            scene=scene_context_for_constraints(target_position=[1.0, 0.0, 0.2], constraints=[]),
+            constraints=[],
+            crop_config=PointCloudCropConfig(num_points=4),
+            goal_thresh=0.01,
+            planning_horizon_chunks=2,
+            geometry_mode="exact",
+            beam_width=2,
+            branch_factor=2,
+            rng=np.random.default_rng(19),
+            timer=TimingRecorder(enabled=False),
+        )
+        selected_actions.append(result.action_chunk.actions)
+
+    np.testing.assert_array_equal(selected_actions[0], selected_actions[1])
+
+
 def test_exact_single_chunk_selection_uses_supported_controller_arguments() -> None:
     policy = _FakeDP3Policy(n_action_steps=2, n_obs_steps=2)
     adapter = DP3ChunkPolicyAdapter(
@@ -2525,3 +2732,79 @@ class _FakeFastProvider:
     def robot_point_cloud(self, q: np.ndarray) -> np.ndarray:
         self.robot_cloud_calls += 1
         return np.asarray([[q[0], 0.0, 0.2]], dtype=np.float32)
+
+
+class _FakeBeamAdapter:
+    def __init__(self) -> None:
+        self.policy = SimpleNamespace(n_obs_steps=2)
+        self.window_batches: list[int] = []
+        self.observed_parent_q: list[list[float]] = []
+
+    def sample_action_chunks_for_windows(
+        self,
+        policy_inputs: list[list[dict[str, object]]],
+        *,
+        rng: np.random.Generator,
+    ) -> list[ActionChunk]:
+        self.window_batches.append(len(policy_inputs))
+        self.observed_parent_q.append(
+            [float(np.asarray(window[-1]["agent_pos"])[0]) for window in policy_inputs]
+        )
+        values = rng.uniform(0.05, 0.95, size=len(policy_inputs))
+        return [
+            ActionChunk(
+                actions=np.full((2, 7), value, dtype=np.float32),
+                action_mode="abs_joint",
+                dt=1.0,
+            )
+            for value in values
+        ]
+
+
+class _FakeExactWorldModel:
+    def imagine(
+        self,
+        _observation: object,
+        action_chunk: ActionChunk,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> ImaginedRollout:
+        rollout = _rollout(action_chunk.actions.tolist())
+        rollout.eef_path[:, 0] = action_chunk.actions[:, 0]
+        rollout.metadata.update(metadata or {})
+        return rollout
+
+
+def _beam_node_for_pruning(
+    node_id: str,
+    *,
+    feasible: bool,
+    penalty: float,
+    score: float,
+) -> BeamNode:
+    rollout = _rollout([[0.1] * 7])
+    candidate = CandidateDiagnostics(
+        index=0,
+        attempted_k=1,
+        action_chunk=rollout.action_chunk,
+        rollout=rollout,
+        constraint_costs={},
+        constraint_satisfied={},
+        feasible=feasible,
+        goal_distance=0.0,
+        constraint_penalty=penalty,
+        smoothness=0.0,
+        consensus_deviation=0.0,
+        policy_surrogate=None,
+        total_score=score,
+    )
+    return BeamNode(
+        node_id=node_id,
+        parent_id="root",
+        depth=1,
+        current_entry=_entry(),
+        obs_window=_window(),
+        action_chunks=[rollout.action_chunk],
+        rollouts=[rollout],
+        candidate=candidate,
+    )
