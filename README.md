@@ -245,6 +245,43 @@ uv run python scripts/compare_world_model_rollout.py \
 
 uv run rerun artifacts/reach-datasets/world-model-vs-sim/episode_000_comparison.rrd
 ```
+### Beam Search using trained checkpoint 
+```bash
+  # Ensure changing paths
+./.venv/bin/python scripts/eval_constrained_reach.py \
+  --dataset ~/Downloads/pg3d_reach_regen_abcd.zarr \
+  --checkpoint ~/Downloads/train_final_Arya/step_00100000.pt \
+  --methods beam \
+  --source dataset \
+  --episodes 4 \
+  --episode-indices-file configs/eval/e3_candidate_midpath_60cm_fixed_v1/episode_indices.txt \
+  --constraints-dir configs/eval/e3_candidate_midpath_60cm_fixed_v1/constraints/robot \ 
+  --constraint-target robot \
+  --geometry-mode exact \
+  --planning-horizon-chunks 4 \
+  --execution-horizon-chunks 1 \
+  --k-schedule 16 \
+  --seed 0 \
+  --device cuda \
+  --avoid-shape box \
+  --avoid-box-half-extents 0.055 0.08 0.30 \
+  --avoid-clearance-scale 0.05 \
+  --embody-obstacle \
+  --obstacle-family carton \
+  --obstacle-yaw-deg 0 \
+  --obstacle-top-z 0.60 \
+  --precomputed-initial-clearance-margin 0.02 \
+  --robot-clearance-metric \
+  --terminate-on-obstacle-contact \
+  --max-steps 150 \
+  --post-success-steps 16 \
+  --profile \
+  --video \
+  --rerun \
+  --artifact-selection all \
+  --allow-failure \
+  --output-dir artifacts/beam-constraints-dir-only-changed-score-weights-branch-32-beam-width-8
+```
 
 Rerun overlays the world-model branch and the live-simulator branch with distinct
 robot-point colors, one `episode_XXX_comparison.rrd` per episode.
