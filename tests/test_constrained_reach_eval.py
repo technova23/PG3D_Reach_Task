@@ -502,6 +502,7 @@ def test_clearance_series_and_violation_metrics_preserve_events() -> None:
 def test_time_indexed_whole_robot_clearance_preserves_violation_duration() -> None:
     constraint = AvoidRegion(
         region=BoxRegion(center=[0.0, 0.0, 0.0], half_extents=[0.1, 0.1, 0.1]),
+        margin=0.0,
         tolerance=0.0,
     )
     point_clouds = [
@@ -1270,6 +1271,7 @@ def test_eval_episode_indices_file_and_precomputed_constraints(tmp_path: Path) -
     assert args.constraints_dir == constraints_dir
     assert _constraint_source_summary(args)["type"] == "precomputed"
     np.testing.assert_allclose(loaded[0].region.center, [0.1, 0.0, 0.2])
+    assert loaded[0].margin == pytest.approx(0.03)
 
 
 def test_precomputed_box_constraint_can_drive_embodied_actor(tmp_path: Path) -> None:
@@ -1642,7 +1644,10 @@ def test_safe_grounded_placement_is_accepted_without_translation(tmp_path: Path)
 
 
 def test_clearance_exclusions_are_replaced_with_contiguous_output_indices() -> None:
-    constraint = AvoidRegion(region=BoxRegion(center=[0.0, 0.0, 0.2], half_extents=[0.1, 0.1, 0.1]))
+    constraint = AvoidRegion(
+        region=BoxRegion(center=[0.0, 0.0, 0.2], half_extents=[0.1, 0.1, 0.1]),
+        margin=0.0,
+    )
     accepted: list[RolloutSpec] = []
     attempts: list[dict[str, object]] = []
     for pool_index in range(12):
@@ -1779,9 +1784,10 @@ def test_locked_e3_commands_resolve_manifest_geometry(tmp_path: Path) -> None:
     ]
     assert "--robot-clearance-metric" in evaluate
     assert "--terminate-on-obstacle-contact" in evaluate
-    assert evaluate[evaluate.index("--geometric-contact-threshold") + 1] == "0.0"
+    assert evaluate[evaluate.index("--geometric-contact-threshold") + 1] == "0.03"
     assert evaluate[evaluate.index("--obstacle-support-plane-z") + 1] == "0.0"
-    assert evaluate[evaluate.index("--precomputed-initial-clearance-margin") + 1] == "0.02"
+    assert evaluate[evaluate.index("--precomputed-initial-clearance-margin") + 1] == "0.0"
+    assert evaluate[evaluate.index("--avoid-margin") + 1] == "0.03"
     assert "--video" in evaluate
     assert "--rerun" in evaluate
     assert evaluate[evaluate.index("--artifact-selection") + 1] == "all"
@@ -2065,6 +2071,8 @@ def test_carton_family_has_reproducible_default_geometry(tmp_path: Path) -> None
 
     assert args.avoid_shape == "box"
     assert args.avoid_box_half_extents == pytest.approx([0.055, 0.08, 0.16])
+    assert args.avoid_margin == pytest.approx(0.03)
+    assert args.geometric_contact_threshold == pytest.approx(0.03)
     assert args.terminate_on_obstacle_contact
     assert _embodied_obstacle_half_extents(args) == pytest.approx((0.055, 0.08, 0.16))
 

@@ -8,6 +8,7 @@ from pg3d.constraints.geometry import (
     region_from_json,
 )
 from pg3d.constraints.programs import (
+    DEFAULT_AVOID_MARGIN_M,
     AvoidProjection,
     AvoidRegion,
     SmoothnessCost,
@@ -23,6 +24,7 @@ __all__ = [
     "BoxRegion",
     "Constraint",
     "CylinderRegion",
+    "DEFAULT_AVOID_MARGIN_M",
     "RectRegion2D",
     "Region",
     "SceneContext",

@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import zarr
 
-from pg3d.constraints import BoxRegion
+from pg3d.constraints import DEFAULT_AVOID_MARGIN_M, BoxRegion
 from pg3d.envs.maniskill_adapter import register_pg3d_reach_envs
 from pg3d.envs.maniskill_adapter.dataset import load_reach_metadata
 from pg3d.eval import (
@@ -279,7 +279,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gripper-open", type=float, default=0.04)
     parser.add_argument("--avoid-radius", type=float, default=0.03)
     parser.add_argument("--path-fraction", type=float, default=0.5)
-    parser.add_argument("--avoid-margin", type=float, default=0.0)
+    parser.add_argument(
+        "--avoid-margin",
+        type=float,
+        default=DEFAULT_AVOID_MARGIN_M,
+        help=f"Required obstacle clearance in meters (default: {DEFAULT_AVOID_MARGIN_M:.2f}).",
+    )
     parser.add_argument("--avoid-weight", type=float, default=1.0)
     parser.add_argument(
         "--avoid-clearance-scale",

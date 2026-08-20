@@ -11,6 +11,7 @@ from pg3d.world_model.types import Array, ImaginedRollout, as_float_array
 
 ConstraintTarget = Literal["eef", "robot"]
 SmoothnessTarget = Literal["q", "eef"]
+DEFAULT_AVOID_MARGIN_M = 0.03
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,7 @@ class AvoidRegion:
 
     region: Region
     target: ConstraintTarget = "eef"
-    margin: float = 0.0
+    margin: float = DEFAULT_AVOID_MARGIN_M
     weight: float = 1.0
     clearance_scale: float = 0.05
     tolerance: float = 1e-6
@@ -100,7 +101,7 @@ class AvoidProjection:
 
     region: RectRegion2D
     target: ConstraintTarget = "eef"
-    margin: float = 0.0
+    margin: float = DEFAULT_AVOID_MARGIN_M
     weight: float = 1.0
     clearance_scale: float = 0.05
     tolerance: float = 1e-6
@@ -220,7 +221,7 @@ def make_obstructing_avoid_region(
     goal: Array,
     *,
     radius: float = 0.07,
-    margin: float = 0.0,
+    margin: float = DEFAULT_AVOID_MARGIN_M,
     weight: float = 1.0,
     clearance_scale: float = 0.05,
     name: str = "avoid_region",
@@ -246,7 +247,7 @@ def constraint_from_json(config: dict[str, Any]) -> AvoidRegion | AvoidProjectio
         return AvoidRegion(
             region=region_from_json(config["region"]),
             target=config.get("target", "eef"),
-            margin=float(config.get("margin", 0.0)),
+            margin=float(config.get("margin", DEFAULT_AVOID_MARGIN_M)),
             weight=float(config.get("weight", 1.0)),
             clearance_scale=float(config.get("clearance_scale", 0.05)),
             tolerance=float(config.get("tolerance", 1e-6)),
@@ -261,7 +262,7 @@ def constraint_from_json(config: dict[str, Any]) -> AvoidRegion | AvoidProjectio
         return AvoidProjection(
             region=region,
             target=config.get("target", "eef"),
-            margin=float(config.get("margin", 0.0)),
+            margin=float(config.get("margin", DEFAULT_AVOID_MARGIN_M)),
             weight=float(config.get("weight", 1.0)),
             clearance_scale=float(config.get("clearance_scale", 0.05)),
             tolerance=float(config.get("tolerance", 1e-6)),

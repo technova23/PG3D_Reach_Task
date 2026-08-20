@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 ## Current objective
 
@@ -69,13 +69,18 @@ identities, rejects mismatched method pairs, and reports CUDA-synchronized end-t
 action-selection latency. A one-step live ManiSkill smoke passed for base, rejection,
 reranking, and ITPS on the same dataset episode and constraint.
 E1 now has an explicit no-constraint evaluator mode and a completed fixed 25-episode
-nominal checkpoint gate. The initial 65k checkpoint reached 14/25 and stably held
-12/25, missing the 15/25 gate by one. The existing 100k checkpoint was then evaluated
-on the same nominal-validation episodes without using constrained outcomes: it
-reached 15/25 (60%) and stably held 14/25 (56%), clearing the unchanged gate exactly.
-It is now locked for E3, whose definitive constrained-test episodes must be disjoint
-from these 25 checkpoint-selection episodes. A deterministic artifact-enabled
-replication had identical endpoints and produced five validated MP4/`.rrd` pairs.
+nominal checkpoint gate. Under the historical 80-step task horizon, the initial 65k checkpoint
+reached 14/25 and stably held 12/25, missing the 15/25 gate by one. The existing 100k checkpoint
+then reached 15/25 (60%) and stably held 14/25 (56%) on the same nominal-validation episodes
+without using constrained outcomes, clearing the unchanged historical gate exactly. A 2026-08-20
+re-evaluation of that locked 100k EMA checkpoint on the same 25 episodes with the current 150-step
+horizon reached 25/25 (100%, Wilson 95% CI 86.7--100%) and stably held 24/25 (96%, Wilson 95% CI
+80.5--99.3%). Mean final and minimum TCP-to-goal distances were 1.145 cm and 1.103 cm. This updates
+the operational 150-step reach-capability estimate; it does not replace the historical 80-step
+checkpoint-selection record or create a new independent test set. The checkpoint remains locked
+for E3, whose definitive constrained-test episodes must be disjoint from these 25
+checkpoint-selection episodes. A deterministic artifact-enabled replication of the historical
+gate had identical endpoints and produced five validated MP4/`.rrd` pairs.
 A separate three-episode `K=1`, zero-guidance regression produced bit-identical
 base/rejection/reranking chunks and complete MP4/`.rrd` pairs for all four methods;
 ITPS appropriately remained different because its zero-energy path still uses
@@ -174,11 +179,20 @@ its separate differentiable energy.
 Future constrained evaluation now defaults to a 150-step task horizon instead of 80.
 The stable-success hold remains separate, so successes stop after the configured
 hold while failures receive all 150 task steps.
-Embodied-obstacle evaluation now stops immediately after the first raw PhysX contact
-or non-positive whole-robot signed clearance. The first-contact frame is kept,
+Avoidance now uses a 3 cm safety margin by default in `AvoidRegion`, generated and
+precomputed evaluator constraints, NumPy reranking/rejection costs, and differentiable ITPS
+energy. Embodied-obstacle evaluation stops immediately after the first raw PhysX contact
+or raw whole-robot obstacle clearance at or below the same 3 cm boundary. The first-contact frame is kept,
 collision metadata and a dedicated termination reason are logged, and constraint
 plus combined success are forced false so post-impact motion cannot distort safety
-or trajectory metrics.
+or trajectory metrics. `--avoid-margin 0` and `--geometric-contact-threshold 0` remain
+available only for reproducing historical zero-margin ablations; H3E1 zero-margin U-shape
+artifacts predate this default and are not definitive safety evaluations.
+Saved position-IK U-shape witnesses can now be executed, rather than only FK-visualized, with
+`scripts/replay_u_shape_planner_paths.py`. It writes actual ManiSkill MP4/Rerun timelines and logs
+pairwise Panda/U contact force, sampled clearance, goal error, and joint tracking error. Nine paths
+exist; episode 003 has no saved plan. A live smoke could not run in the Codex session because no
+CUDA/render physical device was exposed, so GPU-host execution remains required.
 Whole-robot safety is no longer flattened across time: enabling the metric retains one
 robot cloud per executed timestep and reports primary violation duration, fraction,
 integral, and event count. Executed joint targets now also report overall and

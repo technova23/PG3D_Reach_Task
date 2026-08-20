@@ -749,6 +749,7 @@ uv run python scripts/eval_constrained_reach.py \
   --episodes 25 \
   --device cuda \
   --no-constraints \
+  --max-steps 80 \
   --post-success-steps 16 \
   --video \
   --rerun \
@@ -794,16 +795,52 @@ including stochastic clean-sample re-noising, so equality with ordinary single-p
 DDIM is not expected. Historical runs made before 2026-08-14 used DDPM reverse steps
 and must not be compared as if they used the current DDIM scheduler.
 
-The initial 2026-07-23 E1 run under `artifacts/e1-nominal-step-65000-v2` reached
-14/25 episodes and stably held 12/25, below the predeclared 15/25 transient gate.
-The selected 100k checkpoint run under `artifacts/e1-nominal-step-100000-v2` reached
-15/25 and stably held 14/25, clearing the unchanged gate exactly. Its metrics-only
+The initial 2026-07-23 E1 run under `artifacts/e1-nominal-step-65000-v2` used the then-current
+80-step task horizon, reached 14/25 episodes, and stably held 12/25, below the predeclared 15/25
+transient gate. The selected 100k checkpoint run under `artifacts/e1-nominal-step-100000-v2`
+used the same 80-step horizon, reached 15/25, and stably held 14/25, clearing the unchanged gate
+exactly. Its metrics-only
 and artifact-enabled runs had identical endpoints; the latter wrote five validated
 MP4/`.rrd` pairs. The 100k checkpoint is locked for E3, and the definitive constrained
 test set must exclude these 25 nominal checkpoint-selection episodes. The companion
 `artifacts/e1-zero-guidance-step-65000` regression wrote MP4/`.rrd` pairs for all
 three episodes and all four methods; base, rejection, and reranking chunks were
 bit-identical for every seed at `K=1`.
+
+Re-evaluate the locked 100k EMA checkpoint on the same 25 checkpoint-selection episodes with the
+current 150-step task horizon using a new output directory:
+
+```bash
+./.venv/bin/python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --checkpoint-model ema \
+  --methods base \
+  --source dataset \
+  --unique-dataset-seeds \
+  --episodes 25 \
+  --device cuda \
+  --no-constraints \
+  --max-steps 150 \
+  --post-success-steps 16 \
+  --planning-horizon-chunks 1 \
+  --execution-horizon-chunks 1 \
+  --ddim-eta 0 \
+  --seed 0 \
+  --plots \
+  --profile \
+  --sync-cuda-timers \
+  --output-dir artifacts/e1-nominal-step-100000-max150-reeval \
+  --allow-failure
+```
+
+The 2026-08-20 run produced 25/25 transient reaches (100%, Wilson 95% CI 86.7--100%) and
+24/25 stable reaches (96%, Wilson 95% CI 80.5--99.3%). Mean final TCP-to-goal distance was
+0.01145 m and mean minimum distance was 0.01103 m. This is a horizon re-evaluation on the same
+checkpoint-selection episodes, not a new independent test set. One episode correctly has
+`stable_goal_reached=false` from its distance trace even though its coarse `termination_reason`
+is `stable_success`; use the stable metric as authoritative until that termination-label mismatch
+is fixed.
 
 ### E3 locked episode split
 
@@ -1259,12 +1296,37 @@ clearance from the stored initial robot mask and fails before any method runs if
 serialized obstacle starts too close to the robot. Do not use the partial v1 or v2
 comparison directories for results.
 
-With `--embody-obstacle`, this command terminates by default on the first raw PhysX
-contact or the first non-positive whole-robot signed clearance. The contact frame is
+Avoidance constraints default to a 3 cm required clearance. This margin is applied to
+generated constraints and overrides margins stored in precomputed constraints, so reranking,
+rejection, ITPS, hard satisfaction, and executed evaluation share the same safety boundary.
+With `--embody-obstacle`, evaluation terminates by default on the first raw PhysX contact
+or raw whole-robot obstacle clearance at or below 3 cm. The contact frame is
 saved, no later frame is rendered, and the episode row records PhysX, geometric, and
 union contact fields while forcing constraint/combined success false. Use
 `--no-terminate-on-obstacle-contact` only for a deliberate non-terminal-contact
-ablation; otherwise later motion would contaminate trajectory and clearance metrics.
+ablation; otherwise later motion would contaminate trajectory and clearance metrics. For a
+historical zero-margin reproduction, explicitly pass both `--avoid-margin 0` and
+`--geometric-contact-threshold 0`.
+
+Execute every saved 3 cm position-IK planner path in the actual ManiSkill control environment and
+record one MP4 plus native Rerun timeline per episode:
+
+```bash
+./.venv/bin/python scripts/replay_u_shape_planner_paths.py \
+  --planner-dir artifacts/e10-u-shape-conventional-position-ik-margin3cm-extended-v1 \
+  --output-dir artifacts/e10-u-shape-planner-path-executions-v1 \
+  --safety-margin 0.03 \
+  --video-fps 20 \
+  --overwrite
+```
+
+This executes all saved joint targets through `env.step()` rather than merely visualizing FK.
+Episodes 000, 001, 002, and 004--009 have saved paths; episode 003 is written as
+`missing_saved_path`. Each result records final TCP error, actual sampled whole-arm clearance,
+joint-target tracking error, simulator termination signals, and Panda/U pairwise PhysX contact
+force. Videos are under `videos/`, Reruns under `rerun/`, per-episode JSON under `results/`, and
+`report.json` aggregates the run. The executor deliberately completes every saved target even if a
+contact or 3 cm violation occurs, so the artifact shows the entire planned trajectory.
 
 For large runs, replace `--artifact-selection all` with a predeclared deterministic
 subset. Manifest validation recomputes hashes, decodes every selected MP4 frame, and

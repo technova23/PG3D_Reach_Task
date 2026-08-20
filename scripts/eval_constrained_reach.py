@@ -32,6 +32,7 @@ from pg3d.composition.scoring import (
     trajectory_smoothness,
 )
 from pg3d.constraints import (
+    DEFAULT_AVOID_MARGIN_M,
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
@@ -1076,7 +1077,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--avoid-radius", type=float, default=0.08)
     parser.add_argument("--avoid-min-radius", type=float, default=0.025)
-    parser.add_argument("--avoid-margin", type=float, default=0.0)
+    parser.add_argument(
+        "--avoid-margin",
+        type=float,
+        default=DEFAULT_AVOID_MARGIN_M,
+        help=(
+            "Required signed clearance used by avoidance cost and hard satisfaction "
+            f"(default: {DEFAULT_AVOID_MARGIN_M:.2f} m). This also overrides the margin "
+            "in precomputed avoid constraints."
+        ),
+    )
     parser.add_argument("--avoid-weight", type=float, default=1.0)
     parser.add_argument(
         "--avoid-clearance-scale",
@@ -1296,10 +1306,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--geometric-contact-threshold",
         type=float,
-        default=0.0,
+        default=None,
         help=(
             "Signed whole-robot clearance at or below which obstacle contact terminates "
-            "the episode (default: 0 m)."
+            "the episode. Defaults to --avoid-margin so planning and execution use the "
+            "same safety boundary."
         ),
     )
     parser.add_argument("--gripper-open", type=float, default=0.04)
@@ -1419,6 +1430,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--obstacle-support-plane-z must be finite")
     if args.obstacle_path_height_margin < 0.0:
         raise ValueError("--obstacle-path-height-margin must be non-negative")
+    if args.geometric_contact_threshold is None:
+        args.geometric_contact_threshold = float(args.avoid_margin)
     if not np.isfinite(args.geometric_contact_threshold):
         raise ValueError("--geometric-contact-threshold must be finite")
     if args.obstacle_top_z is not None and (
@@ -1464,6 +1477,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--itps-robot-sample-seed must be non-negative")
     if args.avoid_radius <= 0.0 or args.avoid_min_radius <= 0.0:
         raise ValueError("avoid radii must be positive")
+    if not np.isfinite(args.avoid_margin) or args.avoid_margin < 0.0:
+        raise ValueError("--avoid-margin must be finite and non-negative")
     if not np.isfinite(args.avoid_clearance_scale) or args.avoid_clearance_scale < 0.0:
         raise ValueError("--avoid-clearance-scale must be finite and non-negative")
     if any(h <= 0.0 for h in args.projection_half_extents):
@@ -1589,7 +1604,7 @@ def run_eval_episode(
     embody_obstacle: bool = False,
     obstacle_family: str = "box",
     terminate_on_obstacle_contact: bool = True,
-    geometric_contact_threshold: float = 0.0,
+    geometric_contact_threshold: float = DEFAULT_AVOID_MARGIN_M,
     artifact_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if embody_obstacle:
@@ -1878,7 +1893,10 @@ def run_eval_episode(
                     and not geometric_collision
                     and len(current_robot_cloud)
                 ):
-                    clearance = float(min_constraint_clearance(current_robot_cloud, constraints))
+                    clearance = _minimum_raw_obstacle_clearance(
+                        current_robot_cloud,
+                        constraints,
+                    )
                     if clearance <= float(geometric_contact_threshold):
                         geometric_collision = True
                         geometric_collision_step = steps
@@ -2198,6 +2216,21 @@ def _episode_should_stop(*, terminated: Any, truncated: Any, success: bool) -> b
     if _bool_any(truncated):
         return True
     return bool(_bool_any(terminated) and not success)
+
+
+def _minimum_raw_obstacle_clearance(
+    robot_points: np.ndarray,
+    constraints: list[AvoidRegion],
+) -> float:
+    """Return raw robot-to-obstacle distance without subtracting safety margins."""
+    points = np.asarray(robot_points, dtype=np.float32)
+    if points.ndim != 2 or points.shape[1] != 3 or not len(points):
+        raise ValueError("robot_points must have non-empty shape [N, 3]")
+    if not constraints:
+        raise ValueError("raw obstacle clearance requires at least one constraint")
+    return min(
+        float(np.min(constraint.region.signed_distance(points))) for constraint in constraints
+    )
 
 
 def _contact_body_name(body: Any) -> str:
@@ -3253,6 +3286,12 @@ def _constraints_for_episode(
         constraints = load_episode_constraints(
             _precomputed_constraint_path(args.constraints_dir, spec)
         )
+        constraints = [
+            replace(constraint, margin=float(args.avoid_margin))
+            if isinstance(constraint, (AvoidRegion, AvoidProjection))
+            else constraint
+            for constraint in constraints
+        ]
         _validate_precomputed_constraints(
             constraints,
             env=env,

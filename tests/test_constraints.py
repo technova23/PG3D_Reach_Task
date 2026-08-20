@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from pg3d.constraints import (
+    DEFAULT_AVOID_MARGIN_M,
     AvoidProjection,
     AvoidRegion,
     BoxRegion,
@@ -30,7 +31,6 @@ def test_sphere_and_box_signed_distance() -> None:
         sphere.signed_distance(np.asarray([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])),
         np.asarray([-1.0, 1.0], dtype=np.float32),
     )
-
     box = BoxRegion(center=[0.0, 0.0, 0.0], half_extents=[1.0, 2.0, 3.0])
     distances = box.signed_distance(
         np.asarray(
@@ -43,6 +43,16 @@ def test_sphere_and_box_signed_distance() -> None:
         )
     )
     np.testing.assert_allclose(distances, np.asarray([-1.0, 1.0, 0.0], dtype=np.float32))
+
+
+def test_avoid_constraints_default_to_three_centimeter_margin() -> None:
+    region = SphereRegion(center=[0.0, 0.0, 0.0], radius=0.1)
+
+    assert DEFAULT_AVOID_MARGIN_M == pytest.approx(0.03)
+    assert AvoidRegion(region=region).margin == pytest.approx(0.03)
+    assert constraint_from_json(
+        {"type": "avoid_region", "region": region.to_json()}
+    ).margin == pytest.approx(0.03)
 
 
 def test_rotated_box_signed_distance_and_json_round_trip() -> None:
@@ -98,7 +108,10 @@ def test_rect2d_signed_distance_ignores_height() -> None:
 def test_avoid_projection_penalizes_xy_overflight_at_any_height() -> None:
     # EEF flies high over the restricted footprint; only the XY projection matters.
     rollout = _rollout(eef_path=[[0.2, 0.0, 0.2], [0.5, 0.0, 0.9], [0.8, 0.0, 0.2]])
-    constraint = AvoidProjection(region=RectRegion2D(center=[0.5, 0.0], half_extents=[0.08, 0.08]))
+    constraint = AvoidProjection(
+        region=RectRegion2D(center=[0.5, 0.0], half_extents=[0.08, 0.08]),
+        margin=0.0,
+    )
 
     costs = constraint.cost(rollout)
 
@@ -145,7 +158,10 @@ def test_avoid_projection_json_round_trip() -> None:
 
 def test_avoid_region_cost_detects_eef_path_violation() -> None:
     rollout = _rollout(eef_path=[[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]])
-    constraint = AvoidRegion(region=SphereRegion(center=[0.5, 0.0, 0.0], radius=0.1))
+    constraint = AvoidRegion(
+        region=SphereRegion(center=[0.5, 0.0, 0.0], radius=0.1),
+        margin=0.0,
+    )
 
     costs = constraint.cost(rollout)
 

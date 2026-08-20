@@ -254,6 +254,14 @@ for E3. The artifact-enabled replication produced identical endpoint rows plus f
 validated MP4/`.rrd` pairs. Because these 25 episodes were used for checkpoint
 selection, the definitive E3 constrained-test episode set must be disjoint.
 
+Operational horizon re-evaluation (2026-08-20): the locked 100k EMA checkpoint was rerun on the
+same 25 checkpoint-selection episodes with the current 150-step task horizon and unchanged 16-step
+hold. It reached 25/25 (100%, Wilson 95% CI 86.7--100%) and stably held 24/25 (96%, Wilson 95% CI
+80.5--99.3%). Mean final and minimum TCP-to-goal distances were 0.01145 m and 0.01103 m. This shows
+that the earlier 60% result was strongly horizon-limited, but it is a paired re-evaluation of the
+checkpoint-selection set rather than a new independent estimate. The historical 80-step result
+remains the checkpoint-selection record.
+
 The `K=1`, zero-guidance three-episode regression produced bit-identical
 base/rejection/reranking chunks on every seed; ITPS remained different because its
 zero-energy path still uses the isolated four-step MCMC sampler rather than ordinary
