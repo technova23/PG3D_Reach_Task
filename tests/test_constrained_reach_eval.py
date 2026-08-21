@@ -102,7 +102,7 @@ from scripts.eval_constrained_reach import (
     _select_decision,
     _select_guided_candidates,
     _termination_reason,
-    _update_success_hold,
+    _update_goal_hold,
     _validate_embodied_obstacle_geometry,
     _validate_precomputed_initial_clearance,
     _write_artifact_manifest,
@@ -150,9 +150,7 @@ def test_termination_reason_prioritizes_physical_collision() -> None:
         _termination_reason(
             physical_collision=True,
             terminated_or_truncated=True,
-            first_success_step=100,
-            observed_post_success_steps=16,
-            post_success_steps=16,
+            stable_entry_step=100,
             steps=150,
             max_steps=150,
         )
@@ -162,9 +160,7 @@ def test_termination_reason_prioritizes_physical_collision() -> None:
         _termination_reason(
             physical_collision=False,
             terminated_or_truncated=False,
-            first_success_step=None,
-            observed_post_success_steps=0,
-            post_success_steps=16,
+            stable_entry_step=None,
             steps=150,
             max_steps=150,
         )
@@ -175,9 +171,7 @@ def test_termination_reason_prioritizes_physical_collision() -> None:
             physical_collision=False,
             geometric_collision=True,
             terminated_or_truncated=True,
-            first_success_step=None,
-            observed_post_success_steps=0,
-            post_success_steps=16,
+            stable_entry_step=None,
             steps=9,
             max_steps=150,
         )
@@ -492,25 +486,36 @@ def test_stable_goal_requires_complete_post_success_hold() -> None:
     )
 
 
-def test_success_hold_resets_after_drift() -> None:
-    first: int | None = None
-    held = 0
-    first, held = _update_success_hold(
-        success=True, step=10, first_success_step=first, consecutive_success_steps=held
-    )
-    assert (first, held) == (10, 1)
-    first, held = _update_success_hold(
-        success=True, step=11, first_success_step=first, consecutive_success_steps=held
-    )
-    assert (first, held) == (10, 2)
-    first, held = _update_success_hold(
-        success=False, step=12, first_success_step=first, consecutive_success_steps=held
-    )
-    assert (first, held) == (10, 0)
-    first, held = _update_success_hold(
-        success=True, step=13, first_success_step=first, consecutive_success_steps=held
-    )
-    assert (first, held) == (10, 1)
+def test_goal_hold_resets_after_distance_exceeds_threshold() -> None:
+    state: tuple[int | None, int | None, int, int] = (None, None, 0, 0)
+    for step, distance in [(10, 0.02), (11, 0.01), (12, 0.03), (13, 0.02)]:
+        state = _update_goal_hold(
+            distance=distance,
+            goal_threshold=0.025,
+            step=step,
+            hold_steps=2,
+            first_entry_step=state[0],
+            stable_entry_step=state[1],
+            current_hold_count=state[2],
+            maximum_hold_count=state[3],
+        )
+    assert state == (10, None, 1, 2)
+
+
+def test_goal_hold_logs_stable_streak_entry_step() -> None:
+    state: tuple[int | None, int | None, int, int] = (None, None, 0, 0)
+    for step in (20, 21, 22):
+        state = _update_goal_hold(
+            distance=0.01,
+            goal_threshold=0.025,
+            step=step,
+            hold_steps=2,
+            first_entry_step=state[0],
+            stable_entry_step=state[1],
+            current_hold_count=state[2],
+            maximum_hold_count=state[3],
+        )
+    assert state == (20, 20, 3, 3)
 
 
 def test_clearance_series_and_violation_metrics_preserve_events() -> None:

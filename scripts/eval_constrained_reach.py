@@ -1866,9 +1866,10 @@ def run_eval_episode(
 
     steps = 0
     replans = 0
-    first_success_step: int | None = None
-    observed_post_success_steps = 0
-    consecutive_success_steps = 0
+    first_goal_entry_step: int | None = None
+    stable_entry_step: int | None = None
+    current_hold_count = 0
+    maximum_hold_count = 0
     candidate_feasible = 0
     candidate_total = 0
     fallback_count = 0
@@ -1891,14 +1892,14 @@ def run_eval_episode(
     compute_counts.start_denoiser_tracking(policy.model)
     try:
         while True:
-            if first_success_step is None and steps >= max_steps:
+            if first_goal_entry_step is None and steps >= max_steps:
                 break
-            if first_success_step is not None and observed_post_success_steps >= post_success_steps:
+            if stable_entry_step is not None:
                 break
             step_limit = _episode_step_limit(
                 max_task_steps=max_steps,
                 post_success_steps=post_success_steps,
-                first_success_step=first_success_step,
+                first_success_step=first_goal_entry_step,
             )
             provider_counts_before = provider.counter_snapshot() if provider is not None else {}
             memory_baseline = compute_counts.begin_action_selection(policy.device)
@@ -2060,13 +2061,27 @@ def run_eval_episode(
                     with timer.time("video_frame_render", method=method):
                         frames.append(_frame_to_numpy(_render_video_frame(sim_env, video_env)))
                 success = _bool_info(sim_info, "success")
-                first_success_step, consecutive_success_steps = _update_success_hold(
-                    success=success,
-                    step=steps,
-                    first_success_step=first_success_step,
-                    consecutive_success_steps=consecutive_success_steps,
+                tcp_to_goal_distance = float(
+                    np.linalg.norm(
+                        np.asarray(sim_entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3]
+                        - target
+                    )
                 )
-                observed_post_success_steps = max(0, consecutive_success_steps - 1)
+                (
+                    first_goal_entry_step,
+                    stable_entry_step,
+                    current_hold_count,
+                    maximum_hold_count,
+                ) = _update_goal_hold(
+                    distance=tcp_to_goal_distance,
+                    goal_threshold=goal_thresh,
+                    step=steps,
+                    hold_steps=post_success_steps,
+                    first_entry_step=first_goal_entry_step,
+                    stable_entry_step=stable_entry_step,
+                    current_hold_count=current_hold_count,
+                    maximum_hold_count=maximum_hold_count,
+                )
                 contact_pairs = (
                     _robot_obstacle_contact_pairs(sim_env)
                     if embody_obstacle and terminate_on_obstacle_contact
@@ -2098,8 +2113,7 @@ def run_eval_episode(
                 if terminated_or_truncated:
                     break
                 if (
-                    first_success_step is not None
-                    and observed_post_success_steps >= post_success_steps
+                    stable_entry_step is not None
                 ):
                     break
             with raw_action_log.open("a", encoding="utf-8") as action_file:
@@ -2168,8 +2182,8 @@ def run_eval_episode(
         constraints=constraints,
         robot_clearance_point_clouds=robot_clearance_point_clouds,
         robot_clearance_dt=control_dt * robot_clearance_stride,
-        reach_success=first_success_step is not None,
-        first_success_step=first_success_step,
+        reach_success=first_goal_entry_step is not None,
+        first_success_step=first_goal_entry_step,
         steps=steps,
         replans=replans,
         candidate_feasibility_fraction=candidate_feasibility_fraction(
@@ -2206,6 +2220,10 @@ def run_eval_episode(
             "geometric_collision_clearance": geometric_collision_clearance,
             "geometric_contact_threshold": float(geometric_contact_threshold),
             "terminate_on_obstacle_contact": bool(terminate_on_obstacle_contact),
+            "current_hold_count": int(current_hold_count),
+            "maximum_hold_count": int(maximum_hold_count),
+            "first_goal_entry_step": first_goal_entry_step,
+            "stable_entry_step": stable_entry_step,
             "obstacle_contact": physical_collision or geometric_collision,
             "obstacle_contact_step": (
                 min(
@@ -2224,9 +2242,7 @@ def run_eval_episode(
                 physical_collision=physical_collision,
                 geometric_collision=geometric_collision,
                 terminated_or_truncated=terminated_or_truncated,
-                first_success_step=first_success_step,
-                observed_post_success_steps=observed_post_success_steps,
-                post_success_steps=post_success_steps,
+                stable_entry_step=stable_entry_step,
                 steps=steps,
                 max_steps=max_steps,
             ),
@@ -2466,9 +2482,7 @@ def _termination_reason(
     *,
     physical_collision: bool,
     terminated_or_truncated: bool,
-    first_success_step: int | None,
-    observed_post_success_steps: int,
-    post_success_steps: int,
+    stable_entry_step: int | None,
     steps: int,
     max_steps: int,
     geometric_collision: bool = False,
@@ -2477,7 +2491,7 @@ def _termination_reason(
         return "physical_obstacle_collision"
     if geometric_collision:
         return "geometric_obstacle_collision"
-    if first_success_step is not None and observed_post_success_steps >= post_success_steps:
+    if stable_entry_step is not None:
         return "stable_success"
     if terminated_or_truncated:
         return "simulator_termination"
@@ -2512,21 +2526,31 @@ def _episode_step_limit(
     return max_task_steps if first_success_step is None else max_task_steps + post_success_steps
 
 
-def _update_success_hold(
+def _update_goal_hold(
     *,
-    success: bool,
+    distance: float,
+    goal_threshold: float,
     step: int,
-    first_success_step: int | None,
-    consecutive_success_steps: int,
-) -> tuple[int | None, int]:
-    """Track first-ever success and the current consecutive-success streak length."""
-    if step < 0 or consecutive_success_steps < 0:
-        raise ValueError("step and consecutive_success_steps must be non-negative")
-    if not success:
-        return first_success_step, 0
-    if first_success_step is None:
-        first_success_step = step
-    return first_success_step, consecutive_success_steps + 1
+    hold_steps: int,
+    first_entry_step: int | None,
+    stable_entry_step: int | None,
+    current_hold_count: int,
+    maximum_hold_count: int,
+) -> tuple[int | None, int | None, int, int]:
+    """Update consecutive distance-threshold hold telemetry for one executed state."""
+    if not np.isfinite(distance) or not np.isfinite(goal_threshold) or goal_threshold < 0.0:
+        raise ValueError("distance and goal_threshold must be finite and threshold non-negative")
+    if step < 0 or hold_steps < 0 or current_hold_count < 0 or maximum_hold_count < 0:
+        raise ValueError("hold steps and counts must be non-negative")
+    if distance > goal_threshold:
+        return first_entry_step, stable_entry_step, 0, maximum_hold_count
+    if first_entry_step is None:
+        first_entry_step = step
+    current_hold_count += 1
+    maximum_hold_count = max(maximum_hold_count, current_hold_count)
+    if stable_entry_step is None and current_hold_count >= hold_steps + 1:
+        stable_entry_step = step - hold_steps
+    return first_entry_step, stable_entry_step, current_hold_count, maximum_hold_count
 
 
 def _beam_episode_metric_row(
