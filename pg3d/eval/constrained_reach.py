@@ -688,18 +688,12 @@ def stable_goal_reached(
     distances = np.asarray(target_distances, dtype=np.float32).reshape(-1)
     if first_success_step < 0 or first_success_step >= distances.size:
         raise ValueError("first_success_step must index target_distances")
-    if hold_steps == 0:
-        return bool(
-            np.isfinite(distances[first_success_step])
-            and distances[first_success_step] <= goal_threshold
-        )
-    start = first_success_step + 1
-    hold = distances[start : start + hold_steps]
-    return bool(
-        hold.size == hold_steps
-        and np.all(np.isfinite(hold))
-        and np.all(hold <= goal_threshold)
-    )
+    reached = np.isfinite(distances) & (distances <= goal_threshold)
+    required = hold_steps + 1
+    for start in range(first_success_step, distances.size - required + 1):
+        if np.all(reached[start : start + required]):
+            return True
+    return False
 
 
 def q_trajectory_smoothness(q: Any, *, order: int = 2) -> float:

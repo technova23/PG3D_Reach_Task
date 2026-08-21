@@ -1868,6 +1868,7 @@ def run_eval_episode(
     replans = 0
     first_success_step: int | None = None
     observed_post_success_steps = 0
+    consecutive_success_steps = 0
     candidate_feasible = 0
     candidate_total = 0
     fallback_count = 0
@@ -2059,10 +2060,13 @@ def run_eval_episode(
                     with timer.time("video_frame_render", method=method):
                         frames.append(_frame_to_numpy(_render_video_frame(sim_env, video_env)))
                 success = _bool_info(sim_info, "success")
-                if success and first_success_step is None:
-                    first_success_step = steps
-                elif first_success_step is not None:
-                    observed_post_success_steps += 1
+                first_success_step, consecutive_success_steps = _update_success_hold(
+                    success=success,
+                    step=steps,
+                    first_success_step=first_success_step,
+                    consecutive_success_steps=consecutive_success_steps,
+                )
+                observed_post_success_steps = max(0, consecutive_success_steps - 1)
                 contact_pairs = (
                     _robot_obstacle_contact_pairs(sim_env)
                     if embody_obstacle and terminate_on_obstacle_contact
@@ -2506,6 +2510,23 @@ def _episode_step_limit(
     if max_task_steps <= 0 or post_success_steps < 0:
         raise ValueError("invalid task or post-success step limit")
     return max_task_steps if first_success_step is None else max_task_steps + post_success_steps
+
+
+def _update_success_hold(
+    *,
+    success: bool,
+    step: int,
+    first_success_step: int | None,
+    consecutive_success_steps: int,
+) -> tuple[int | None, int]:
+    """Track first-ever success and the current consecutive-success streak length."""
+    if step < 0 or consecutive_success_steps < 0:
+        raise ValueError("step and consecutive_success_steps must be non-negative")
+    if not success:
+        return first_success_step, 0
+    if first_success_step is None:
+        first_success_step = step
+    return first_success_step, consecutive_success_steps + 1
 
 
 def _beam_episode_metric_row(

@@ -62,6 +62,12 @@ dataset's saved `max_episode_steps=150` truncated a run even when the evaluator 
 `--max-steps 300` now permits a real 300-step rollout (unless success, contact, or another simulator
 termination occurs first). Episode metrics for both `beam` and `itps_beam` now expose expanded,
 feasible, and retained node totals and per-replan values plus the feasible expansion fraction.
+Post-success hold accounting now resets immediately when the simulator success signal becomes
+false. `termination_reason=stable_success` therefore requires the initial successful sample plus
+16 consecutive successful hold samples, and `stable_goal_reached` can recognize a later complete
+hold after an earlier hit-and-drift. This fixes the inconsistency exposed by the max-300 hybrid run,
+where episodes 001 and 009 were incorrectly terminated as stable despite final TCP distances above
+the 2.5 cm goal threshold; the historical rows remain invalid for stable-success claims.
 The active DP3 architecture now has one canonical module implementation at
 `pg3d/policies/dp3/modules.py`; two unreferenced legacy copies at the top of `pg3d/policies/`
 were removed before writing line-referenced diffusion-policy documentation.

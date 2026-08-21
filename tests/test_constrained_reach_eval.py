@@ -102,6 +102,7 @@ from scripts.eval_constrained_reach import (
     _select_decision,
     _select_guided_candidates,
     _termination_reason,
+    _update_success_hold,
     _validate_embodied_obstacle_geometry,
     _validate_precomputed_initial_clearance,
     _write_artifact_manifest,
@@ -483,6 +484,33 @@ def test_stable_goal_requires_complete_post_success_hold() -> None:
         goal_threshold=0.025,
         hold_steps=2,
     )
+    assert stable_goal_reached(
+        [0.5, 0.02, 0.03, 0.02, 0.01, 0.02],
+        first_success_step=1,
+        goal_threshold=0.025,
+        hold_steps=2,
+    )
+
+
+def test_success_hold_resets_after_drift() -> None:
+    first: int | None = None
+    held = 0
+    first, held = _update_success_hold(
+        success=True, step=10, first_success_step=first, consecutive_success_steps=held
+    )
+    assert (first, held) == (10, 1)
+    first, held = _update_success_hold(
+        success=True, step=11, first_success_step=first, consecutive_success_steps=held
+    )
+    assert (first, held) == (10, 2)
+    first, held = _update_success_hold(
+        success=False, step=12, first_success_step=first, consecutive_success_steps=held
+    )
+    assert (first, held) == (10, 0)
+    first, held = _update_success_hold(
+        success=True, step=13, first_success_step=first, consecutive_success_steps=held
+    )
+    assert (first, held) == (10, 1)
 
 
 def test_clearance_series_and_violation_metrics_preserve_events() -> None:
