@@ -690,6 +690,7 @@ def main(argv: list[str] | None = None) -> int:
                 render_mode="rgb_array" if args.video else None,
                 obstacle_half_extents=_embodied_obstacle_half_extents(args),
                 obstacle_family=args.obstacle_family,
+                max_episode_steps=args.max_steps,
             ),
         )
         ghost_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
@@ -2182,14 +2183,15 @@ def run_eval_episode(
         replan_start_action_indices=replan_start_action_indices,
     )
     row.update(compute_counts.to_metric_row(replans=replans))
-    if method == "beam":
-        row.update(
-            {
-                "beam_expanded_nodes": int(beam_expanded_nodes),
-                "beam_feasible_nodes": int(beam_feasible_nodes),
-                "beam_retained_nodes": int(beam_retained_nodes),
-            }
+    row.update(
+        _beam_episode_metric_row(
+            method=method,
+            replans=replans,
+            expanded=beam_expanded_nodes,
+            feasible=beam_feasible_nodes,
+            retained=beam_retained_nodes,
         )
+    )
     row.update(
         {
             "physical_collision": physical_collision,
@@ -2504,6 +2506,25 @@ def _episode_step_limit(
     if max_task_steps <= 0 or post_success_steps < 0:
         raise ValueError("invalid task or post-success step limit")
     return max_task_steps if first_success_step is None else max_task_steps + post_success_steps
+
+
+def _beam_episode_metric_row(
+    *, method: EvalMethod, replans: int, expanded: int, feasible: int, retained: int
+) -> dict[str, int | float | None]:
+    """Expose episode beam work for both unguided and ITPS-guided beam methods."""
+    if method not in {"beam", "itps_beam"}:
+        return {}
+    return {
+        "beam_expanded_nodes": int(expanded),
+        "beam_feasible_nodes": int(feasible),
+        "beam_retained_nodes": int(retained),
+        "beam_expanded_nodes_per_replan": _per_replan(expanded, replans),
+        "beam_feasible_nodes_per_replan": _per_replan(feasible, replans),
+        "beam_retained_nodes_per_replan": _per_replan(retained, replans),
+        "beam_feasible_fraction": (
+            float(feasible) / float(expanded) if expanded > 0 else None
+        ),
+    }
 
 
 def _select_decision(
@@ -5123,10 +5144,15 @@ def _env_kwargs(
     render_mode: str | None,
     obstacle_half_extents: tuple[float, float, float] | None = None,
     obstacle_family: str = "box",
+    max_episode_steps: int | None = None,
 ) -> dict[str, Any]:
     env_kwargs = dict(metadata["env_kwargs"])
     env_kwargs["obs_mode"] = "pointcloud"
     env_kwargs["num_envs"] = 1
+    if max_episode_steps is not None:
+        if max_episode_steps <= 0:
+            raise ValueError("max_episode_steps must be positive")
+        env_kwargs["max_episode_steps"] = int(max_episode_steps)
     if render_mode is None:
         env_kwargs.pop("render_mode", None)
     else:

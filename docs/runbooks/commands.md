@@ -1206,6 +1206,11 @@ For H3, change the method to `itps_beam`, set `--planning-horizon-chunks 3 --bea
 resulting beam trace must report ten expansions per replan. Do not point either command at
 regenerated constraints or alter the six frozen episode identities after inspecting outcomes.
 
+For the extended U-shape pilot, pass `--max-steps 300 --profile --sync-cuda-timers`. The evaluator
+overrides the dataset's historical 150-step Gym time limit, so a nonterminal episode can now reach
+300 executed steps. Compare total compute and the per-replan fields because collision and success
+termination can still produce different episode lengths across methods.
+
 The Rerun view is the preferred inspection path because the camera can be orbited to see the open
 cavity. The MP4 uses the fixed paper camera and views the U mainly from behind.
 

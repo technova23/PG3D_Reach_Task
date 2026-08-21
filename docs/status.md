@@ -57,6 +57,11 @@ the frozen guided beam setting uses depth 3, width 2, and branch factor 2 for th
 expansions. Exact diagnostics retain minimum clearance, maximum and integral violation, selected
 seed metadata, and per-depth beam traces. CPU-focused selection/beam tests pass; live CUDA and
 ManiSkill artifact runs remain to be executed.
+The evaluator now forwards `--max-steps` to Gym's control-environment time limit. Previously the
+dataset's saved `max_episode_steps=150` truncated a run even when the evaluator requested 300;
+`--max-steps 300` now permits a real 300-step rollout (unless success, contact, or another simulator
+termination occurs first). Episode metrics for both `beam` and `itps_beam` now expose expanded,
+feasible, and retained node totals and per-replan values plus the feasible expansion fraction.
 The active DP3 architecture now has one canonical module implementation at
 `pg3d/policies/dp3/modules.py`; two unreferenced legacy copies at the top of `pg3d/policies/`
 were removed before writing line-referenced diffusion-policy documentation.

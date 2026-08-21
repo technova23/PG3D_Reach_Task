@@ -68,6 +68,7 @@ from scripts.eval_constrained_reach import (
     _annotate_episode_video_frames,
     _artifact_file_record,
     _artifact_selection_summary,
+    _beam_episode_metric_row,
     _build_multichunk_candidates,
     _clearance_safe_candidate_spec,
     _constraint_bottom_z,
@@ -77,6 +78,7 @@ from scripts.eval_constrained_reach import (
     _effective_projection_half_extents,
     _embodied_obstacle_half_extents,
     _embodied_obstacle_reset_options,
+    _env_kwargs,
     _episode_artifact_identity,
     _episode_policy_seed,
     _episode_should_stop,
@@ -864,6 +866,41 @@ def test_compute_operation_counts_reject_decreasing_provider_counter() -> None:
             {"eef_geometry_queries": 2},
             {"eef_geometry_queries": 1},
         )
+
+
+def test_env_kwargs_override_dataset_time_limit() -> None:
+    metadata = {
+        "env_kwargs": {"max_episode_steps": 150, "obs_mode": "pointcloud"},
+    }
+
+    kwargs = _env_kwargs(metadata, render_mode=None, max_episode_steps=300)
+
+    assert kwargs["max_episode_steps"] == 300
+    with pytest.raises(ValueError, match="max_episode_steps"):
+        _env_kwargs(metadata, render_mode=None, max_episode_steps=0)
+
+
+@pytest.mark.parametrize("method", ["beam", "itps_beam"])
+def test_beam_episode_metrics_cover_guided_and_unguided_methods(method: str) -> None:
+    row = _beam_episode_metric_row(
+        method=method,  # type: ignore[arg-type]
+        replans=2,
+        expanded=20,
+        feasible=8,
+        retained=12,
+    )
+
+    assert row["beam_expanded_nodes"] == 20
+    assert row["beam_expanded_nodes_per_replan"] == pytest.approx(10.0)
+    assert row["beam_feasible_nodes_per_replan"] == pytest.approx(4.0)
+    assert row["beam_retained_nodes_per_replan"] == pytest.approx(6.0)
+    assert row["beam_feasible_fraction"] == pytest.approx(0.4)
+
+
+def test_non_beam_episode_metrics_remain_absent() -> None:
+    assert _beam_episode_metric_row(
+        method="itps_reranking", replans=1, expanded=0, feasible=0, retained=0
+    ) == {}
 
 
 def test_periodic_artifact_selection_includes_first_and_interval() -> None:
