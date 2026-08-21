@@ -18,15 +18,24 @@ import torch
 import zarr
 
 from pg3d.composition import (
+    AdaptiveWeightState,
     CandidateDiagnostics,
     ControllerInput,
     ControllerResult,
     ConvexScoreWeights,
+    FeasibleMassPosterior,
     GuidedScoreConfig,
     GuidedScoreMode,
+    NormalizedScoreTerms,
     RejectionController,
     RerankingController,
+    ScoreIntervalNode,
     ScoreWeights,
+    active_beam_width,
+    allocate_uncertain_boundary_node,
+    feasible_mass_risk,
+    route_descriptor,
+    route_distance,
 )
 from pg3d.composition.scoring import (
     consensus_deviations,
@@ -164,6 +173,28 @@ class ITPSGuidanceConfig:
             "robot_points": self.robot_points,
             "robot_sample_seed": self.robot_sample_seed,
         }
+
+
+@dataclass(frozen=True)
+class AdaptiveBeamConfig:
+    max_guided_proposals: int = 20
+    mass_epsilon: float = 1e-3
+    lower_quantile: float = 0.10
+    upper_quantile: float = 0.90
+    uncertainty_allocation: bool = False
+    dynamic_width: bool = False
+    route_diversity: bool = False
+    adaptive_rate: float = 0.25
+    adaptive_temperature: float = 1.0
+    decisive_margin: float = 0.05
+    route_separation_m: float = 0.05
+    diversity_score_tolerance: float = 0.10
+
+    def to_json(self) -> dict[str, Any]:
+        return _jsonable(self.__dict__)
+
+
+_DEFAULT_ADAPTIVE_BEAM_CONFIG = AdaptiveBeamConfig()
 
 
 @dataclass
@@ -361,6 +392,7 @@ class BeamNode:
     action_chunks: list[ActionChunk]
     rollouts: list[ImaginedRollout]
     candidate: CandidateDiagnostics | None = None
+    mass_posterior: FeasibleMassPosterior | None = None
 
     @property
     def feasible(self) -> bool:
@@ -411,6 +443,14 @@ class BeamRetainedNodeTrace:
     action_hash: str | None = None
     compute_counters: dict[str, int] = field(default_factory=dict)
     executed_lineage: bool = False
+    mass_probe_count: int = 0
+    mass_viable_count: int = 0
+    mass_posterior_mean: float | None = None
+    mass_posterior_lcb: float | None = None
+    mass_posterior_ucb: float | None = None
+    optimistic_score: float | None = None
+    pessimistic_score: float | None = None
+    route_descriptor: np.ndarray | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -436,6 +476,14 @@ class BeamRetainedNodeTrace:
             "action_hash": self.action_hash,
             "compute_counters": self.compute_counters,
             "executed_lineage": bool(self.executed_lineage),
+            "mass_probe_count": int(self.mass_probe_count),
+            "mass_viable_count": int(self.mass_viable_count),
+            "mass_posterior_mean": self.mass_posterior_mean,
+            "mass_posterior_lcb": self.mass_posterior_lcb,
+            "mass_posterior_ucb": self.mass_posterior_ucb,
+            "optimistic_score": self.optimistic_score,
+            "pessimistic_score": self.pessimistic_score,
+            "route_descriptor": self.route_descriptor,
         }
 
 
@@ -468,6 +516,8 @@ class BeamSearchTrace:
     selected_score: float
     selected_constraint_penalty: float
     selected_feasible: bool
+    guided_proposals_used: int = 0
+    guided_proposal_cap: int = 0
 
     @property
     def expanded_total(self) -> int:
@@ -491,6 +541,8 @@ class BeamSearchTrace:
                 "constraint_penalty": float(self.selected_constraint_penalty),
                 "feasible": bool(self.selected_feasible),
             },
+            "guided_proposals_used": int(self.guided_proposals_used),
+            "guided_proposal_cap": int(self.guided_proposal_cap),
         }
 
 
@@ -594,6 +646,14 @@ def main(argv: list[str] | None = None) -> int:
         barrier_temperature=float(args.itps_barrier_temperature),
         robot_points=int(args.itps_robot_points),
         robot_sample_seed=int(args.itps_robot_sample_seed),
+    )
+    adaptive_beam_config = AdaptiveBeamConfig(
+        max_guided_proposals=int(args.max_guided_proposals),
+        uncertainty_allocation=bool(args.uncertainty_allocation),
+        dynamic_width=bool(args.dynamic_beam_width),
+        route_diversity=bool(args.route_diversity),
+        adaptive_rate=float(args.adaptive_rate),
+        adaptive_temperature=float(args.adaptive_temperature),
     )
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, args.checkpoint_dir)
     checkpoint_sha256 = _artifact_file_record(checkpoint_path)["sha256"]
@@ -928,6 +988,7 @@ def main(argv: list[str] | None = None) -> int:
                         itps_collision_model=itps_collision_model,
                         constraint_target=args.constraint_target,
                         score_config=score_config,
+                        adaptive_beam_config=adaptive_beam_config,
                         artifact_identity={
                             "run_id": run_id,
                             "git_commit": git_info["commit"],
@@ -967,6 +1028,7 @@ def main(argv: list[str] | None = None) -> int:
                                 method=method,
                                 itps_config=itps_config,
                                 score_config=score_config,
+                                adaptive_beam_config=adaptive_beam_config,
                             ),
                             "artifact_manifest_path": (
                                 str(artifact_manifest_path)
@@ -1058,6 +1120,7 @@ def main(argv: list[str] | None = None) -> int:
         "ddim_eta": float(args.ddim_eta),
         "itps": itps_config.to_json(),
         "score": score_config.to_json(),
+        "adaptive_beam": adaptive_beam_config.to_json(),
         "fixture_manifest": (fixture_manifest.to_json() if fixture_manifest is not None else None),
         "constraint_source": _constraint_source_summary(args),
         "placement_selection": {
@@ -1253,6 +1316,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar=("GOAL", "CLEARANCE", "SMOOTHNESS", "MASS"),
     )
     parser.add_argument("--verification-buffer", type=float, default=0.0)
+    parser.add_argument("--max-guided-proposals", type=int, default=20)
+    parser.add_argument("--adaptive-rate", type=float, default=0.25)
+    parser.add_argument("--adaptive-temperature", type=float, default=1.0)
+    parser.add_argument("--uncertainty-allocation", action="store_true")
+    parser.add_argument("--dynamic-beam-width", action="store_true")
+    parser.add_argument("--route-diversity", action="store_true")
     parser.add_argument(
         "--max-steps",
         type=int,
@@ -1691,6 +1760,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--verification-buffer must be finite and non-negative")
     if args.score_weights is not None:
         ConvexScoreWeights(*map(float, args.score_weights))
+    if args.max_guided_proposals <= 0:
+        raise ValueError("--max-guided-proposals must be positive")
+    if args.adaptive_rate <= 0.0 or args.adaptive_temperature <= 0.0:
+        raise ValueError("adaptive rate and temperature must be positive")
     if args.embody_obstacle and args.obstacle_family == "cylinder":
         args.avoid_shape = "cylinder"
         if args.avoid_box_half_extents is None:
@@ -1940,6 +2013,7 @@ def run_eval_episode(
     itps_collision_model: DifferentiablePandaCollisionPoints | None,
     constraint_target: Literal["eef", "robot"],
     score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
+    adaptive_beam_config: AdaptiveBeamConfig = _DEFAULT_ADAPTIVE_BEAM_CONFIG,
     video_env_factory: Callable[[], Any] | None = None,
     constraint_overlay_alpha: float = 0.25,
     constraint_overlay_color: tuple[float, float, float] = (1.0, 0.25, 0.05),
@@ -2070,10 +2144,22 @@ def run_eval_episode(
     beam_expanded_nodes = 0
     beam_feasible_nodes = 0
     beam_retained_nodes = 0
+    guided_proposals_used = 0
+    mass_probe_proposals = 0
     action_selection_times: list[float] = []
     executed_action_targets: list[np.ndarray] = []
     replan_start_action_indices: list[int] = []
     compute_counts = ComputeOperationCounts()
+    adaptive_weight_state = (
+        AdaptiveWeightState.from_weights(
+            score_config.weights,
+            rho=adaptive_beam_config.adaptive_rate,
+            temperature=adaptive_beam_config.adaptive_temperature,
+        )
+        if score_config.mode == "adaptive_mass"
+        else None
+    )
+    adaptive_weight_updates: list[dict[str, Any]] = []
     terminated_or_truncated = False
     physical_collision = False
     physical_collision_step: int | None = None
@@ -2096,6 +2182,11 @@ def run_eval_episode(
                 first_success_step=first_goal_entry_step,
             )
             provider_counts_before = provider.counter_snapshot() if provider is not None else {}
+            active_score_config = (
+                replace(score_config, weights=adaptive_weight_state.weights())
+                if adaptive_weight_state is not None
+                else score_config
+            )
             memory_baseline = compute_counts.begin_action_selection(policy.device)
             try:
                 with timer.time(
@@ -2130,7 +2221,8 @@ def run_eval_episode(
                         itps_config=itps_config,
                         itps_collision_model=itps_collision_model,
                         constraint_target=constraint_target,
-                        score_config=score_config,
+                        score_config=active_score_config,
+                        adaptive_beam_config=adaptive_beam_config,
                         proposal_writer=proposal_writer,
                         replan=replans,
                     )
@@ -2152,10 +2244,34 @@ def run_eval_episode(
                     "beam_least_bad_fallback",
                 }:
                     fallback_count += 1
+                if adaptive_weight_state is not None:
+                    selected_terms = decision.result.selected.normalized_score_terms
+                    update = adaptive_weight_state.update(
+                        [
+                            selected_terms.get("goal", 0.0),
+                            selected_terms.get("clearance", 0.0),
+                            selected_terms.get("smoothness", 0.0),
+                            selected_terms.get("mass", 0.0),
+                        ],
+                        infeasible_fallback=not decision.result.selected.feasible,
+                    )
+                    adaptive_weight_updates.append(
+                        {
+                            "replan": replans - 1,
+                            "weights_used": active_score_config.weights.to_json(),
+                            **update,
+                        }
+                    )
             if decision.beam_trace is not None:
                 beam_expanded_nodes += decision.beam_trace.expanded_total
                 beam_feasible_nodes += sum(depth.feasible for depth in decision.beam_trace.depths)
                 beam_retained_nodes += decision.beam_trace.retained_total
+                guided_proposals_used += decision.beam_trace.guided_proposals_used
+                mass_probe_proposals += max(
+                    0,
+                    decision.beam_trace.guided_proposals_used
+                    - decision.beam_trace.expanded_total,
+                )
             _write_decision(
                 decisions_file,
                 method=method,
@@ -2545,6 +2661,9 @@ def run_eval_episode(
         str(proposal_writer.records_path) if proposal_writer is not None else None
     )
     row.update(_verification_episode_metrics(verification_rows))
+    row["guided_proposals_used"] = guided_proposals_used
+    row["mass_probe_proposals"] = mass_probe_proposals
+    row["adaptive_weight_updates"] = adaptive_weight_updates
     row["imagined_execution_trace"] = str(verification_log)
     return row
 
@@ -2938,6 +3057,7 @@ def _select_decision(
     directional_weight: float = 1.0,
     proposal_writer: GuidedProposalTraceWriter | None = None,
     replan: int = 0,
+    adaptive_beam_config: AdaptiveBeamConfig = _DEFAULT_ADAPTIVE_BEAM_CONFIG,
 ) -> EvalDecisionSummary:
     if method == "base":
         chunk = adapter.sample_action_chunks(obs_window, k=1, rng=rng)[0]
@@ -3015,6 +3135,7 @@ def _select_decision(
                 score_config=score_config,
                 proposal_writer=proposal_writer,
                 replan=replan,
+                adaptive_beam_config=adaptive_beam_config,
             )
         feasible = sum(1 for candidate in result.candidates if candidate.feasible)
         return EvalDecisionSummary(
@@ -3174,6 +3295,7 @@ def _select_beam_search(
     guided_root_seed: int = 0,
     proposal_writer: GuidedProposalTraceWriter | None = None,
     replan: int = 0,
+    adaptive_beam_config: AdaptiveBeamConfig = _DEFAULT_ADAPTIVE_BEAM_CONFIG,
 ) -> tuple[ControllerResult, BeamSearchTrace]:
     """Expand and feasible-first prune a DP3 continuation beam."""
     if beam_width <= 0:
@@ -3197,6 +3319,8 @@ def _select_beam_search(
     depth_traces: list[BeamDepthTrace] = []
     expanded_depths: list[tuple[list[BeamNode], set[str]]] = []
     candidate_index = 0
+    guided_proposals_used = 0
+    mass_enabled = guided and score_config.mode in {"mass_mean", "mass_lcb", "adaptive_mass"}
     for depth in range(1, planning_horizon_chunks + 1):
         expanded, candidate_index = _expand_beam_frontier(
             frontier=frontier,
@@ -3228,7 +3352,74 @@ def _select_beam_search(
         )
         if not expanded:
             raise RuntimeError(f"beam search produced no nodes at depth {depth}")
-        frontier = _prune_beam_nodes(expanded, beam_width=beam_width)
+        if guided:
+            guided_proposals_used += len(expanded)
+            if guided_proposals_used > adaptive_beam_config.max_guided_proposals:
+                raise RuntimeError("guided search exceeded the proposal cap")
+        if mass_enabled:
+            guided_proposals_used += _probe_feasible_mass_nodes(
+                nodes=expanded,
+                policy=policy,
+                provider=provider,
+                world_model=world_model,
+                scene=scene,
+                constraints=constraints,
+                score_config=score_config,
+                itps_config=itps_config,
+                compute_counts=compute_counts,
+                collision_model=collision_model,
+                constraint_target=constraint_target,
+                guided_root_seed=guided_root_seed,
+                proposal_writer=proposal_writer,
+                replan=replan,
+                max_new_probes=(adaptive_beam_config.max_guided_proposals - guided_proposals_used),
+            )
+            if guided_proposals_used > adaptive_beam_config.max_guided_proposals:
+                raise RuntimeError("guided search exceeded the proposal cap")
+            if adaptive_beam_config.uncertainty_allocation and depth == planning_horizon_chunks:
+                while guided_proposals_used < adaptive_beam_config.max_guided_proposals:
+                    interval = allocate_uncertain_boundary_node(
+                        _score_interval_nodes(expanded),
+                        retention_width=min(beam_width, len(expanded)),
+                    )
+                    if interval is None:
+                        break
+                    target_node = next(
+                        node for node in expanded if node.node_id == interval.ancestry
+                    )
+                    guided_proposals_used += _probe_feasible_mass_nodes(
+                        nodes=[target_node],
+                        policy=policy,
+                        provider=provider,
+                        world_model=world_model,
+                        scene=scene,
+                        constraints=constraints,
+                        score_config=score_config,
+                        itps_config=itps_config,
+                        compute_counts=compute_counts,
+                        collision_model=collision_model,
+                        constraint_target=constraint_target,
+                        guided_root_seed=guided_root_seed,
+                        proposal_writer=proposal_writer,
+                        replan=replan,
+                        max_new_probes=1,
+                    )
+        active_width = beam_width
+        feasible_intervals = _score_interval_nodes(expanded)
+        if adaptive_beam_config.dynamic_width and feasible_intervals:
+            active_width = active_beam_width(
+                feasible_intervals,
+                margin=adaptive_beam_config.decisive_margin,
+                minimum=1,
+                maximum=min(2, beam_width),
+            )
+        frontier = _prune_beam_nodes(
+            expanded,
+            beam_width=active_width,
+            route_diversity_enabled=adaptive_beam_config.route_diversity,
+            route_separation_m=adaptive_beam_config.route_separation_m,
+            diversity_score_tolerance=adaptive_beam_config.diversity_score_tolerance,
+        )
         retained_ids = {node.node_id for node in frontier}
         expanded_depths.append((expanded, retained_ids))
         compute_snapshot = _compute_count_snapshot(compute_counts)
@@ -3337,6 +3528,8 @@ def _select_beam_search(
             selected_score=selected.total_score,
             selected_constraint_penalty=selected.constraint_penalty,
             selected_feasible=selected.feasible,
+            guided_proposals_used=guided_proposals_used,
+            guided_proposal_cap=(adaptive_beam_config.max_guided_proposals if guided else 0),
         ),
     )
 
@@ -3536,13 +3729,173 @@ def _imagine_beam_child(
     return rollout, next_entry, next_window
 
 
-def _prune_beam_nodes(nodes: list[BeamNode], *, beam_width: int) -> list[BeamNode]:
+def _probe_feasible_mass_nodes(
+    *,
+    nodes: list[BeamNode],
+    policy: SimpleDP3 | None,
+    provider: ManiSkillGhostPandaGeometryProvider,
+    world_model: GeometricWorldModel,
+    scene: Any,
+    constraints: list[AvoidRegion],
+    score_config: GuidedScoreConfig,
+    itps_config: ITPSGuidanceConfig | None,
+    compute_counts: ComputeOperationCounts | None,
+    collision_model: DifferentiablePandaCollisionPoints | None,
+    constraint_target: Literal["eef", "robot"],
+    guided_root_seed: int,
+    proposal_writer: GuidedProposalTraceWriter | None,
+    replan: int,
+    max_new_probes: int,
+) -> int:
+    feasible_nodes = [node for node in nodes if _beam_candidate(node).feasible]
+    if len(feasible_nodes) > max_new_probes:
+        raise RuntimeError("initial feasible-mass probes would exceed the guided proposal cap")
+    if not feasible_nodes:
+        return 0
+    if policy is None or itps_config is None or compute_counts is None:
+        raise RuntimeError("mass probing requires guided policy state")
+    probe_indices = [
+        0 if node.mass_posterior is None else node.mass_posterior.probes for node in feasible_nodes
+    ]
+    seeds = [
+        _guided_seed(guided_root_seed, "mass_probe", node.depth, node.node_id, probe_index)
+        for node, probe_index in zip(feasible_nodes, probe_indices, strict=True)
+    ]
+    chunks = sample_itps_candidates(
+        policy=policy,
+        provider=provider,
+        observation_windows=[node.obs_window for node in feasible_nodes],
+        constraints=constraints,
+        seeds=seeds,
+        config=itps_config,
+        compute_counts=compute_counts,
+        collision_model=collision_model,
+        constraint_target=constraint_target,
+        proposal_writer=proposal_writer,
+        proposal_contexts=[
+            {
+                "proposal_id": f"r{replan}/mass/{node.node_id}/p{probe_index}",
+                "purpose": "mass_probe",
+                "replan": replan,
+                "depth": node.depth + 1,
+                "parent_id": node.node_id,
+                "ancestry": _beam_ancestry(node.node_id),
+                "branch_index": probe_index,
+            }
+            for node, probe_index in zip(feasible_nodes, probe_indices, strict=True)
+        ],
+    )
+    for node, chunk in zip(feasible_nodes, chunks, strict=True):
+        probe_rollout = world_model.imagine(
+            entry_to_world_model_observation(node.current_entry),
+            chunk,
+            metadata={"purpose": "mass_probe", "parent_id": node.node_id},
+        )
+        extended_rollout = concatenate_rollouts(
+            [*node.rollouts, probe_rollout],
+            metadata={"purpose": "mass_probe", "parent_id": node.node_id},
+        )
+        probe_candidate = _candidate_diagnostics(
+            index=_beam_candidate(node).index,
+            attempted_k=1,
+            action_chunk=extended_rollout.action_chunk,
+            rollout=extended_rollout,
+            scene=scene,
+            constraints=constraints,
+            consensus_deviation=0.0,
+            score_config=score_config,
+        )
+        node.mass_posterior = (node.mass_posterior or FeasibleMassPosterior()).update(
+            probe_candidate.feasible
+        )
+        _apply_mass_score(node, score_config=score_config)
+        if proposal_writer is not None:
+            _record_guided_candidate(
+                proposal_writer,
+                probe_candidate,
+                action_chunk=chunk,
+                retained=None,
+                executed_lineage=False,
+            )
+    return len(feasible_nodes)
+
+
+def _apply_mass_score(node: BeamNode, *, score_config: GuidedScoreConfig) -> None:
+    candidate = _beam_candidate(node)
+    posterior = node.mass_posterior
+    if posterior is None:
+        return
+    lower = posterior.quantile(0.10)
+    upper = posterior.quantile(0.90)
+    selected_probability = posterior.mean if score_config.mode == "mass_mean" else lower
+    selected_risk = feasible_mass_risk(selected_probability)
+    base = candidate.normalized_score_terms
+    terms = NormalizedScoreTerms(
+        goal=float(base["goal"]),
+        clearance=float(base["clearance"]),
+        smoothness=float(base["smoothness"]),
+        mass=selected_risk,
+    )
+    optimistic_terms = replace(terms, mass=feasible_mass_risk(upper))
+    pessimistic_terms = replace(terms, mass=feasible_mass_risk(lower))
+    candidate.normalized_score_terms = terms.to_json()
+    candidate.total_score = score_config.feasible_score(
+        terms, avoidance_penalty=candidate.constraint_penalty
+    )
+    candidate.mass_probe_count = posterior.probes
+    candidate.mass_viable_count = posterior.viable
+    candidate.mass_posterior_mean = posterior.mean
+    candidate.mass_posterior_lcb = lower
+    candidate.mass_posterior_ucb = upper
+    candidate.optimistic_score = score_config.feasible_score(
+        optimistic_terms, avoidance_penalty=candidate.constraint_penalty
+    )
+    candidate.pessimistic_score = score_config.feasible_score(
+        pessimistic_terms, avoidance_penalty=candidate.constraint_penalty
+    )
+    candidate.route_descriptor = route_descriptor(candidate.rollout.eef_path, points=16)
+
+
+def _score_interval_nodes(nodes: list[BeamNode]) -> list[ScoreIntervalNode]:
+    return [
+        ScoreIntervalNode(
+            ancestry=node.node_id,
+            optimistic_score=(
+                candidate.total_score
+                if candidate.optimistic_score is None
+                else candidate.optimistic_score
+            ),
+            pessimistic_score=(
+                candidate.total_score
+                if candidate.pessimistic_score is None
+                else candidate.pessimistic_score
+            ),
+        )
+        for node in nodes
+        if (candidate := _beam_candidate(node)).feasible
+    ]
+
+
+def _prune_beam_nodes(
+    nodes: list[BeamNode],
+    *,
+    beam_width: int,
+    route_diversity_enabled: bool = False,
+    route_separation_m: float = 0.05,
+    diversity_score_tolerance: float = 0.10,
+) -> list[BeamNode]:
     """Retain feasible prefixes first, then least-violating infeasible prefixes."""
     if beam_width <= 0:
         raise ValueError("beam_width must be positive")
     scored = [(node, node.candidate) for node in nodes if node.candidate is not None]
     feasible = [node for node, candidate in scored if candidate.feasible]
     feasible.sort(key=lambda node: (_beam_candidate(node).total_score, node.node_id))
+    if route_diversity_enabled and beam_width > 1 and len(feasible) > 1:
+        feasible = _diverse_feasible_order(
+            feasible,
+            separation_m=route_separation_m,
+            score_tolerance=diversity_score_tolerance,
+        )
     infeasible = [node for node, candidate in scored if not candidate.feasible]
     infeasible.sort(
         key=lambda node: (
@@ -3555,6 +3908,34 @@ def _prune_beam_nodes(nodes: list[BeamNode], *, beam_width: int) -> list[BeamNod
         )
     )
     return [*feasible, *infeasible][:beam_width]
+
+
+def _diverse_feasible_order(
+    ordered: list[BeamNode],
+    *,
+    separation_m: float,
+    score_tolerance: float,
+) -> list[BeamNode]:
+    best = ordered[0]
+    best_score = _beam_candidate(best).total_score
+    best_descriptor = _beam_candidate(best).route_descriptor
+    if best_descriptor is None:
+        best_descriptor = route_descriptor(_beam_candidate(best).rollout.eef_path, points=16)
+    eligible = []
+    for node in ordered[1:]:
+        candidate = _beam_candidate(node)
+        if candidate.total_score > best_score + score_tolerance:
+            continue
+        descriptor = candidate.route_descriptor
+        if descriptor is None:
+            descriptor = route_descriptor(candidate.rollout.eef_path, points=16)
+        distance = route_distance(best_descriptor, descriptor)
+        if distance >= separation_m:
+            eligible.append((distance, node.node_id, node))
+    if not eligible:
+        return ordered
+    diverse = min(eligible, key=lambda item: (-item[0], item[1]))[2]
+    return [best, diverse, *(node for node in ordered[1:] if node is not diverse)]
 
 
 def _beam_candidate(node: BeamNode) -> CandidateDiagnostics:
@@ -3604,6 +3985,18 @@ def _beam_node_trace(
         observation_hash=node.action_chunks[-1].metadata.get("conditioning_hash"),
         action_hash=action_sha256(node.action_chunks[-1]),
         compute_counters=dict(compute_counters or {}),
+        mass_probe_count=candidate.mass_probe_count,
+        mass_viable_count=candidate.mass_viable_count,
+        mass_posterior_mean=candidate.mass_posterior_mean,
+        mass_posterior_lcb=candidate.mass_posterior_lcb,
+        mass_posterior_ucb=candidate.mass_posterior_ucb,
+        optimistic_score=candidate.optimistic_score,
+        pessimistic_score=candidate.pessimistic_score,
+        route_descriptor=(
+            None
+            if candidate.route_descriptor is None
+            else np.asarray(candidate.route_descriptor, dtype=np.float32).copy()
+        ),
     )
 
 
@@ -3864,7 +4257,7 @@ def _record_guided_candidate(
     candidate: CandidateDiagnostics,
     *,
     action_chunk: ActionChunk | None = None,
-    retained: bool,
+    retained: bool | None,
     executed_lineage: bool,
 ) -> None:
     _write_guided_proposal_record(
@@ -3885,6 +4278,16 @@ def _record_guided_candidate(
             "violation_max": candidate.violation_max,
             "violation_integral": candidate.violation_integral,
             "fallback_key": candidate.fallback_key,
+            "mass_probe_count": candidate.mass_probe_count,
+            "mass_viable_count": candidate.mass_viable_count,
+            "mass_posterior_mean": candidate.mass_posterior_mean,
+            "mass_posterior_lcb": candidate.mass_posterior_lcb,
+            "mass_posterior_ucb": candidate.mass_posterior_ucb,
+            "optimistic_score": candidate.optimistic_score,
+            "pessimistic_score": candidate.pessimistic_score,
+            "route_descriptor": (
+                None if candidate.route_descriptor is None else candidate.route_descriptor.tolist()
+            ),
         },
         retained=retained,
         executed_lineage=executed_lineage,
@@ -3896,7 +4299,7 @@ def _write_guided_proposal_record(
     *,
     action_chunk: ActionChunk,
     score_data: dict[str, Any] | None,
-    retained: bool,
+    retained: bool | None,
     executed_lineage: bool,
 ) -> None:
     metadata = action_chunk.metadata
@@ -4189,6 +4592,7 @@ def _candidate_diagnostics(
         normalized_score_terms=normalized_terms.to_json(),
         applied_score_weights=score_config.weights.to_json(),
         fallback_key=fallback_key,
+        route_descriptor=route_descriptor(rollout.eef_path, points=16),
     )
 
 
@@ -6238,6 +6642,7 @@ def _method_config(
     method: str,
     itps_config: ITPSGuidanceConfig,
     score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
+    adaptive_beam_config: AdaptiveBeamConfig = _DEFAULT_ADAPTIVE_BEAM_CONFIG,
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
         "planning_horizon_chunks": int(args.planning_horizon_chunks),
@@ -6245,6 +6650,7 @@ def _method_config(
         "geometry_mode": str(args.geometry_mode),
         "constraint_target": str(args.constraint_target),
         "score": score_config.to_json(),
+        "adaptive_beam": adaptive_beam_config.to_json(),
     }
     if method in {"rejection", "reranking"}:
         config["k_schedule"] = [int(value) for value in args.k_schedule]

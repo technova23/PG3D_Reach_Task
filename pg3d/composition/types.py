@@ -85,6 +85,14 @@ class CandidateDiagnostics:
     normalized_score_terms: dict[str, float] = field(default_factory=dict)
     applied_score_weights: dict[str, float] = field(default_factory=dict)
     fallback_key: tuple[Any, ...] | None = None
+    mass_probe_count: int = 0
+    mass_viable_count: int = 0
+    mass_posterior_mean: float | None = None
+    mass_posterior_lcb: float | None = None
+    mass_posterior_ucb: float | None = None
+    optimistic_score: float | None = None
+    pessimistic_score: float | None = None
+    route_descriptor: np.ndarray | None = None
 
 
 @dataclass

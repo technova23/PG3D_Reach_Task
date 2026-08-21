@@ -17,7 +17,7 @@ def audit_beam_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         active_width = int(nodes[0]["active_width"])
         expected = _ordered_nodes(nodes)[:active_width]
         actual = [node for node in nodes if bool(node["retained"])]
-        if [node["node_id"] for node in expected] != [node["node_id"] for node in actual]:
+        if {node["node_id"] for node in expected} != {node["node_id"] for node in actual}:
             errors.append(f"depth {depth.get('depth')} retention cannot be reconstructed")
         _audit_observation_hashes(nodes, errors=errors, depth=int(depth["depth"]))
 
@@ -26,7 +26,10 @@ def audit_beam_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         final_nodes = [node for node in depths[-1].get("nodes", []) if node.get("retained")]
         if final_nodes:
             reconstructed_selection = _ordered_nodes(final_nodes)[0]["node_id"]
-            if reconstructed_selection != trace.get("selected_node_id"):
+            selected_node_id = trace.get("selected_node_id")
+            if selected_node_id is None:
+                selected_node_id = dict(trace.get("selected", {})).get("node_id")
+            if reconstructed_selection != selected_node_id:
                 errors.append("final selection cannot be reconstructed")
     return {
         "valid": not errors,
