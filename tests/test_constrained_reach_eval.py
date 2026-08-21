@@ -83,6 +83,7 @@ from scripts.eval_constrained_reach import (
     _episode_step_limit,
     _finalize_constraints,
     _ground_embodied_region,
+    _guided_seed,
     _local_path_points_xy,
     _method_config,
     _obs_windows_to_torch,
@@ -97,6 +98,7 @@ from scripts.eval_constrained_reach import (
     _seed_torch,
     _select_beam_search,
     _select_decision,
+    _select_guided_candidates,
     _termination_reason,
     _validate_embodied_obstacle_geometry,
     _validate_precomputed_initial_clearance,
@@ -2797,6 +2799,8 @@ def _beam_node_for_pruning(
         consensus_deviation=0.0,
         policy_surrogate=None,
         total_score=score,
+        violation_max=penalty,
+        violation_integral=penalty,
     )
     return BeamNode(
         node_id=node_id,
@@ -2808,3 +2812,31 @@ def _beam_node_for_pruning(
         rollouts=[rollout],
         candidate=candidate,
     )
+
+
+def test_guided_seed_is_identity_stable() -> None:
+    assert _guided_seed(7, 2, "d1:n0", 1) == _guided_seed(7, 2, "d1:n0", 1)
+    assert _guided_seed(7, 2, "d1:n0", 1) != _guided_seed(7, 2, "d1:n1", 1)
+
+
+def test_guided_selection_is_feasible_first_with_stable_ties() -> None:
+    infeasible = _beam_node_for_pruning(
+        "infeasible", feasible=False, penalty=0.0, score=0.0
+    ).candidate
+    feasible_later = _beam_node_for_pruning(
+        "feasible-later", feasible=True, penalty=1.0, score=2.0
+    ).candidate
+    feasible_first = _beam_node_for_pruning(
+        "feasible-first", feasible=True, penalty=1.0, score=2.0
+    ).candidate
+    assert infeasible is not None and feasible_later is not None and feasible_first is not None
+    infeasible.index = 0
+    feasible_later.index = 2
+    feasible_first.index = 1
+
+    result = _select_guided_candidates(
+        [infeasible, feasible_later, feasible_first], attempted_k=3
+    )
+
+    assert result.selected.index == 1
+    assert result.selection_reason == "best_feasible"

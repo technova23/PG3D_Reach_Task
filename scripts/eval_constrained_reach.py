@@ -125,7 +125,9 @@ from scripts.rollout_dp3_reach_policy import (
     select_rollout_specs,
 )
 
-EvalMethod = Literal["base", "beam", "rejection", "reranking", "itps"]
+EvalMethod = Literal[
+    "base", "beam", "rejection", "reranking", "itps", "itps_reranking", "itps_beam"
+]
 GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
 _CARTON_HALF_EXTENTS = (0.055, 0.08, 0.16)
@@ -325,6 +327,12 @@ class EvalDecisionSummary:
     beam_trace: BeamSearchTrace | None = None
 
 
+def _guided_seed(root_seed: int, *identity: object) -> int:
+    """Derive a stable Torch seed without depending on container or method order."""
+    payload = ":".join(["pg3d-itps-guided", str(root_seed), *(str(x) for x in identity)])
+    return int.from_bytes(hashlib.sha256(payload.encode()).digest()[:8], "little") % (2**31 - 1)
+
+
 @dataclass
 class BeamNode:
     """One retained prefix in the long-horizon beam frontier."""
@@ -372,6 +380,10 @@ class BeamRetainedNodeTrace:
     score: float
     constraint_penalty: float
     eef_path: np.ndarray
+    min_clearance: float | None = None
+    violation_max: float = 0.0
+    violation_integral: float = 0.0
+    seed_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -381,6 +393,10 @@ class BeamRetainedNodeTrace:
             "feasible": bool(self.feasible),
             "score": float(self.score),
             "constraint_penalty": float(self.constraint_penalty),
+            "min_clearance": self.min_clearance,
+            "violation_max": float(self.violation_max),
+            "violation_integral": float(self.violation_integral),
+            "seed_metadata": self.seed_metadata,
             "eef_path": self.eef_path,
         }
 
@@ -791,6 +807,7 @@ def main(argv: list[str] | None = None) -> int:
                         k_schedule=tuple(args.k_schedule),
                         beam_width=args.beam_width,
                         beam_branch_factor=args.beam_branch_factor,
+                        guided_candidates=args.guided_candidates,
                         gripper_open=args.gripper_open,
                         match_current_robot_points=args.match_current_robot_points,
                         video=write_video,
@@ -1086,7 +1103,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        choices=["base", "beam", "rejection", "reranking", "itps"],
+        choices=[
+            "base", "beam", "rejection", "reranking", "itps", "itps_reranking", "itps_beam"
+        ],
         default=["base", "rejection", "reranking"],
     )
     parser.add_argument("--itps-guide-ratio", type=float, default=60.0)
@@ -1108,6 +1127,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=0,
         help="Deterministic Panda collision-surface sampling seed.",
+    )
+    parser.add_argument(
+        "--guided-candidates",
+        type=int,
+        default=10,
+        help="Independent ITPS proposals per itps_reranking decision (default: 10).",
     )
     parser.add_argument(
         "--max-steps",
@@ -1606,6 +1631,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--itps-guide-ratio must be non-negative")
     if args.itps_mcmc_steps <= 0:
         raise ValueError("--itps-mcmc-steps must be positive")
+    if args.guided_candidates <= 0:
+        raise ValueError("--guided-candidates must be positive")
     if args.itps_barrier_temperature <= 0.0:
         raise ValueError("--itps-barrier-temperature must be positive")
     if args.itps_robot_points < 320:
@@ -1669,7 +1696,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         and (not np.isfinite(args.gripper_open) or not 0.0 <= args.gripper_open <= 0.04)
     ):
         raise ValueError("whole-body ITPS requires --gripper-open within [0, 0.04]")
-    guidance_methods = {"beam", "rejection", "reranking"}
+    guidance_methods = {"beam", "rejection", "reranking", "itps_reranking", "itps_beam"}
     if (
         args.constraint_target == "robot"
         and args.geometry_mode == "fast"
@@ -1722,6 +1749,7 @@ def run_eval_episode(
     k_schedule: tuple[int, ...],
     beam_width: int = 8,
     beam_branch_factor: int = 32,
+    guided_candidates: int = 10,
     gripper_open: float,
     match_current_robot_points: bool,
     video: bool,
@@ -1893,6 +1921,7 @@ def run_eval_episode(
                         k_schedule=k_schedule,
                         beam_width=beam_width,
                         beam_branch_factor=beam_branch_factor,
+                        guided_candidates=guided_candidates,
                         match_current_robot_points=match_current_robot_points,
                         rng=rng,
                         timer=timer,
@@ -2492,6 +2521,7 @@ def _select_decision(
     k_schedule: tuple[int, ...],
     beam_width: int = 8,
     beam_branch_factor: int = 32,
+    guided_candidates: int = 10,
     match_current_robot_points: bool,
     rng: np.random.Generator,
     timer: TimingRecorder,
@@ -2531,7 +2561,7 @@ def _select_decision(
             candidate_total=0,
             selection_reason="itps",
         )
-    if method == "beam":
+    if method in {"beam", "itps_beam"}:
         if world_model is None or provider is None:
             raise RuntimeError("beam search requires a world model and ghost provider")
         if match_current_robot_points:
@@ -2558,6 +2588,15 @@ def _select_decision(
                 timer=timer,
                 directional_sign=directional_sign,
                 directional_weight=directional_weight,
+                guided=method == "itps_beam",
+                policy=adapter.policy,
+                itps_config=itps_config,
+                compute_counts=compute_counts,
+                collision_model=itps_collision_model,
+                constraint_target=constraint_target,
+                guided_root_seed=(
+                    int(rng.integers(0, 2**31 - 1)) if method == "itps_beam" else 0
+                ),
             )
         feasible = sum(1 for candidate in result.candidates if candidate.feasible)
         return EvalDecisionSummary(
@@ -2567,6 +2606,48 @@ def _select_decision(
             candidate_total=len(result.candidates),
             selection_reason=result.selection_reason,
             beam_trace=beam_trace,
+        )
+    if method == "itps_reranking":
+        if world_model is None or provider is None:
+            raise RuntimeError("ITPS reranking requires an exact world model and ghost provider")
+        root_seed = int(rng.integers(0, 2**31 - 1))
+        chunks = sample_itps_candidates(
+            policy=adapter.policy,
+            provider=provider,
+            observation_windows=[obs_window] * guided_candidates,
+            constraints=constraints,
+            seeds=[_guided_seed(root_seed, 1, "root", i) for i in range(guided_candidates)],
+            config=itps_config,
+            compute_counts=compute_counts,
+            collision_model=itps_collision_model,
+            constraint_target=constraint_target,
+        )
+        consensus = consensus_deviations(chunks)
+        candidates = []
+        for index, (chunk, deviation) in enumerate(zip(chunks, consensus, strict=True)):
+            rollout = world_model.imagine(
+                entry_to_world_model_observation(current_entry), chunk
+            )
+            candidates.append(
+                _candidate_diagnostics(
+                    index=index,
+                    attempted_k=guided_candidates,
+                    action_chunk=chunk,
+                    rollout=rollout,
+                    scene=scene,
+                    constraints=constraints,
+                    consensus_deviation=deviation,
+                    directional_sign=directional_sign,
+                    directional_weight=directional_weight,
+                )
+            )
+        result = _select_guided_candidates(candidates, attempted_k=guided_candidates)
+        return EvalDecisionSummary(
+            selected_chunk=result.action_chunk,
+            result=result,
+            candidate_feasible=sum(candidate.feasible for candidate in candidates),
+            candidate_total=len(candidates),
+            selection_reason=result.selection_reason,
         )
     if world_model is None or provider is None:
         raise RuntimeError("controller methods require a world model and ghost provider")
@@ -2639,6 +2720,13 @@ def _select_beam_search(
     timer: TimingRecorder,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
+    guided: bool = False,
+    policy: SimpleDP3 | None = None,
+    itps_config: ITPSGuidanceConfig | None = None,
+    compute_counts: ComputeOperationCounts | None = None,
+    collision_model: DifferentiablePandaCollisionPoints | None = None,
+    constraint_target: Literal["eef", "robot"] = "eef",
+    guided_root_seed: int = 0,
 ) -> tuple[ControllerResult, BeamSearchTrace]:
     """Expand and feasible-first prune a DP3 continuation beam."""
     if beam_width <= 0:
@@ -2679,6 +2767,13 @@ def _select_beam_search(
             timer=timer,
             directional_sign=directional_sign,
             directional_weight=directional_weight,
+            guided=guided,
+            policy=policy,
+            itps_config=itps_config,
+            compute_counts=compute_counts,
+            collision_model=collision_model,
+            constraint_target=constraint_target,
+            guided_root_seed=guided_root_seed,
         )
         if not expanded:
             raise RuntimeError(f"beam search produced no nodes at depth {depth}")
@@ -2704,7 +2799,12 @@ def _select_beam_search(
     else:
         selected = min(
             final_candidates,
-            key=lambda candidate: (candidate.constraint_penalty, candidate.total_score),
+            key=lambda candidate: (
+                candidate.violation_max,
+                candidate.violation_integral,
+                float("inf") if candidate.goal_distance is None else candidate.goal_distance,
+                candidate.index,
+            ),
         )
         reason = "beam_least_bad_fallback"
     selected_node = next(
@@ -2759,13 +2859,44 @@ def _expand_beam_frontier(
     timer: TimingRecorder,
     directional_sign: int,
     directional_weight: float,
+    guided: bool = False,
+    policy: SimpleDP3 | None = None,
+    itps_config: ITPSGuidanceConfig | None = None,
+    compute_counts: ComputeOperationCounts | None = None,
+    collision_model: DifferentiablePandaCollisionPoints | None = None,
+    constraint_target: Literal["eef", "robot"] = "eef",
+    guided_root_seed: int = 0,
 ) -> tuple[list[BeamNode], int]:
     """Batch policy sampling across all parents, then imagine each child."""
     parent_indices = [
         parent_index for parent_index in range(len(frontier)) for _ in range(branch_factor)
     ]
     policy_windows = [frontier[parent_index].obs_window for parent_index in parent_indices]
-    chunks = adapter.sample_action_chunks_for_windows(policy_windows, rng=rng)
+    if guided:
+        if policy is None or itps_config is None or compute_counts is None:
+            raise RuntimeError("guided beam requires policy, ITPS config, and compute counters")
+        seeds = [
+            _guided_seed(
+                guided_root_seed,
+                depth,
+                frontier[parent_index].node_id,
+                local_index % branch_factor,
+            )
+            for local_index, parent_index in enumerate(parent_indices)
+        ]
+        chunks = sample_itps_candidates(
+            policy=policy,
+            provider=provider,
+            observation_windows=policy_windows,
+            constraints=constraints,
+            seeds=seeds,
+            config=itps_config,
+            compute_counts=compute_counts,
+            collision_model=collision_model,
+            constraint_target=constraint_target,
+        )
+    else:
+        chunks = adapter.sample_action_chunks_for_windows(policy_windows, rng=rng)
     if len(chunks) != len(parent_indices):
         raise RuntimeError("beam policy sampling returned an unexpected candidate count")
 
@@ -2786,7 +2917,7 @@ def _expand_beam_frontier(
         )
         candidate_index = next_candidate_index + local_index
         node = BeamNode(
-            node_id=f"d{depth}:n{candidate_index}",
+            node_id=f"{parent.node_id}/b{local_index % branch_factor}",
             parent_id=parent.node_id,
             depth=depth,
             current_entry=next_entry,
@@ -2799,10 +2930,12 @@ def _expand_beam_frontier(
         start = parent_index * branch_factor
         siblings = expanded[start : start + branch_factor]
         consensus = consensus_deviations([node.action_chunks[-1] for node in siblings])
-        for node, consensus_deviation in zip(siblings, consensus, strict=True):
+        for sibling_offset, (node, consensus_deviation) in enumerate(
+            zip(siblings, consensus, strict=True)
+        ):
             prefix_rollout = node.to_rollout()
             node.candidate = _candidate_diagnostics(
-                index=int(node.node_id.rsplit("n", maxsplit=1)[1]),
+                index=next_candidate_index + start + sibling_offset,
                 attempted_k=branch_factor,
                 action_chunk=prefix_rollout.action_chunk,
                 rollout=prefix_rollout,
@@ -2890,12 +3023,16 @@ def _prune_beam_nodes(nodes: list[BeamNode], *, beam_width: int) -> list[BeamNod
         raise ValueError("beam_width must be positive")
     scored = [(node, node.candidate) for node in nodes if node.candidate is not None]
     feasible = [node for node, candidate in scored if candidate.feasible]
-    feasible.sort(key=lambda node: _beam_candidate(node).total_score)
+    feasible.sort(key=lambda node: (_beam_candidate(node).total_score, node.node_id))
     infeasible = [node for node, candidate in scored if not candidate.feasible]
     infeasible.sort(
         key=lambda node: (
-            _beam_candidate(node).constraint_penalty,
-            _beam_candidate(node).total_score,
+            _beam_candidate(node).violation_max,
+            _beam_candidate(node).violation_integral,
+            float("inf")
+            if _beam_candidate(node).goal_distance is None
+            else _beam_candidate(node).goal_distance,
+            node.node_id,
         )
     )
     return [*feasible, *infeasible][:beam_width]
@@ -2919,6 +3056,14 @@ def _beam_node_trace(node: BeamNode) -> BeamRetainedNodeTrace:
         score=candidate.total_score,
         constraint_penalty=candidate.constraint_penalty,
         eef_path=np.asarray(candidate.rollout.eef_path, dtype=np.float32).copy(),
+        min_clearance=candidate.min_clearance,
+        violation_max=candidate.violation_max,
+        violation_integral=candidate.violation_integral,
+        seed_metadata={
+            key: value
+            for key, value in node.action_chunks[-1].metadata.items()
+            if key in {"guidance_seed", "candidate_index"}
+        },
     )
 
 
@@ -2997,14 +3142,36 @@ def _select_itps_chunk(
     collision_model: DifferentiablePandaCollisionPoints | None,
     constraint_target: Literal["eef", "robot"],
 ) -> ActionChunk:
+    seed = int(rng.integers(0, 2**31 - 1))
+    return sample_itps_candidates(
+        policy=policy,
+        provider=provider,
+        observation_windows=[obs_window],
+        constraints=constraints,
+        seeds=[seed],
+        config=config,
+        compute_counts=compute_counts,
+        collision_model=collision_model,
+        constraint_target=constraint_target,
+    )[0]
+
+
+def sample_itps_candidates(
+    *,
+    policy: SimpleDP3,
+    provider: ManiSkillGhostPandaGeometryProvider,
+    observation_windows: list[list[Entry]],
+    constraints: list[AvoidRegion | AvoidProjection],
+    seeds: list[int],
+    config: ITPSGuidanceConfig,
+    compute_counts: ComputeOperationCounts,
+    collision_model: DifferentiablePandaCollisionPoints | None,
+    constraint_target: Literal["eef", "robot"],
+) -> list[ActionChunk]:
+    """Generate independent faithful ITPS proposals for real or imagined windows."""
+    if len(observation_windows) != len(seeds):
+        raise ValueError("observation_windows and seeds must have equal length")
     device = policy.device
-    obs_batch = _repeat_obs_window_to_torch(
-        obs_window,
-        k=1,
-        device=device,
-        goal_marker_points=int(getattr(policy, "goal_marker_points", 0)),
-        goal_marker_radius=float(getattr(policy, "goal_marker_radius", DEFAULT_GOAL_MARKER_RADIUS)),
-    )
     world_from_base = torch.as_tensor(
         provider.world_from_robot_base(),
         device=device,
@@ -3033,14 +3200,6 @@ def _select_itps_chunk(
             temperature=config.barrier_temperature,
         )
 
-    output = policy.predict_action_itps(
-        obs_batch,
-        generator=torch.Generator(device=device).manual_seed(int(rng.integers(0, 2**31 - 1))),
-        guidance_fn=guidance_fn,
-        guide_ratio=config.guide_ratio,
-        mcmc_steps=config.mcmc_steps,
-    )
-    action = output["action"][0]
     geometry_metadata: dict[str, Any] = {}
     if constraint_target == "robot" and collision_model is not None:
         geometry_metadata = {
@@ -3049,17 +3208,65 @@ def _select_itps_chunk(
             "gripper_open": collision_model.gripper_open,
             "excluded_collision_links": ["panda_link0"],
         }
-    return ActionChunk(
-        actions=action.detach().cpu().numpy().astype(np.float32, copy=True),
-        action_mode=_action_mode("abs_joint"),
-        dt=1.0,
-        metadata={
-            "method": "itps",
-            "guidance_target": constraint_target,
-            **config.to_json(),
-            **geometry_metadata,
-        },
+    chunks: list[ActionChunk] = []
+    for candidate_index, (obs_window, seed) in enumerate(
+        zip(observation_windows, seeds, strict=True)
+    ):
+        obs_batch = _repeat_obs_window_to_torch(
+            obs_window,
+            k=1,
+            device=device,
+            goal_marker_points=int(getattr(policy, "goal_marker_points", 0)),
+            goal_marker_radius=float(
+                getattr(policy, "goal_marker_radius", DEFAULT_GOAL_MARKER_RADIUS)
+            ),
+        )
+        output = policy.predict_action_itps(
+            obs_batch,
+            generator=torch.Generator(device=device).manual_seed(int(seed)),
+            guidance_fn=guidance_fn,
+            guide_ratio=config.guide_ratio,
+            mcmc_steps=config.mcmc_steps,
+        )
+        action = output["action"][0]
+        chunks.append(
+            ActionChunk(
+                actions=action.detach().cpu().numpy().astype(np.float32, copy=True),
+                action_mode=_action_mode("abs_joint"),
+                dt=1.0,
+                metadata={
+                    "method": "itps",
+                    "candidate_index": candidate_index,
+                    "guidance_seed": int(seed),
+                    "guidance_target": constraint_target,
+                    **config.to_json(),
+                    **geometry_metadata,
+                },
+            )
+        )
+    return chunks
+
+
+def _select_guided_candidates(
+    candidates: list[CandidateDiagnostics], *, attempted_k: int
+) -> ControllerResult:
+    """Select exact-feasible guided proposals with deterministic tie breaking."""
+    if not candidates:
+        raise RuntimeError("guided proposal generation returned no candidates")
+    feasible = [candidate for candidate in candidates if candidate.feasible]
+    if feasible:
+        selected = min(feasible, key=lambda candidate: (candidate.total_score, candidate.index))
+        return _controller_result(selected, candidates, [attempted_k], "best_feasible")
+    selected = min(
+        candidates,
+        key=lambda candidate: (
+            candidate.violation_max,
+            candidate.violation_integral,
+            float("inf") if candidate.goal_distance is None else candidate.goal_distance,
+            candidate.index,
+        ),
     )
+    return _controller_result(selected, candidates, [attempted_k], "least_bad_fallback")
 
 
 def _itps_eef_path(
@@ -3095,7 +3302,9 @@ def _make_itps_collision_model(
     gripper_open: float,
 ) -> DifferentiablePandaCollisionPoints | None:
     """Build whole-body ITPS geometry once for the active Panda environment."""
-    if constraint_target != "robot" or "itps" not in methods:
+    if constraint_target != "robot" or not any(
+        method in {"itps", "itps_reranking", "itps_beam"} for method in methods
+    ):
         return None
     unwrapped = getattr(env, "unwrapped", env)
     agent = getattr(unwrapped, "agent", None)
@@ -3235,12 +3444,26 @@ def _candidate_diagnostics(
 ) -> CandidateDiagnostics:
     constraint_costs: dict[str, float] = {}
     constraint_satisfied: dict[str, bool] = {}
+    min_clearance = float("inf")
+    violation_max = 0.0
+    violation_integral = 0.0
     for constraint_idx, constraint in enumerate(constraints):
         label = f"{constraint_idx}:{constraint.name}"
         costs = constraint.cost(rollout, scene)
         for key, value in costs.items():
             constraint_costs[_unique_cost_key(constraint_costs, key)] = float(value)
         constraint_satisfied[label] = bool(constraint.satisfied(rollout, scene))
+        points = (
+            rollout.eef_path
+            if constraint.target == "eef"
+            else np.concatenate(rollout.robot_point_clouds, axis=0)
+        )
+        signed_distance = np.asarray(constraint.region.signed_distance(points), dtype=np.float64)
+        if signed_distance.size:
+            min_clearance = min(min_clearance, float(np.min(signed_distance)))
+            violations = np.maximum(float(constraint.margin) - signed_distance, 0.0)
+            violation_max = max(violation_max, float(np.max(violations)))
+            violation_integral += float(np.sum(violations))
     feasible = all(constraint_satisfied.values()) if constraint_satisfied else True
     distance = goal_distance(rollout, scene.target_position)
     smoothness = trajectory_smoothness(rollout, order=2)
@@ -3273,6 +3496,9 @@ def _candidate_diagnostics(
         policy_surrogate=None,
         total_score=float(total_score),
         directional=directional,
+        min_clearance=min_clearance if np.isfinite(min_clearance) else None,
+        violation_max=violation_max,
+        violation_integral=violation_integral,
     )
 
 
@@ -3379,7 +3605,7 @@ def _write_decision(
         "candidate_feasible": decision.candidate_feasible,
         "candidate_total": decision.candidate_total,
     }
-    if method == "itps":
+    if method in {"itps", "itps_reranking", "itps_beam"}:
         row["itps"] = dict(decision.selected_chunk.metadata)
     if decision.beam_trace is not None:
         row["beam"] = decision.beam_trace.to_json()
@@ -3393,6 +3619,14 @@ def _write_decision(
                 "selected_feasible": result.selected.feasible,
                 "selected_goal_distance": result.selected.goal_distance,
                 "selected_constraint_penalty": result.selected.constraint_penalty,
+                "selected_min_clearance": result.selected.min_clearance,
+                "selected_violation_max": result.selected.violation_max,
+                "selected_violation_integral": result.selected.violation_integral,
+                "selected_seed_metadata": {
+                    key: value
+                    for key, value in result.selected.action_chunk.metadata.items()
+                    if key in {"guidance_seed", "candidate_index"}
+                },
                 "selected_smoothness": result.selected.smoothness,
                 "selected_directional": result.selected.directional,
                 "selected_constraint_costs": result.selected.constraint_costs,
@@ -3432,6 +3666,14 @@ def _rerun_replan_record(
                     "feasible": bool(candidate.feasible),
                     "score": float(candidate.total_score),
                     "constraint_penalty": float(candidate.constraint_penalty),
+                    "min_clearance": candidate.min_clearance,
+                    "violation_max": float(candidate.violation_max),
+                    "violation_integral": float(candidate.violation_integral),
+                    "seed_metadata": {
+                        key: value
+                        for key, value in candidate.action_chunk.metadata.items()
+                        if key in {"guidance_seed", "candidate_index"}
+                    },
                 }
             )
         selected_path = np.concatenate(
@@ -5283,7 +5525,9 @@ def _method_config(
     }
     if method in {"rejection", "reranking"}:
         config["k_schedule"] = [int(value) for value in args.k_schedule]
-    if method == "beam":
+    if method == "itps_reranking":
+        config["guided_candidates"] = int(args.guided_candidates)
+    if method in {"beam", "itps_beam"}:
         config.update(
             {
                 "beam_width": int(args.beam_width),
@@ -5291,9 +5535,9 @@ def _method_config(
                 "expansion_formula": "B + (D - 1) * W * B",
             }
         )
-    if method != "itps":
+    if method not in {"itps", "itps_reranking", "itps_beam"}:
         config["ddim_eta"] = float(args.ddim_eta)
-    if method == "itps":
+    if method in {"itps", "itps_reranking", "itps_beam"}:
         config["itps"] = itps_config.to_json()
     return config
 

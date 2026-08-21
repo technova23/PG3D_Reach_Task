@@ -79,6 +79,9 @@ class CandidateDiagnostics:
     total_score: float
     directional: float = 0.0
     selection_reason: str | None = None
+    min_clearance: float | None = None
+    violation_max: float = 0.0
+    violation_integral: float = 0.0
 
 
 @dataclass
