@@ -719,6 +719,19 @@ def main(argv: list[str] | None = None) -> int:
     ]
     zarr_root = zarr.open_group(str(args.dataset), mode="r") if args.source == "dataset" else None
     if fixture_manifest is not None:
+        selected_fixture_indices = set(
+            range(len(fixture_manifest.episodes))
+            if args.fixture_output_indices is None
+            else args.fixture_output_indices
+        )
+        available_fixture_indices = {
+            episode.output_index for episode in fixture_manifest.episodes
+        }
+        if not selected_fixture_indices <= available_fixture_indices:
+            raise ValueError(
+                "fixture output indices are not in the manifest: "
+                f"{sorted(selected_fixture_indices - available_fixture_indices)}"
+            )
         specs = [
             RolloutSpec(
                 output_index=episode.output_index,
@@ -727,8 +740,11 @@ def main(argv: list[str] | None = None) -> int:
                 dataset_episode_index=episode.dataset_episode_index,
             )
             for episode in fixture_manifest.episodes
+            if episode.output_index in selected_fixture_indices
         ]
         for episode in fixture_manifest.episodes:
+            if episode.output_index not in selected_fixture_indices:
+                continue
             if dataset_episode_seeds[episode.dataset_episode_index] != episode.simulator_seed:
                 raise ValueError(
                     "fixture simulator seed does not match dataset metadata for "
@@ -1230,6 +1246,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Versioned guided-search fixture with exact episode, seed, and constraint mapping.",
+    )
+    parser.add_argument(
+        "--fixture-output-indices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Optional development-manifest subset for deterministic smoke jobs.",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
@@ -1756,6 +1779,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 "--fixture-manifest is mutually exclusive with episode selectors, "
                 "--constraints-dir, --unique-dataset-seeds, and --no-constraints"
             )
+    elif args.fixture_output_indices is not None:
+        raise ValueError("--fixture-output-indices requires --fixture-manifest")
     if not np.isfinite(args.verification_buffer) or args.verification_buffer < 0.0:
         raise ValueError("--verification-buffer must be finite and non-negative")
     if args.score_weights is not None:
@@ -3810,6 +3835,12 @@ def _probe_feasible_mass_nodes(
         )
         _apply_mass_score(node, score_config=score_config)
         if proposal_writer is not None:
+            parent_candidate = _beam_candidate(node)
+            probe_candidate.mass_probe_count = parent_candidate.mass_probe_count
+            probe_candidate.mass_viable_count = parent_candidate.mass_viable_count
+            probe_candidate.mass_posterior_mean = parent_candidate.mass_posterior_mean
+            probe_candidate.mass_posterior_lcb = parent_candidate.mass_posterior_lcb
+            probe_candidate.mass_posterior_ucb = parent_candidate.mass_posterior_ucb
             _record_guided_candidate(
                 proposal_writer,
                 probe_candidate,
@@ -4171,12 +4202,19 @@ def sample_itps_candidates(
     for candidate_index, (obs_window, seed, proposal_context) in enumerate(
         zip(observation_windows, seeds, contexts, strict=True)
     ):
-        noise_lineage = policy.make_itps_noise_lineage(
-            candidate_seed=int(seed),
-            mcmc_steps=config.mcmc_steps,
-            guided=True,
-            root_identity="guided_search",
+        make_lineage = getattr(policy, "make_itps_noise_lineage", None)
+        noise_lineage = (
+            make_lineage(
+                candidate_seed=int(seed),
+                mcmc_steps=config.mcmc_steps,
+                guided=True,
+                root_identity="guided_search",
+            )
+            if make_lineage is not None
+            else None
         )
+        if proposal_writer is not None and noise_lineage is None:
+            raise RuntimeError("guided-search protocols require explicit ITPS noise lineages")
         conditioning_hash = None
         guidance_geometry_hash = None
         guidance_geometry_bundle = None
@@ -4208,9 +4246,14 @@ def sample_itps_candidates(
                 getattr(policy, "goal_marker_radius", DEFAULT_GOAL_MARKER_RADIUS)
             ),
         )
+        sampling_randomness = (
+            {"noise_lineage": noise_lineage}
+            if noise_lineage is not None
+            else {"generator": torch.Generator(device=device).manual_seed(int(seed))}
+        )
         output = policy.predict_action_itps(
             obs_batch,
-            noise_lineage=noise_lineage,
+            **sampling_randomness,
             guidance_fn=guidance_fn,
             guide_ratio=config.guide_ratio,
             mcmc_steps=config.mcmc_steps,
@@ -4225,7 +4268,9 @@ def sample_itps_candidates(
                     "method": "itps",
                     "candidate_index": candidate_index,
                     "guidance_seed": int(seed),
-                    "noise_lineage": noise_lineage.to_json(),
+                    "noise_lineage": (
+                        noise_lineage.to_json() if noise_lineage is not None else None
+                    ),
                     "conditioning_hash": conditioning_hash,
                     "proposal_context": dict(proposal_context),
                     "guidance_geometry_hash": guidance_geometry_hash,
@@ -4539,7 +4584,11 @@ def _candidate_diagnostics(
         signed_distance = np.asarray(constraint.region.signed_distance(points), dtype=np.float64)
         if signed_distance.size:
             min_clearance = min(min_clearance, float(np.min(signed_distance)))
-            violations = np.maximum(float(constraint.margin) - signed_distance, 0.0)
+            active_margin = max(
+                float(constraint.margin),
+                score_config.effective_hard_clearance_m,
+            )
+            violations = np.maximum(active_margin - signed_distance, 0.0)
             violation_max = max(violation_max, float(np.max(violations)))
             violation_integral += float(np.sum(violations))
     raw_min_clearance = min_clearance if np.isfinite(min_clearance) else None
@@ -6656,12 +6705,21 @@ def _method_config(
         config["k_schedule"] = [int(value) for value in args.k_schedule]
     if method == "itps_reranking":
         config["guided_candidates"] = int(args.guided_candidates)
+        config["physical_depth"] = 1
+        config["guided_search_expansions"] = int(args.guided_candidates)
     if method in {"beam", "itps_beam"}:
         config.update(
             {
                 "beam_width": int(args.beam_width),
                 "beam_branch_factor": int(args.beam_branch_factor),
                 "expansion_formula": "B + (D - 1) * W * B",
+                "physical_depth": int(args.planning_horizon_chunks),
+                "guided_search_expansions": (
+                    int(args.beam_branch_factor)
+                    + (int(args.planning_horizon_chunks) - 1)
+                    * int(args.beam_width)
+                    * int(args.beam_branch_factor)
+                ),
             }
         )
     if method not in {"itps", "itps_reranking", "itps_beam"}:

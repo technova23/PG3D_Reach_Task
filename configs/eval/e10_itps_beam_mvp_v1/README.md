@@ -13,3 +13,13 @@ protocol output indices. Every referenced constraint is protected by SHA-256.
 `protocol.json` is the source of truth for scoring scales, calibration grids, mass
 estimation, adaptive search, five repeated lineages, and the 300-step evaluation
 horizon. A publishable locked evaluation is intentionally deferred.
+
+Preview or execute a stage with:
+
+```bash
+uv run python scripts/run_itps_beam_mvp.py --stage smoke --dry-run
+uv run python scripts/run_itps_beam_mvp.py --stage smoke
+```
+
+Use `--resume` only for jobs with a hash-validated `stage_complete.json`. The runner refuses
+existing incomplete output and never silently overwrites a prior report.

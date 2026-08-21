@@ -1,6 +1,6 @@
 # pg3d status
 
-Last updated: 2026-08-20
+Last updated: 2026-08-21
 
 ## ITPS-beam MVP protocol
 
@@ -13,6 +13,16 @@ telemetry, transition validation, conservative feasible-continuation mass,
 deterministic adaptive weighting/search, and route diversity. A distinct locked
 evaluation set remains deferred, so results on these six fixtures must not be
 presented as locked-test evidence.
+
+The CPU-side MVP implementation is now complete. The evaluator uses shared normalized
+complete-prefix scoring, explicit SHA-derived ITPS noise lineages, content-addressed DP3
+conditioning bundles, complete expanded-node telemetry, offline prune auditing, imagined-versus-
+executed verifier calibration, beta-binomial feasible-mass risk, bounded adaptive weights,
+uncertainty allocation, dynamic width, and route diversity. `scripts/run_itps_beam_mvp.py`
+expands every frozen stage into non-overwriting jobs and validates snapshots/artifact hashes before
+acceptance; `scripts/report_itps_beam_mvp.py` produces development-labeled outcome, compute,
+posterior, pruning, adaptive-weight, and transition-error summaries. The CUDA/ManiSkill smoke and
+subsequent six-fixture jobs have not been run by Codex and remain the immediate execution step.
 
 ## Current objective
 

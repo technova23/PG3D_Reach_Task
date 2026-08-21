@@ -84,6 +84,25 @@
     "buffer_rounding_m": 0.005,
     "stop_threshold_m": 0.03
   },
+  "runner": {
+    "default_output_root": "artifacts/itps-beam-mvp-v1",
+    "non_overwriting": true,
+    "resume_requires_hash_match": true,
+    "smoke_fixture_output_indices": [0],
+    "smoke_expected_search_expansions_per_replan": 10,
+    "smoke_expected_denoiser_evaluations_per_replan": 4000,
+    "qualitative_artifact_lineage": 0
+  },
+  "output_schema": {
+    "metrics": "metrics.jsonl",
+    "decisions": "decisions.jsonl",
+    "proposal_trace": "proposals/<method>/episode_<id>/proposals.jsonl",
+    "conditioning_bundles": "proposals/<method>/episode_<id>/conditioning/<sha256>.npz",
+    "verification_trace": "verification/<method>/episode_<id>.jsonl",
+    "snapshot": "protocol_snapshot.json",
+    "completion": "stage_complete.json",
+    "report": "stage_report.json"
+  },
   "stages": [
     "smoke",
     "lookahead",

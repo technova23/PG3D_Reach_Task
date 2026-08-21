@@ -2947,3 +2947,25 @@ def test_guided_selection_is_feasible_first_with_stable_ties() -> None:
 
     assert result.selected.index == 1
     assert result.selection_reason == "best_feasible"
+
+
+def test_h1_and_depth_one_h3_select_identical_supplied_candidates() -> None:
+    nodes = [
+        _beam_node_for_pruning("root/b0", feasible=True, penalty=0.0, score=0.4),
+        _beam_node_for_pruning("root/b1", feasible=True, penalty=0.0, score=0.2),
+    ]
+    candidates = [node.candidate for node in nodes]
+    assert all(candidate is not None for candidate in candidates)
+    typed_candidates = [candidate for candidate in candidates if candidate is not None]
+    for index, candidate in enumerate(typed_candidates):
+        candidate.index = index
+
+    h1 = _select_guided_candidates(typed_candidates, attempted_k=2)
+    h3_frontier = _prune_beam_nodes(nodes, beam_width=2)
+    h3_selected = min(
+        (node.candidate for node in h3_frontier if node.candidate is not None),
+        key=lambda candidate: (candidate.total_score, candidate.index),
+    )
+
+    assert h1.selected.index == h3_selected.index == 1
+    np.testing.assert_array_equal(h1.action_chunk.actions, h3_selected.action_chunk.actions)

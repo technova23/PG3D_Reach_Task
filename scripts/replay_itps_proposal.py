@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -96,7 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     replayed = output["action"][0].detach().cpu().numpy().astype(np.float32, copy=True)
     result = verify_replayed_action(record, replayed, rtol=1e-5, atol=1e-6)
-    same_stack = dict(record.get("dependency_versions", {})) == _dependency_versions()
+    same_stack = (
+        dict(record.get("dependency_versions", {})) == _dependency_versions()
+        and record.get("git_revision") == _git_revision()
+    )
     result.update({"proposal_id": args.proposal_id, "same_stack": same_stack})
     print(json.dumps(result, indent=2, sort_keys=True))
     if same_stack:
@@ -157,6 +161,17 @@ def _dependency_versions() -> dict[str, str]:
         except importlib.metadata.PackageNotFoundError:
             versions[distribution] = "not-installed"
     return versions
+
+
+def _git_revision() -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 if __name__ == "__main__":

@@ -48,6 +48,68 @@ uv run python scripts/check_gpu.py
 uv run python scripts/check_maniskill.py
 ```
 
+## ITPS-beam MVP development protocol
+
+Preview the frozen deterministic smoke without creating artifacts:
+
+```bash
+uv run python scripts/run_itps_beam_mvp.py --stage smoke --dry-run
+```
+
+Run it, then advance one immutable stage at a time after inspecting the prior report:
+
+```bash
+uv run python scripts/run_itps_beam_mvp.py --stage smoke
+uv run python scripts/run_itps_beam_mvp.py --stage lookahead
+uv run python scripts/run_itps_beam_mvp.py --stage fixed_weight_calibration
+uv run python scripts/run_itps_beam_mvp.py --stage mass_ablation
+uv run python scripts/run_itps_beam_mvp.py --stage adaptive_weights
+uv run python scripts/run_itps_beam_mvp.py --stage adaptive_search
+uv run python scripts/run_itps_beam_mvp.py --stage repeated_lineages
+uv run python scripts/run_itps_beam_mvp.py --stage decision
+```
+
+Resume only already-completed, hash-matching jobs:
+
+```bash
+uv run python scripts/run_itps_beam_mvp.py --stage repeated_lineages --resume
+```
+
+Audit one serialized beam decision (choose its zero-based JSONL row):
+
+```bash
+uv run python scripts/audit_itps_beam_trace.py \
+  artifacts/itps-beam-mvp-v1/smoke/h3/decisions.jsonl --jsonl-index 0
+```
+
+Replay one proposal exactly from its conditioning/noise lineage (use a proposal ID from the trace):
+
+```bash
+uv run python scripts/replay_itps_proposal.py \
+  artifacts/itps-beam-mvp-v1/smoke/h3/proposals/itps_beam/episode_000/proposals.jsonl \
+  'r0/d1/root/b0' --device cuda
+```
+
+Freeze the imagined-verification buffer only after all six development fixtures have traces:
+
+```bash
+uv run python scripts/calibrate_itps_verifier.py \
+  artifacts/itps-beam-mvp-v1/lookahead/h3_fixed \
+  --output configs/eval/e10_itps_beam_mvp_v1/verifier_calibration.json
+```
+
+Compare an independently rerun one-episode controller with its original selection, executed-prefix
+hashes, and final metrics:
+
+```bash
+uv run python scripts/check_itps_controller_replay.py \
+  artifacts/itps-beam-mvp-v1/smoke/h3 \
+  artifacts/itps-beam-mvp-v1/controller-replay/h3 \
+  --method itps_beam --episode 0
+```
+
+All outputs from this protocol are six-fixture development evidence, never locked-test evidence.
+
 ## DP3 policy smoke
 
 The pg3d-native DP3 slice is tested with synthetic point-cloud/state/action data:
