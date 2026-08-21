@@ -2377,6 +2377,43 @@ def test_beam_cli_defaults_and_method_configuration(tmp_path: Path) -> None:
             parse_eval_args([*common, flag, "0"])
 
 
+def test_itps_hybrid_method_configuration(tmp_path: Path) -> None:
+    common = [
+        "--checkpoint",
+        str(tmp_path / "policy.pt"),
+        "--dataset",
+        str(tmp_path / "dataset.zarr"),
+        "--output-dir",
+        str(tmp_path / "eval"),
+        "--methods",
+        "itps_reranking",
+        "itps_beam",
+        "--geometry-mode",
+        "exact",
+        "--constraint-target",
+        "robot",
+        "--guided-candidates",
+        "10",
+        "--beam-width",
+        "2",
+        "--beam-branch-factor",
+        "2",
+    ]
+    args = parse_eval_args(common)
+    config = ITPSGuidanceConfig()
+
+    reranking = _method_config(args, method="itps_reranking", itps_config=config)
+    beam = _method_config(args, method="itps_beam", itps_config=config)
+
+    assert reranking["guided_candidates"] == 10
+    assert reranking["itps"]["guide_ratio"] == pytest.approx(60.0)
+    assert "ddim_eta" not in reranking
+    assert beam["beam_width"] == 2
+    assert beam["beam_branch_factor"] == 2
+    assert beam["expansion_formula"] == "B + (D - 1) * W * B"
+    assert "ddim_eta" not in beam
+
+
 def test_whole_robot_beam_rejects_fast_geometry(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="geometry-mode exact"):
         parse_eval_args(

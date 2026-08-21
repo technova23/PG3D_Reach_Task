@@ -50,6 +50,13 @@ before least-violating infeasible fallbacks. Width and branch factor are configu
 and 32). Episode metrics retain reranking-comparable final-frontier feasibility while separate beam
 telemetry and decision/Rerun metadata record all expansion counts plus retained paths and ancestry.
 Whole-robot beam guidance requires exact geometry.
+The evaluator now also exposes `itps_reranking` and `itps_beam`. Both use one shared faithful ITPS
+proposal helper with independent SHA-256-derived seed lineage, then apply the existing exact
+whole-robot world model as the authoritative verifier. Guided reranking evaluates ten proposals;
+the frozen guided beam setting uses depth 3, width 2, and branch factor 2 for the same ten total
+expansions. Exact diagnostics retain minimum clearance, maximum and integral violation, selected
+seed metadata, and per-depth beam traces. CPU-focused selection/beam tests pass; live CUDA and
+ManiSkill artifact runs remain to be executed.
 The active DP3 architecture now has one canonical module implementation at
 `pg3d/policies/dp3/modules.py`; two unreferenced legacy copies at the top of `pg3d/policies/`
 were removed before writing line-referenced diffusion-policy documentation.

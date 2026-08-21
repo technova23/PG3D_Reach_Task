@@ -1692,7 +1692,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--precomputed-initial-clearance-margin must be finite and non-negative")
     if (
         args.constraint_target == "robot"
-        and "itps" in args.methods
+        and any(
+            method in {"itps", "itps_reranking", "itps_beam"} for method in args.methods
+        )
         and (not np.isfinite(args.gripper_open) or not 0.0 <= args.gripper_open <= 0.04)
     ):
         raise ValueError("whole-body ITPS requires --gripper-open within [0, 0.04]")
@@ -2915,7 +2917,6 @@ def _expand_beam_frontier(
             geometry_mode=geometry_mode,
             timer=timer,
         )
-        candidate_index = next_candidate_index + local_index
         node = BeamNode(
             node_id=f"{parent.node_id}/b{local_index % branch_factor}",
             parent_id=parent.node_id,

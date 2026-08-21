@@ -1,0 +1,23 @@
+{
+  "schema_version": "pg3d.itps_guided_search.v1",
+  "method": "itps_beam",
+  "fixture": "configs/eval/e10_u_shape_box_derived_review_v1/fixture.json",
+  "planning_horizon_chunks": 3,
+  "execution_horizon_chunks": 1,
+  "beam_width": 2,
+  "beam_branch_factor": 2,
+  "guided_expansions_per_replan": 10,
+  "constraint_target": "robot",
+  "geometry_mode": "exact",
+  "avoid_margin_m": 0.03,
+  "itps": {
+    "scheduler": "ddim",
+    "eta": 0.0,
+    "guide_ratio": 60.0,
+    "mcmc_steps": 4,
+    "energy": "smooth",
+    "barrier_temperature": 0.01,
+    "robot_points": 1024,
+    "robot_sample_seed": 0
+  }
+}

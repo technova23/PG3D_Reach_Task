@@ -1182,6 +1182,30 @@ Inspect the result with:
 rerun artifacts/e10-u-shape-episode004-visualization/rerun/base/episode_000.rrd
 ```
 
+Run each matched-budget ITPS hybrid separately, reusing the frozen U-shape episode-index and robot
+constraint directories selected for the six-episode pilot. The method settings are frozen under
+`configs/eval/e10_itps_guided_search_v1`. H1 uses:
+
+```bash
+./.venv/bin/python scripts/eval_constrained_reach.py \
+  --dataset /scratch2/skills/pg3d_reach_regen_abcd.zarr \
+  --checkpoint /scratch2/skills/train_final_Arya/step_00100000.pt \
+  --methods itps_reranking \
+  --source dataset \
+  --episode-indices-file PATH_TO_FROZEN_SIX_EPISODE_INDICES.txt \
+  --constraints-dir PATH_TO_FROZEN_SIX_ROBOT_CONSTRAINTS \
+  --constraint-target robot --geometry-mode exact --avoid-margin 0.03 \
+  --planning-horizon-chunks 1 --execution-horizon-chunks 1 \
+  --guided-candidates 10 \
+  --device cuda --video --rerun --artifact-selection all \
+  --output-dir artifacts/e10-itps-reranking-v1 --allow-failure
+```
+
+For H3, change the method to `itps_beam`, set `--planning-horizon-chunks 3 --beam-width 2
+--beam-branch-factor 2`, and use a distinct `artifacts/e10-itps-beam-v1` output directory. The
+resulting beam trace must report ten expansions per replan. Do not point either command at
+regenerated constraints or alter the six frozen episode identities after inspecting outcomes.
+
 The Rerun view is the preferred inspection path because the camera can be orbited to see the open
 cavity. The MP4 uses the fixed paper camera and views the U mainly from behind.
 
