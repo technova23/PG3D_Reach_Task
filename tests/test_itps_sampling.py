@@ -6,7 +6,7 @@ import pytest
 import torch
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
-from pg3d.policies.dp3 import SimpleDP3
+from pg3d.policies.dp3 import ITPSNoiseLineage, SimpleDP3
 from pg3d.policies.dp3.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from pg3d.policies.dp3.reach_dataset import reach_shape_meta
 
@@ -175,6 +175,59 @@ def test_itps_is_reproducible_and_matches_one_step_ddim() -> None:
 
     torch.testing.assert_close(actual, repeated)
     torch.testing.assert_close(actual, expected)
+
+
+def test_explicit_itps_noise_lineage_replays_every_stochastic_draw() -> None:
+    policy = _tiny_policy()
+    policy.model = _RecordingZeroModel()
+    condition = torch.zeros((1, 2, 7))
+    mask = torch.zeros_like(condition, dtype=torch.bool)
+    scheduler = policy._make_itps_scheduler()
+    scheduler.set_timesteps(policy.num_inference_steps)
+    lineage = ITPSNoiseLineage.derive(
+        candidate_seed=19,
+        diffusion_timesteps=(int(timestep) for timestep in scheduler.timesteps),
+        inner_steps=2,
+        root_identity="test",
+    )
+
+    def energy(sample: torch.Tensor) -> torch.Tensor:
+        return sample[..., 1].sum(dim=1)
+
+    first = policy.stochastic_sample(
+        condition,
+        mask,
+        guidance_fn=energy,
+        mcmc_steps=2,
+        noise_lineage=lineage,
+    )
+    second = policy.stochastic_sample(
+        condition,
+        mask,
+        guidance_fn=energy,
+        mcmc_steps=2,
+        noise_lineage=lineage,
+    )
+
+    torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+    assert lineage.initial_noise.seed != lineage.candidate_seed
+    assert len(lineage.inner_renoising) == policy.num_inference_steps
+    assert lineage.to_json()["schema_version"] == "pg3d.itps_noise_lineage.v1"
+
+
+def test_itps_noise_lineage_cannot_share_a_stateful_generator() -> None:
+    policy = _tiny_policy()
+    condition = torch.zeros((1, 2, 7))
+    mask = torch.zeros_like(condition, dtype=torch.bool)
+    lineage = policy.make_itps_noise_lineage(candidate_seed=7, mcmc_steps=1)
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        policy.stochastic_sample(
+            condition,
+            mask,
+            generator=torch.Generator().manual_seed(7),
+            noise_lineage=lineage,
+        )
 
 
 def test_ordinary_ddim_eta_one_is_reproducible_and_changes_sample() -> None:

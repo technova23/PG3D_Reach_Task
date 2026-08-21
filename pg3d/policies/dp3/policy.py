@@ -17,6 +17,7 @@ from pg3d.policies.dp3.modules import (
     LowdimMaskGenerator,
     ModuleAttrMixin,
 )
+from pg3d.policies.dp3.noise_lineage import ITPSNoiseLineage
 from pg3d.policies.dp3.normalizer import LinearNormalizer
 from pg3d.policies.dp3.utils import dict_apply
 
@@ -262,6 +263,7 @@ class SimpleDP3(BasePolicy):
         guidance_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
         guide_ratio: float = 60.0,
         mcmc_steps: int = 4,
+        noise_lineage: ITPSNoiseLineage | None = None,
     ) -> torch.Tensor:
         """Sample with the annealed-MCMC transition released with ITPS.
 
@@ -277,17 +279,30 @@ class SimpleDP3(BasePolicy):
             raise ValueError("guide_ratio must be non-negative")
         if str(self.noise_scheduler.config.prediction_type) != "epsilon":
             raise ValueError("ITPS stochastic sampling requires prediction_type='epsilon'")
+        if generator is not None and noise_lineage is not None:
+            raise ValueError("generator and noise_lineage are mutually exclusive")
 
         scheduler = self._make_itps_scheduler()
+        scheduler.set_timesteps(self.num_inference_steps)
+        initial_generator = generator
+        if noise_lineage is not None:
+            initial_generator = torch.Generator(device=condition_data.device).manual_seed(
+                noise_lineage.initial_noise.seed
+            )
         trajectory = torch.randn(
             size=condition_data.shape,
             dtype=condition_data.dtype,
             device=condition_data.device,
-            generator=generator,
+            generator=initial_generator,
         )
-        scheduler.set_timesteps(self.num_inference_steps)
         inner_steps = mcmc_steps if guidance_fn is not None else 1
-        for timestep in scheduler.timesteps:
+        expected_draws = len(scheduler.timesteps) * (inner_steps - 1)
+        if noise_lineage is not None and len(noise_lineage.inner_renoising) != expected_draws:
+            raise ValueError(
+                "noise lineage inner draw count does not match the active ITPS schedule: "
+                f"{len(noise_lineage.inner_renoising)} != {expected_draws}"
+            )
+        for diffusion_index, timestep in enumerate(scheduler.timesteps):
             for inner_index in range(inner_steps):
                 trajectory[condition_mask] = condition_data[condition_mask]
                 model_output = self.model(
@@ -313,14 +328,24 @@ class SimpleDP3(BasePolicy):
                     model_output,
                     timestep,
                     trajectory,
-                    generator=generator,
+                    generator=initial_generator,
                 )
                 if inner_index < inner_steps - 1:
+                    noise_generator = generator
+                    if noise_lineage is not None:
+                        draw = noise_lineage.inner_draw(
+                            diffusion_index=diffusion_index,
+                            diffusion_timestep=int(timestep),
+                            inner_index=inner_index,
+                        )
+                        noise_generator = torch.Generator(
+                            device=scheduler_output.pred_original_sample.device
+                        ).manual_seed(draw.seed)
                     noise = torch.randn(
                         scheduler_output.pred_original_sample.shape,
                         dtype=scheduler_output.pred_original_sample.dtype,
                         device=scheduler_output.pred_original_sample.device,
-                        generator=generator,
+                        generator=noise_generator,
                     )
                     batch_timesteps = torch.full(
                         (trajectory.shape[0],),
@@ -346,6 +371,7 @@ class SimpleDP3(BasePolicy):
         guidance_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
         guide_ratio: float = 60.0,
         mcmc_steps: int = 4,
+        noise_lineage: ITPSNoiseLineage | None = None,
     ) -> PolicyOutput:
         """Return the normal DP3 action slice from a full ITPS-guided trajectory."""
         cond_data, cond_mask, global_cond = self._build_conditioning(obs_dict)
@@ -357,6 +383,7 @@ class SimpleDP3(BasePolicy):
             guidance_fn=guidance_fn,
             guide_ratio=guide_ratio,
             mcmc_steps=mcmc_steps,
+            noise_lineage=noise_lineage,
         )
         action_pred = self.normalizer["action"].unnormalize(nsample[..., : self.action_dim])
         start = self.n_obs_steps - 1
@@ -365,6 +392,24 @@ class SimpleDP3(BasePolicy):
             "action": action_pred[:, start:end],
             "action_pred": action_pred,
         }
+
+    def make_itps_noise_lineage(
+        self,
+        *,
+        candidate_seed: int,
+        mcmc_steps: int,
+        guided: bool = True,
+        root_identity: str = "guided_proposal",
+    ) -> ITPSNoiseLineage:
+        """Materialize the exact initial and inner re-noising seed schedule."""
+        scheduler = self._make_itps_scheduler()
+        scheduler.set_timesteps(self.num_inference_steps)
+        return ITPSNoiseLineage.derive(
+            candidate_seed=candidate_seed,
+            diffusion_timesteps=(int(timestep) for timestep in scheduler.timesteps),
+            inner_steps=mcmc_steps if guided else 1,
+            root_identity=root_identity,
+        )
 
     def _make_itps_scheduler(self) -> DDIMScheduler:
         """Build an isolated DDIM scheduler for ITPS without changing base inference."""

@@ -1,3 +1,4 @@
+from pg3d.eval.beam_audit import audit_beam_trace
 from pg3d.eval.constrained_reach import (
     ArtifactSelection,
     AvoidOverlayConfig,
@@ -38,6 +39,14 @@ from pg3d.eval.constrained_reach import (
     validate_planning_horizons,
     wilson_interval,
 )
+from pg3d.eval.guided_trace import (
+    ConditioningBundleStore,
+    GuidedProposalTraceWriter,
+    action_sha256,
+    conditioning_window_sha256,
+    load_proposal_record,
+    verify_replayed_action,
+)
 from pg3d.eval.itps_beam_protocol import (
     GuidedFixtureEpisode,
     GuidedFixtureManifest,
@@ -47,16 +56,21 @@ from pg3d.eval.itps_beam_protocol import (
 __all__ = [
     "AvoidOverlayConfig",
     "ArtifactSelection",
+    "ConditioningBundleStore",
     "EpisodePath",
     "NominalPathAvoidConfig",
     "TimingEvent",
     "TimingRecorder",
+    "GuidedProposalTraceWriter",
     "action_discontinuity_metrics",
+    "action_sha256",
+    "audit_beam_trace",
     "candidate_feasibility_fraction",
     "concatenate_rollouts",
     "constraint_fingerprint",
     "constraint_clearance_series",
     "constraint_violation_metrics",
+    "conditioning_window_sha256",
     "clearance_violation_metrics",
     "direct_path_avoid_region",
     "episode_metric_row",
@@ -86,4 +100,6 @@ __all__ = [
     "GuidedFixtureEpisode",
     "GuidedFixtureManifest",
     "load_guided_fixture_manifest",
+    "load_proposal_record",
+    "verify_replayed_action",
 ]
