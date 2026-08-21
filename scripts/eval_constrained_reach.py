@@ -20,6 +20,9 @@ from pg3d.composition import (
     CandidateDiagnostics,
     ControllerInput,
     ControllerResult,
+    ConvexScoreWeights,
+    GuidedScoreConfig,
+    GuidedScoreMode,
     RejectionController,
     RerankingController,
     ScoreWeights,
@@ -71,6 +74,7 @@ from pg3d.eval import (
     direct_path_avoid_region,
     episode_metric_row,
     load_episode_constraints,
+    load_guided_fixture_manifest,
     min_constraint_clearance,
     paired_method_comparisons,
     progress_series,
@@ -128,6 +132,7 @@ from scripts.rollout_dp3_reach_policy import (
 EvalMethod = Literal[
     "base", "beam", "rejection", "reranking", "itps", "itps_reranking", "itps_beam"
 ]
+_HISTORICAL_SCORE_CONFIG = GuidedScoreConfig(mode="avoidance_only")
 GeometryMode = Literal["fast", "exact"]
 Entry = dict[str, np.ndarray | bool | float]
 _CARTON_HALF_EXTENTS = (0.055, 0.08, 0.16)
@@ -556,6 +561,21 @@ def main(argv: list[str] | None = None) -> int:
         robot_sample_seed=int(args.itps_robot_sample_seed),
     )
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, args.checkpoint_dir)
+    score_config = _score_config_from_args(args)
+    fixture_manifest = (
+        load_guided_fixture_manifest(
+            args.fixture_manifest,
+            repo_root=Path(__file__).resolve().parents[1],
+        )
+        if args.fixture_manifest is not None
+        else None
+    )
+    if fixture_manifest is not None:
+        if fixture_manifest.dataset != args.dataset.resolve():
+            raise ValueError("--dataset does not match the fixture manifest")
+        if fixture_manifest.checkpoint != checkpoint_path.resolve():
+            raise ValueError("--checkpoint does not match the fixture manifest")
+    args._guided_fixture_manifest = fixture_manifest
     try:
         import gymnasium as gym
         import mani_skill.envs  # noqa: F401
@@ -602,17 +622,34 @@ def main(argv: list[str] | None = None) -> int:
         int(episode["seed"]) for episode in metadata.get("episodes", []) if "seed" in episode
     ]
     zarr_root = zarr.open_group(str(args.dataset), mode="r") if args.source == "dataset" else None
-    episode_indices = _episode_indices_from_args(
-        args,
-        dataset_episode_seeds=dataset_episode_seeds,
-    )
-    specs = select_rollout_specs(
-        source=args.source,
-        dataset_episode_seeds=dataset_episode_seeds,
-        episodes=args.episodes,
-        episode_indices=episode_indices,
-        seed_start=args.seed_start,
-    )
+    if fixture_manifest is not None:
+        specs = [
+            RolloutSpec(
+                output_index=episode.output_index,
+                seed=episode.simulator_seed,
+                source="dataset",
+                dataset_episode_index=episode.dataset_episode_index,
+            )
+            for episode in fixture_manifest.episodes
+        ]
+        for episode in fixture_manifest.episodes:
+            if dataset_episode_seeds[episode.dataset_episode_index] != episode.simulator_seed:
+                raise ValueError(
+                    "fixture simulator seed does not match dataset metadata for "
+                    f"episode {episode.output_index}"
+                )
+    else:
+        episode_indices = _episode_indices_from_args(
+            args,
+            dataset_episode_seeds=dataset_episode_seeds,
+        )
+        specs = select_rollout_specs(
+            source=args.source,
+            dataset_episode_seeds=dataset_episode_seeds,
+            episodes=args.episodes,
+            episode_indices=episode_indices,
+            seed_start=args.seed_start,
+        )
     if not specs:
         raise RuntimeError("no constrained-reach episodes selected")
     _resolve_grounded_embodied_obstacle_height(
@@ -782,7 +819,21 @@ def main(argv: list[str] | None = None) -> int:
                 with timer.time("json_write", artifact="constraint"):
                     save_episode_constraints(constraint_path, constraints)
                 constraint_id = constraint_fingerprint(constraints)
-                policy_seed = _episode_policy_seed(args.seed, spec.output_index)
+                fixture_episode = (
+                    fixture_manifest.episode(spec.output_index)
+                    if fixture_manifest is not None
+                    else None
+                )
+                policy_seed = (
+                    _lineage_policy_seed(fixture_episode.policy_seed, args.seed)
+                    if fixture_episode is not None
+                    else _episode_policy_seed(args.seed, spec.output_index)
+                )
+                source_pool_index = (
+                    fixture_episode.source_output_index
+                    if fixture_episode is not None
+                    else int(pool_spec.output_index)
+                )
                 write_video = args.video and spec.output_index in video_episode_indices
                 write_rerun = args.rerun and spec.output_index in rerun_episode_indices
                 for method in args.methods:
@@ -840,13 +891,14 @@ def main(argv: list[str] | None = None) -> int:
                         itps_config=itps_config,
                         itps_collision_model=itps_collision_model,
                         constraint_target=args.constraint_target,
+                        score_config=score_config,
                         artifact_identity={
                             "run_id": run_id,
                             "git_commit": git_info["commit"],
                             "checkpoint_id": str(checkpoint_path),
                             "dataset": str(args.dataset),
                             "source": spec.source,
-                            "source_pool_index": int(pool_spec.output_index),
+                            "source_pool_index": source_pool_index,
                             "dataset_episode_index": spec.dataset_episode_index,
                             "simulator_seed": int(spec.seed),
                             "policy_seed": policy_seed,
@@ -858,7 +910,7 @@ def main(argv: list[str] | None = None) -> int:
                             "run_id": run_id,
                             "checkpoint_id": str(checkpoint_path),
                             "source": spec.source,
-                            "source_pool_index": int(pool_spec.output_index),
+                            "source_pool_index": source_pool_index,
                             "dataset_episode_index": spec.dataset_episode_index,
                             "simulator_seed": int(spec.seed),
                             "policy_seed": policy_seed,
@@ -875,6 +927,7 @@ def main(argv: list[str] | None = None) -> int:
                                 args,
                                 method=method,
                                 itps_config=itps_config,
+                                score_config=score_config,
                             ),
                             "artifact_manifest_path": (
                                 str(artifact_manifest_path)
@@ -965,6 +1018,8 @@ def main(argv: list[str] | None = None) -> int:
         },
         "ddim_eta": float(args.ddim_eta),
         "itps": itps_config.to_json(),
+        "score": score_config.to_json(),
+        "fixture_manifest": (fixture_manifest.to_json() if fixture_manifest is not None else None),
         "constraint_source": _constraint_source_summary(args),
         "placement_selection": {
             "enabled": args.target_valid_episodes is not None,
@@ -1068,6 +1123,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     checkpoint_group.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument("--checkpoint-model", choices=["ema", "raw"], default="ema")
     parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument(
+        "--fixture-manifest",
+        type=Path,
+        default=None,
+        help="Versioned guided-search fixture with exact episode, seed, and constraint mapping.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--source", choices=["dataset", "fresh"], default="fresh")
@@ -1104,9 +1165,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        choices=[
-            "base", "beam", "rejection", "reranking", "itps", "itps_reranking", "itps_beam"
-        ],
+        choices=["base", "beam", "rejection", "reranking", "itps", "itps_reranking", "itps_beam"],
         default=["base", "rejection", "reranking"],
     )
     parser.add_argument("--itps-guide-ratio", type=float, default=60.0)
@@ -1135,6 +1194,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=10,
         help="Independent ITPS proposals per itps_reranking decision (default: 10).",
     )
+    parser.add_argument(
+        "--score-mode",
+        choices=["avoidance_only", "fixed_task", "mass_mean", "mass_lcb", "adaptive_mass"],
+        default="avoidance_only",
+        help="Feasible-prefix score; hard feasibility always remains outside this score.",
+    )
+    parser.add_argument(
+        "--score-config",
+        type=Path,
+        default=None,
+        help="JSON containing physical score normalizers and default convex weights.",
+    )
+    parser.add_argument(
+        "--score-weights",
+        type=float,
+        nargs=4,
+        default=None,
+        metavar=("GOAL", "CLEARANCE", "SMOOTHNESS", "MASS"),
+    )
+    parser.add_argument("--verification-buffer", type=float, default=0.0)
     parser.add_argument(
         "--max-steps",
         type=int,
@@ -1554,6 +1633,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--paired-bootstrap-samples must be positive")
     if args.no_constraints and args.constraints_dir is not None:
         raise ValueError("--no-constraints and --constraints-dir are mutually exclusive")
+    if args.fixture_manifest is not None:
+        if args.source != "dataset":
+            raise ValueError("--fixture-manifest requires --source dataset")
+        if (
+            any(
+                value is not None
+                for value in (args.episode_indices, args.episode_indices_file, args.constraints_dir)
+            )
+            or args.unique_dataset_seeds
+            or args.no_constraints
+        ):
+            raise ValueError(
+                "--fixture-manifest is mutually exclusive with episode selectors, "
+                "--constraints-dir, --unique-dataset-seeds, and --no-constraints"
+            )
+    if not np.isfinite(args.verification_buffer) or args.verification_buffer < 0.0:
+        raise ValueError("--verification-buffer must be finite and non-negative")
+    if args.score_weights is not None:
+        ConvexScoreWeights(*map(float, args.score_weights))
     if args.embody_obstacle and args.obstacle_family == "cylinder":
         args.avoid_shape = "cylinder"
         if args.avoid_box_half_extents is None:
@@ -1693,9 +1791,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--precomputed-initial-clearance-margin must be finite and non-negative")
     if (
         args.constraint_target == "robot"
-        and any(
-            method in {"itps", "itps_reranking", "itps_beam"} for method in args.methods
-        )
+        and any(method in {"itps", "itps_reranking", "itps_beam"} for method in args.methods)
         and (not np.isfinite(args.gripper_open) or not 0.0 <= args.gripper_open <= 0.04)
     ):
         raise ValueError("whole-body ITPS requires --gripper-open within [0, 0.04]")
@@ -1720,6 +1816,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _steer_sign(steer: str) -> int:
     """Map --steer's CLI choice to directional_preference's sign convention."""
     return {"none": 0, "left": 1, "right": -1}[steer]
+
+
+def _score_config_from_args(args: argparse.Namespace) -> GuidedScoreConfig:
+    weights = (
+        ConvexScoreWeights(*map(float, args.score_weights))
+        if args.score_weights is not None
+        else None
+    )
+    mode: GuidedScoreMode = args.score_mode
+    if args.score_config is not None:
+        return GuidedScoreConfig.from_path(
+            args.score_config,
+            mode=mode,
+            weights=weights,
+            verification_buffer_m=float(args.verification_buffer),
+        )
+    return GuidedScoreConfig(
+        mode=mode,
+        verification_buffer_m=float(args.verification_buffer),
+        weights=weights or ConvexScoreWeights(),
+    )
+
+
+def _lineage_policy_seed(base_policy_seed: int, lineage: int) -> int:
+    """Keep lineage zero identical to the fixture and derive later lineages stably."""
+    if lineage < 0:
+        raise ValueError("lineage seed must be non-negative")
+    if lineage == 0:
+        return int(base_policy_seed)
+    return _guided_seed(int(base_policy_seed), "diffusion_lineage", int(lineage))
 
 
 def resolve_checkpoint_path(checkpoint: Path | None, checkpoint_dir: Path | None) -> Path:
@@ -1764,6 +1890,7 @@ def run_eval_episode(
     itps_config: ITPSGuidanceConfig,
     itps_collision_model: DifferentiablePandaCollisionPoints | None,
     constraint_target: Literal["eef", "robot"],
+    score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
     video_env_factory: Callable[[], Any] | None = None,
     constraint_overlay_alpha: float = 0.25,
     constraint_overlay_color: tuple[float, float, float] = (1.0, 0.25, 0.05),
@@ -1936,6 +2063,7 @@ def run_eval_episode(
                         itps_config=itps_config,
                         itps_collision_model=itps_collision_model,
                         constraint_target=constraint_target,
+                        score_config=score_config,
                     )
             finally:
                 compute_counts.end_action_selection(policy.device, memory_baseline)
@@ -2063,8 +2191,7 @@ def run_eval_episode(
                 success = _bool_info(sim_info, "success")
                 tcp_to_goal_distance = float(
                     np.linalg.norm(
-                        np.asarray(sim_entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3]
-                        - target
+                        np.asarray(sim_entry["tcp_pose"], dtype=np.float32).reshape(-1)[:3] - target
                     )
                 )
                 (
@@ -2112,9 +2239,7 @@ def run_eval_episode(
                 )
                 if terminated_or_truncated:
                     break
-                if (
-                    stable_entry_step is not None
-                ):
+                if stable_entry_step is not None:
                     break
             with raw_action_log.open("a", encoding="utf-8") as action_file:
                 action_file.write(
@@ -2566,9 +2691,7 @@ def _beam_episode_metric_row(
         "beam_expanded_nodes_per_replan": _per_replan(expanded, replans),
         "beam_feasible_nodes_per_replan": _per_replan(feasible, replans),
         "beam_retained_nodes_per_replan": _per_replan(retained, replans),
-        "beam_feasible_fraction": (
-            float(feasible) / float(expanded) if expanded > 0 else None
-        ),
+        "beam_feasible_fraction": (float(feasible) / float(expanded) if expanded > 0 else None),
     }
 
 
@@ -2597,6 +2720,7 @@ def _select_decision(
     itps_config: ITPSGuidanceConfig,
     itps_collision_model: DifferentiablePandaCollisionPoints | None,
     constraint_target: Literal["eef", "robot"],
+    score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
 ) -> EvalDecisionSummary:
@@ -2662,9 +2786,8 @@ def _select_decision(
                 compute_counts=compute_counts,
                 collision_model=itps_collision_model,
                 constraint_target=constraint_target,
-                guided_root_seed=(
-                    int(rng.integers(0, 2**31 - 1)) if method == "itps_beam" else 0
-                ),
+                guided_root_seed=(int(rng.integers(0, 2**31 - 1)) if method == "itps_beam" else 0),
+                score_config=score_config,
             )
         feasible = sum(1 for candidate in result.candidates if candidate.feasible)
         return EvalDecisionSummary(
@@ -2693,9 +2816,7 @@ def _select_decision(
         consensus = consensus_deviations(chunks)
         candidates = []
         for index, (chunk, deviation) in enumerate(zip(chunks, consensus, strict=True)):
-            rollout = world_model.imagine(
-                entry_to_world_model_observation(current_entry), chunk
-            )
+            rollout = world_model.imagine(entry_to_world_model_observation(current_entry), chunk)
             candidates.append(
                 _candidate_diagnostics(
                     index=index,
@@ -2707,6 +2828,7 @@ def _select_decision(
                     consensus_deviation=deviation,
                     directional_sign=directional_sign,
                     directional_weight=directional_weight,
+                    score_config=score_config,
                 )
             )
         result = _select_guided_candidates(candidates, attempted_k=guided_candidates)
@@ -2729,7 +2851,12 @@ def _select_decision(
         scene=scene,
         policy_input=obs_window,
     )
-    if geometry_mode == "exact" and planning_horizon_chunks == 1 and directional_sign == 0:
+    if (
+        geometry_mode == "exact"
+        and planning_horizon_chunks == 1
+        and directional_sign == 0
+        and score_config.mode == "avoidance_only"
+    ):
         controller_cls = RejectionController if method == "rejection" else RerankingController
         with timer.time("candidate_scoring", method=method, geometry_mode=geometry_mode):
             result = controller_cls(
@@ -2758,6 +2885,7 @@ def _select_decision(
             timer=timer,
             directional_sign=directional_sign,
             directional_weight=directional_weight,
+            score_config=score_config,
         )
     feasible = sum(1 for candidate in result.candidates if candidate.feasible)
     return EvalDecisionSummary(
@@ -2786,6 +2914,7 @@ def _select_beam_search(
     branch_factor: int,
     rng: np.random.Generator,
     timer: TimingRecorder,
+    score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
     guided: bool = False,
@@ -2842,6 +2971,7 @@ def _select_beam_search(
             collision_model=collision_model,
             constraint_target=constraint_target,
             guided_root_seed=guided_root_seed,
+            score_config=score_config,
         )
         if not expanded:
             raise RuntimeError(f"beam search produced no nodes at depth {depth}")
@@ -2865,15 +2995,7 @@ def _select_beam_search(
         selected = min(feasible, key=lambda candidate: candidate.total_score)
         reason = "beam_best_feasible"
     else:
-        selected = min(
-            final_candidates,
-            key=lambda candidate: (
-                candidate.violation_max,
-                candidate.violation_integral,
-                float("inf") if candidate.goal_distance is None else candidate.goal_distance,
-                candidate.index,
-            ),
-        )
+        selected = min(final_candidates, key=_infeasible_candidate_key)
         reason = "beam_least_bad_fallback"
     selected_node = next(
         node
@@ -2925,6 +3047,7 @@ def _expand_beam_frontier(
     branch_factor: int,
     rng: np.random.Generator,
     timer: TimingRecorder,
+    score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
     directional_sign: int,
     directional_weight: float,
     guided: bool = False,
@@ -3011,6 +3134,7 @@ def _expand_beam_frontier(
                 consensus_deviation=consensus_deviation,
                 directional_sign=directional_sign,
                 directional_weight=directional_weight,
+                score_config=score_config,
             )
     return expanded, next_candidate_index + len(expanded)
 
@@ -3151,6 +3275,7 @@ def _select_multichunk(
     k_schedule: tuple[int, ...],
     rng: np.random.Generator,
     timer: TimingRecorder,
+    score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
 ) -> ControllerResult:
@@ -3182,6 +3307,7 @@ def _select_multichunk(
                 timer=timer,
                 directional_sign=directional_sign,
                 directional_weight=directional_weight,
+                score_config=score_config,
             )
         candidates.extend(batch)
         feasible = [candidate for candidate in candidates if candidate.feasible]
@@ -3193,7 +3319,7 @@ def _select_multichunk(
             return _controller_result(selected, candidates, attempted, "best_feasible")
     if not candidates:
         raise RuntimeError("policy returned no candidate action chunks")
-    selected = min(candidates, key=lambda candidate: candidate.total_score)
+    selected = min(candidates, key=_infeasible_candidate_key)
     return _controller_result(selected, candidates, attempted, "least_bad_fallback")
 
 
@@ -3324,15 +3450,7 @@ def _select_guided_candidates(
     if feasible:
         selected = min(feasible, key=lambda candidate: (candidate.total_score, candidate.index))
         return _controller_result(selected, candidates, [attempted_k], "best_feasible")
-    selected = min(
-        candidates,
-        key=lambda candidate: (
-            candidate.violation_max,
-            candidate.violation_integral,
-            float("inf") if candidate.goal_distance is None else candidate.goal_distance,
-            candidate.index,
-        ),
-    )
+    selected = min(candidates, key=_infeasible_candidate_key)
     return _controller_result(selected, candidates, [attempted_k], "least_bad_fallback")
 
 
@@ -3406,6 +3524,7 @@ def _build_multichunk_candidates(
     start_index: int,
     rng: np.random.Generator,
     timer: TimingRecorder,
+    score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
 ) -> list[CandidateDiagnostics]:
@@ -3492,6 +3611,7 @@ def _build_multichunk_candidates(
             consensus_deviation=consensus[idx],
             directional_sign=directional_sign,
             directional_weight=directional_weight,
+            score_config=score_config,
         )
         for idx, rollout in enumerate(branch_rollouts)
     ]
@@ -3506,6 +3626,7 @@ def _candidate_diagnostics(
     scene: Any,
     constraints: list[AvoidRegion],
     consensus_deviation: float,
+    score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
     directional_sign: int = 0,
     directional_weight: float = 1.0,
 ) -> CandidateDiagnostics:
@@ -3531,7 +3652,10 @@ def _candidate_diagnostics(
             violations = np.maximum(float(constraint.margin) - signed_distance, 0.0)
             violation_max = max(violation_max, float(np.max(violations)))
             violation_integral += float(np.sum(violations))
+    raw_min_clearance = min_clearance if np.isfinite(min_clearance) else None
     feasible = all(constraint_satisfied.values()) if constraint_satisfied else True
+    if raw_min_clearance is not None:
+        feasible = feasible and raw_min_clearance >= score_config.effective_hard_clearance_m
     distance = goal_distance(rollout, scene.target_position)
     smoothness = trajectory_smoothness(rollout, order=2)
     penalty = primary_constraint_penalty(constraint_costs)
@@ -3540,13 +3664,22 @@ def _candidate_diagnostics(
         if directional_sign != 0
         else 0.0
     )
-    weights = ScoreWeights()
-    total_score = (
-        weights.constraint * penalty
-        + weights.goal_distance * (0.0 if distance is None else distance)
-        + weights.smoothness * smoothness
-        + weights.consensus * consensus_deviation
-        + directional_weight * directional
+    normalized_terms = score_config.terms(
+        goal_distance_m=distance,
+        min_clearance_m=raw_min_clearance,
+        smoothness_rad2=smoothness,
+    )
+    total_score = score_config.feasible_score(
+        normalized_terms,
+        avoidance_penalty=penalty,
+    )
+    if score_config.mode == "avoidance_only":
+        total_score += directional_weight * directional
+    fallback_key = (
+        float(violation_max),
+        float(violation_integral),
+        float("inf") if distance is None else float(distance),
+        int(index),
     )
     return CandidateDiagnostics(
         index=index,
@@ -3563,9 +3696,21 @@ def _candidate_diagnostics(
         policy_surrogate=None,
         total_score=float(total_score),
         directional=directional,
-        min_clearance=min_clearance if np.isfinite(min_clearance) else None,
+        min_clearance=raw_min_clearance,
         violation_max=violation_max,
         violation_integral=violation_integral,
+        normalized_score_terms=normalized_terms.to_json(),
+        applied_score_weights=score_config.weights.to_json(),
+        fallback_key=fallback_key,
+    )
+
+
+def _infeasible_candidate_key(candidate: CandidateDiagnostics) -> tuple[float, float, float, int]:
+    return (
+        float(candidate.violation_max),
+        float(candidate.violation_integral),
+        float("inf") if candidate.goal_distance is None else float(candidate.goal_distance),
+        int(candidate.index),
     )
 
 
@@ -4096,6 +4241,19 @@ def _constraints_for_episode(
 ) -> list[AvoidRegion]:
     if args.no_constraints:
         return []
+    fixture_manifest = getattr(args, "_guided_fixture_manifest", None)
+    if fixture_manifest is not None:
+        constraints = load_episode_constraints(
+            fixture_manifest.episode(spec.output_index).constraint_file
+        )
+        constraints = [
+            replace(constraint, margin=float(args.avoid_margin))
+            if isinstance(constraint, (AvoidRegion, AvoidProjection))
+            else constraint
+            for constraint in constraints
+        ]
+        _validate_precomputed_constraints(constraints, env=env, args=args)
+        return constraints
     if args.constraints_dir is not None:
         constraints = load_episode_constraints(
             _precomputed_constraint_path(args.constraints_dir, spec)
@@ -5588,12 +5746,14 @@ def _method_config(
     *,
     method: str,
     itps_config: ITPSGuidanceConfig,
+    score_config: GuidedScoreConfig = _HISTORICAL_SCORE_CONFIG,
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
         "planning_horizon_chunks": int(args.planning_horizon_chunks),
         "execution_horizon_chunks": int(args.execution_horizon_chunks),
         "geometry_mode": str(args.geometry_mode),
         "constraint_target": str(args.constraint_target),
+        "score": score_config.to_json(),
     }
     if method in {"rejection", "reranking"}:
         config["k_schedule"] = [int(value) for value in args.k_schedule]

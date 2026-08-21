@@ -82,6 +82,9 @@ class CandidateDiagnostics:
     min_clearance: float | None = None
     violation_max: float = 0.0
     violation_integral: float = 0.0
+    normalized_score_terms: dict[str, float] = field(default_factory=dict)
+    applied_score_weights: dict[str, float] = field(default_factory=dict)
+    fallback_key: tuple[Any, ...] | None = None
 
 
 @dataclass

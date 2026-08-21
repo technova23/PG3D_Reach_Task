@@ -38,6 +38,11 @@ from pg3d.eval.constrained_reach import (
     validate_planning_horizons,
     wilson_interval,
 )
+from pg3d.eval.itps_beam_protocol import (
+    GuidedFixtureEpisode,
+    GuidedFixtureManifest,
+    load_guided_fixture_manifest,
+)
 
 __all__ = [
     "AvoidOverlayConfig",
@@ -78,4 +83,7 @@ __all__ = [
     "validate_planning_horizons",
     "validate_paired_episode_rows",
     "wilson_interval",
+    "GuidedFixtureEpisode",
+    "GuidedFixtureManifest",
+    "load_guided_fixture_manifest",
 ]
