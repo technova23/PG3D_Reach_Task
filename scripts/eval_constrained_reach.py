@@ -1996,6 +1996,12 @@ def run_eval_episode(
     )
     raw_action_log.parent.mkdir(parents=True, exist_ok=True)
     raw_action_log.write_text("", encoding="utf-8")
+    verification_log = (
+        output_dir / "verification" / method / f"episode_{spec.output_index:03d}.jsonl"
+    )
+    verification_log.parent.mkdir(parents=True, exist_ok=True)
+    verification_log.write_text("", encoding="utf-8")
+    verification_rows: list[dict[str, Any]] = []
     proposal_writer = (
         GuidedProposalTraceWriter(
             output_dir / "proposals" / method / f"episode_{spec.output_index:03d}",
@@ -2191,7 +2197,21 @@ def run_eval_episode(
             if executed_action_targets and steps_to_execute > 0:
                 replan_start_action_indices.append(len(executed_action_targets))
             raw_chunk = np.asarray(decision.selected_chunk.actions, dtype=np.float32)
+            selected_validation_rollout = (
+                decision.result.selected.rollout
+                if decision.result is not None
+                else (
+                    world_model.imagine(
+                        entry_to_world_model_observation(sim_entry),
+                        decision.selected_chunk,
+                        metadata={"purpose": "imagined_execution_validation"},
+                    )
+                    if world_model is not None
+                    else None
+                )
+            )
             executed_actions: list[np.ndarray] = []
+            executed_agent_positions: list[np.ndarray] = []
             action_tcp_poses: list[np.ndarray] = [
                 np.asarray(sim_entry["tcp_pose"], dtype=np.float32).copy()
             ]
@@ -2220,6 +2240,9 @@ def run_eval_episode(
                         crop_config=crop_config,
                     )
                 action_tcp_poses.append(np.asarray(sim_entry["tcp_pose"], dtype=np.float32).copy())
+                executed_agent_positions.append(
+                    np.asarray(sim_entry["agent_pos"], dtype=np.float32).copy()
+                )
                 obs_window = append_obs_window(
                     obs_window,
                     sim_entry,
@@ -2326,6 +2349,21 @@ def run_eval_episode(
                     )
                     + "\n"
                 )
+            if selected_validation_rollout is not None and provider is not None:
+                verification_row = _imagined_execution_validation(
+                    rollout=selected_validation_rollout,
+                    executed_agent_positions=executed_agent_positions,
+                    executed_tcp_poses=action_tcp_poses[1:],
+                    provider=provider,
+                    constraints=constraints,
+                    constraint_target=constraint_target,
+                    replan=replans - 1,
+                    episode=spec.output_index,
+                    method=method,
+                )
+                verification_rows.append(verification_row)
+                with verification_log.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(_jsonable(verification_row), sort_keys=True) + "\n")
             if terminated_or_truncated:
                 break
     finally:
@@ -2506,6 +2544,8 @@ def run_eval_episode(
     row["proposal_trace"] = (
         str(proposal_writer.records_path) if proposal_writer is not None else None
     )
+    row.update(_verification_episode_metrics(verification_rows))
+    row["imagined_execution_trace"] = str(verification_log)
     return row
 
 
@@ -2635,6 +2675,113 @@ def _minimum_raw_obstacle_clearance(
     return min(
         float(np.min(constraint.region.signed_distance(points))) for constraint in constraints
     )
+
+
+def _imagined_execution_validation(
+    *,
+    rollout: ImaginedRollout,
+    executed_agent_positions: list[np.ndarray],
+    executed_tcp_poses: list[np.ndarray],
+    provider: ManiSkillGhostPandaGeometryProvider,
+    constraints: list[AvoidRegion],
+    constraint_target: Literal["eef", "robot"],
+    replan: int,
+    episode: int,
+    method: str,
+) -> dict[str, Any]:
+    count = min(8, len(executed_agent_positions), rollout.q.shape[0], rollout.eef_path.shape[0])
+    predicted_q = np.asarray(rollout.q[:count, :7], dtype=np.float32)
+    executed_q = (
+        np.stack(
+            [
+                np.asarray(value, dtype=np.float32).reshape(-1)[:7]
+                for value in executed_agent_positions[:count]
+            ],
+            axis=0,
+        )
+        if count
+        else np.empty((0, 7), dtype=np.float32)
+    )
+    predicted_tcp = np.asarray(rollout.eef_path[:count], dtype=np.float32)
+    executed_tcp = (
+        np.stack(
+            [
+                np.asarray(value, dtype=np.float32).reshape(-1)[:3]
+                for value in executed_tcp_poses[:count]
+            ],
+            axis=0,
+        )
+        if count
+        else np.empty((0, 3), dtype=np.float32)
+    )
+    joint_errors = np.linalg.norm(predicted_q - executed_q, axis=1) if count else np.asarray([])
+    tcp_errors = np.linalg.norm(predicted_tcp - executed_tcp, axis=1) if count else np.asarray([])
+
+    predicted_clearance: list[float] = []
+    executed_clearance: list[float] = []
+    if constraints:
+        for step_index in range(count):
+            predicted_points = (
+                np.asarray(rollout.eef_path[step_index], dtype=np.float32).reshape(1, 3)
+                if constraint_target == "eef"
+                else np.asarray(rollout.robot_point_clouds[step_index], dtype=np.float32)
+            )
+            executed_points = (
+                executed_tcp[step_index].reshape(1, 3)
+                if constraint_target == "eef"
+                else np.asarray(
+                    provider.robot_point_cloud(executed_q[step_index]), dtype=np.float32
+                )
+            )
+            predicted_clearance.append(
+                _minimum_raw_obstacle_clearance(predicted_points, constraints)
+            )
+            executed_clearance.append(_minimum_raw_obstacle_clearance(executed_points, constraints))
+    predicted_clearance_array = np.asarray(predicted_clearance, dtype=np.float64)
+    executed_clearance_array = np.asarray(executed_clearance, dtype=np.float64)
+    clearance_errors = predicted_clearance_array - executed_clearance_array
+    optimistic_errors = np.maximum(clearance_errors, 0.0)
+    predicted_feasible = predicted_clearance_array >= DEFAULT_AVOID_MARGIN_M
+    executed_feasible = executed_clearance_array >= DEFAULT_AVOID_MARGIN_M
+    return {
+        "schema_version": "pg3d.imagined_execution_validation.v1",
+        "method": method,
+        "episode": int(episode),
+        "replan": int(replan),
+        "compared_actions": int(count),
+        "joint_error_rad": joint_errors.tolist(),
+        "tcp_error_m": tcp_errors.tolist(),
+        "predicted_clearance_m": predicted_clearance_array.tolist(),
+        "executed_clearance_m": executed_clearance_array.tolist(),
+        "clearance_error_m": clearance_errors.tolist(),
+        "optimistic_clearance_error_m": optimistic_errors.tolist(),
+        "predicted_feasible": predicted_feasible.tolist(),
+        "executed_feasible": executed_feasible.tolist(),
+        "feasibility_confusion": {
+            "true_safe": int(np.sum(predicted_feasible & executed_feasible)),
+            "false_safe": int(np.sum(predicted_feasible & ~executed_feasible)),
+            "false_unsafe": int(np.sum(~predicted_feasible & executed_feasible)),
+            "true_unsafe": int(np.sum(~predicted_feasible & ~executed_feasible)),
+        },
+    }
+
+
+def _verification_episode_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    optimistic = [
+        float(value) for row in rows for value in row.get("optimistic_clearance_error_m", [])
+    ]
+    joint = [float(value) for row in rows for value in row.get("joint_error_rad", [])]
+    tcp = [float(value) for row in rows for value in row.get("tcp_error_m", [])]
+    return {
+        "imagined_execution_compared_actions": sum(int(row["compared_actions"]) for row in rows),
+        "imagined_joint_error_mean_rad": float(np.mean(joint)) if joint else None,
+        "imagined_joint_error_max_rad": float(np.max(joint)) if joint else None,
+        "imagined_tcp_error_mean_m": float(np.mean(tcp)) if tcp else None,
+        "imagined_tcp_error_max_m": float(np.max(tcp)) if tcp else None,
+        "optimistic_clearance_error_p95_m": (
+            float(np.quantile(optimistic, 0.95)) if optimistic else None
+        ),
+    }
 
 
 def _contact_body_name(body: Any) -> str:

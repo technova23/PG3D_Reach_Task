@@ -52,6 +52,7 @@ from pg3d.eval.itps_beam_protocol import (
     GuidedFixtureManifest,
     load_guided_fixture_manifest,
 )
+from pg3d.eval.verifier_calibration import VerifierCalibration, calibrate_verifier_buffer
 
 __all__ = [
     "AvoidOverlayConfig",
@@ -61,11 +62,13 @@ __all__ = [
     "NominalPathAvoidConfig",
     "TimingEvent",
     "TimingRecorder",
+    "VerifierCalibration",
     "GuidedProposalTraceWriter",
     "action_discontinuity_metrics",
     "action_sha256",
     "audit_beam_trace",
     "candidate_feasibility_fraction",
+    "calibrate_verifier_buffer",
     "concatenate_rollouts",
     "constraint_fingerprint",
     "constraint_clearance_series",
