@@ -2,6 +2,18 @@
 
 Last updated: 2026-08-20
 
+## ITPS-beam MVP protocol
+
+The full staged ITPS-beam development protocol is now frozen in
+`scripts/itps_beam_mvp_report.md`, ADR 0012, and
+`configs/eval/e10_itps_beam_mvp_v1`. It uses U-shape fixtures 000, 001, 006, 007,
+008, and 009 strictly as development/pilot data. The implementation sequence adds
+normalized task-aware scoring, independent proposal replay, complete pruning
+telemetry, transition validation, conservative feasible-continuation mass,
+deterministic adaptive weighting/search, and route diversity. A distinct locked
+evaluation set remains deferred, so results on these six fixtures must not be
+presented as locked-test evidence.
+
 ## Current objective
 
 Bootstrap a sim-only research codebase for programmatic geometric guidance of 3D diffusion policies. The first MVP is constrained reaching in ManiSkill/SAPIEN:

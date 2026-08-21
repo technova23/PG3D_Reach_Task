@@ -1,0 +1,64 @@
+{
+  "schema_version": "pg3d.itps_beam_fixture.v1",
+  "name": "e10_u_shape_six_fixture_development_pilot",
+  "classification": "development_only",
+  "source_fixture": "configs/eval/e10_u_shape_box_derived_review_v1/fixture.json",
+  "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
+  "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
+  "episodes": [
+    {
+      "output_index": 0,
+      "source_output_index": 0,
+      "dataset_episode_index": 305,
+      "simulator_seed": 48572874,
+      "policy_seed": 916202559,
+      "constraint_file": "configs/eval/e10_u_shape_box_derived_review_v1/constraints/robot/episode_000.json",
+      "constraint_sha256": "322b3e1e6cde50e6d57950d2d5d01c22cf8d5a7e6ae7ec82ef419e2677a20d75"
+    },
+    {
+      "output_index": 1,
+      "source_output_index": 1,
+      "dataset_episode_index": 317,
+      "simulator_seed": 48572879,
+      "policy_seed": 4274160928,
+      "constraint_file": "configs/eval/e10_u_shape_box_derived_review_v1/constraints/robot/episode_001.json",
+      "constraint_sha256": "1c1ffff31763aedd6a11046556540b147fe72cf1081af95d582f348c4c4a8df8"
+    },
+    {
+      "output_index": 2,
+      "source_output_index": 6,
+      "dataset_episode_index": 1069,
+      "simulator_seed": 48573030,
+      "policy_seed": 2953062871,
+      "constraint_file": "configs/eval/e10_u_shape_box_derived_review_v1/constraints/robot/episode_006.json",
+      "constraint_sha256": "0867e0b0a69a305f0747879c0ea5262b4f9284687a5e9b827a875154436184ba"
+    },
+    {
+      "output_index": 3,
+      "source_output_index": 7,
+      "dataset_episode_index": 1117,
+      "simulator_seed": 48573036,
+      "policy_seed": 1860412786,
+      "constraint_file": "configs/eval/e10_u_shape_box_derived_review_v1/constraints/robot/episode_007.json",
+      "constraint_sha256": "e2667afd063b69345b7583cb14fa7845c287794c78dac2355008d54ebb8e79bb"
+    },
+    {
+      "output_index": 4,
+      "source_output_index": 8,
+      "dataset_episode_index": 1129,
+      "simulator_seed": 48573038,
+      "policy_seed": 4256662015,
+      "constraint_file": "configs/eval/e10_u_shape_box_derived_review_v1/constraints/robot/episode_008.json",
+      "constraint_sha256": "5ad7606523ba2ab15b091ee40a7f72a0f293e181053167dd43631235e2c29933"
+    },
+    {
+      "output_index": 5,
+      "source_output_index": 9,
+      "dataset_episode_index": 1138,
+      "simulator_seed": 48573041,
+      "policy_seed": 3641704370,
+      "constraint_file": "configs/eval/e10_u_shape_box_derived_review_v1/constraints/robot/episode_009.json",
+      "constraint_sha256": "8c3c30534c69634de8ea47d245ff9bcbf10314ab4801dd2bafa748c208973075"
+    }
+  ]
+}

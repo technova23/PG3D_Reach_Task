@@ -1,0 +1,97 @@
+{
+  "schema_version": "pg3d.itps_beam_mvp_protocol.v1",
+  "classification": "development_only",
+  "fixture_manifest": "configs/eval/e10_itps_beam_mvp_v1/development_fixture.json",
+  "checkpoint": "/scratch2/skills/train_final_Arya/step_00100000.pt",
+  "checkpoint_model": "ema",
+  "dataset": "/scratch2/skills/pg3d_reach_regen_abcd.zarr",
+  "shared": {
+    "device": "cuda",
+    "max_steps": 300,
+    "post_success_steps": 16,
+    "goal_threshold_m": 0.025,
+    "executed_actions_per_replan": 8,
+    "execution_horizon_chunks": 1,
+    "constraint_target": "robot",
+    "geometry_mode": "exact",
+    "hard_clearance_m": 0.03,
+    "contact_threshold_m": 0.03,
+    "lineages": [0, 1, 2, 3, 4]
+  },
+  "itps": {
+    "scheduler": "ddim",
+    "eta": 0.0,
+    "guide_ratio": 60.0,
+    "mcmc_steps": 4,
+    "energy": "smooth",
+    "barrier_temperature": 0.01,
+    "robot_points": 1024,
+    "robot_sample_seed": 0
+  },
+  "methods": {
+    "itps": {"planning_horizon_chunks": 1, "guided_candidates": 1},
+    "h1": {
+      "method": "itps_reranking",
+      "planning_horizon_chunks": 1,
+      "guided_candidates": 10
+    },
+    "h3": {
+      "method": "itps_beam",
+      "planning_horizon_chunks": 3,
+      "beam_width": 2,
+      "beam_branch_factor": 2,
+      "guided_search_expansions": 10
+    }
+  },
+  "scoring": {
+    "goal_reference_m": 0.75,
+    "hard_clearance_m": 0.03,
+    "clearance_buffer_m": 0.08,
+    "smoothness_reference_rad2": 0.001,
+    "default_fixed_weights": {"goal": 0.5, "clearance": 0.4, "smoothness": 0.1, "mass": 0.0},
+    "simplex_step": 0.25,
+    "mass_weight_grid": [0.0, 0.1, 0.25, 0.4]
+  },
+  "mass_estimator": {
+    "prior_alpha": 1.0,
+    "prior_beta": 1.0,
+    "lower_quantile": 0.1,
+    "upper_quantile": 0.9,
+    "epsilon": 0.001,
+    "probe_horizon_chunks": 1,
+    "initial_probes_per_feasible_node": 1,
+    "max_guided_proposals_per_replan": 20
+  },
+  "adaptive_weights": {
+    "weight_floor": 0.02,
+    "rho_grid": [0.1, 0.25, 0.5],
+    "temperature_grid": [0.5, 1.0],
+    "logit_min": 0.0,
+    "logit_max": 4.0
+  },
+  "adaptive_search": {
+    "min_beam_width": 1,
+    "max_beam_width": 2,
+    "decisive_score_margin": 0.05,
+    "route_descriptor_points": 16,
+    "route_separation_m": 0.05,
+    "diversity_score_tolerance": 0.1
+  },
+  "replay": {"rtol": 1e-5, "atol": 1e-6, "require_exact_hash_on_same_stack": true},
+  "verification": {
+    "optimistic_clearance_error_quantile": 0.95,
+    "buffer_padding_m": 0.005,
+    "buffer_rounding_m": 0.005,
+    "stop_threshold_m": 0.03
+  },
+  "stages": [
+    "smoke",
+    "lookahead",
+    "fixed_weight_calibration",
+    "mass_ablation",
+    "adaptive_weights",
+    "adaptive_search",
+    "repeated_lineages",
+    "decision"
+  ]
+}

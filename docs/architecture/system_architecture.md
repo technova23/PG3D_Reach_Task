@@ -285,3 +285,17 @@ Every experiment should emit:
 - W&B logs where available,
 - qualitative videos/plots,
 - git commit hashes for main repo and submodules.
+
+## ITPS-guided beam development MVP
+
+The staged H1/H3 method and its development-only evaluation boundary are fixed by
+`scripts/itps_beam_mvp_report.md` and ADR 0012. Guided search keeps hard whole-robot
+prefix feasibility outside weighted scoring. Feasible prefixes may use normalized
+goal, clearance, smoothness, and conservative continuation-mass terms; infeasible
+prefixes retain the fixed maximum-violation, integrated-violation, goal-distance,
+and ancestry ordering.
+
+Each search node owns a branch-specific rolling DP3 observation window. Proposal
+artifacts store those conditioning tensors by content hash plus explicit initial
+diffusion and inner-MCMC noise lineages, making a pruned expansion or mass probe
+independently replayable without reconstructing its parents.
