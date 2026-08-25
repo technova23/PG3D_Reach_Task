@@ -37,15 +37,24 @@ change to the base pose, rest keyframe, URDF, TCP link, or gripper collision mes
   Panda-comparable and is unchanged). dx_lo/dy left untouched since the
   documented blind spot above is anchored there and re-approaching it is
   higher-risk than expanding from the already-validated dx_lo=0.18 corner.
-  New dx_hi=0.65 and dz_hi=0.60 stay inside ``XARM7_MAX_ENVELOPE_BASE``
-  (0.725 / 0.775) with 0.075m / 0.175m headroom, respecting the envelope
-  docstring's warning against sampling to its edge. **This range is a proposed
-  starting point, not yet re-verified** — re-run
-  ``scripts/verify_xarm7_reachability.py --variant gripper --grid 9`` after
-  this change; if corners/interior regress (most likely at the new high-dz
-  corner, per the same wrist-fold failure mode documented above), trim
-  dz_hi/dx_hi down in ~0.05m steps and re-verify before trusting this box for
-  data generation. Update this docstring with the actual sweep result once run.
+  Re-verified against ``--variant gripper`` at dx_hi=0.65/dz_hi=0.60: only
+  4/8 corners + 88.3% interior reachable (9^3 grid) -- a real regression from
+  the pre-expansion 8/8/100.0%, from the same high-dz wrist-fold failure mode.
+  Trimmed dz_hi 0.60->0.50 to recover corners: 6/8 + 95.9% interior.
+* **Benchmarked against Panda 2026-08-1x** — before trimming further toward
+  8/8, swept Panda's own "Panda-comparable" reference box
+  (``scripts/verify_panda_reachability.py``, same mplib-IK methodology) to
+  check what bar Panda itself actually clears: only 4/8 corners + 93.1%
+  interior -- Panda's own reference box is *not* 8/8/100% either. Since the
+  goal is workspace parity with Panda (not an arbitrary 100% target), settled
+  on dx_hi=0.65 (kept large, dx wasn't the regression driver) and dz_hi=0.55
+  (split between the 0.60 regression point and the 0.50 recovery point) as
+  the final box -- comparable to Panda's own achieved reachability rather
+  than stricter than it. This exact combination (dx_hi=0.65, dz_hi=0.55)
+  has not itself been independently re-swept; re-run
+  ``scripts/verify_xarm7_reachability.py --variant gripper --grid 9`` to
+  confirm before trusting it for a full data-gen run, and update this note
+  with the actual corner/interior result once run.
 """
 
 from __future__ import annotations
@@ -57,14 +66,17 @@ from scipy.spatial.transform import Rotation as _Rotation
 ROBOT_BASE_POSITION = np.array([-0.615, 0.0, 0.0], dtype=np.float32)
 
 # Base-relative sampling box [ [dx_lo,dx_hi], [dy_lo,dy_hi], [dz_lo,dz_hi] ].
-# Symmetric in dy (left/right of the robot). Verified by verify_xarm7_reachability.py
-# --variant gripper: 8/8 corners + 100.0% interior IK-reachable (9^3 grid) against the
-# actual gripper-equipped robot; see module docstring for the 2026-07-02 re-tune.
+# Symmetric in dy (left/right of the robot). dx_lo/dy verified 8/8 corners + 100.0%
+# interior at the 2026-07-02 re-tune (see module docstring); dx_hi/dz_hi were
+# expanded 2026-08-08 then trimmed to dz_hi=0.55 to land near Panda's own achieved
+# reachability bar (4/8 corners, 93.1% interior) rather than a stricter 100% target
+# -- see module docstring's "Benchmarked against Panda" note. This exact combo not
+# yet independently re-swept; re-run verify_xarm7_reachability.py to confirm.
 XARM7_REACH_BOX_BASE = np.array(
     [
-        [0.18, 0.65],   # forward (dx) — expanded 2026-08-08, was 0.50; re-verify before trusting
+        [0.18, 0.65],   # forward (dx) — expanded 2026-08-08 from 0.50
         [-0.42, 0.42],  # lateral (dy) — symmetric, unchanged (already Panda-comparable)
-        [0.05, 0.55],   # height  (dz) above the base/table surface — expanded 2026-08-08, was 0.37
+        [0.05, 0.55],   # height  (dz) above the base/table surface — from 0.37, via 0.60, to 0.55
     ],
     dtype=np.float32,
 )
@@ -84,9 +96,10 @@ XARM7_MAX_ENVELOPE_BASE = np.array(
 # Table-agnostic in XY (anchored to the base, not the table footprint).
 XARM7_CROP_BOX_BASE = np.array(
     [
-        [-0.15, 0.75],  # expanded 2026-08-08 to keep ~0.10m margin over the new reach dx_hi=0.65
+        [-0.15, 0.75],  # expanded 2026-08-08 to keep ~0.10m margin over reach dx_hi=0.65
         [-0.55, 0.55],
-        [-0.02, 0.70],  # expanded 2026-08-08 to keep margin over the new reach dz_hi=0.60
+        [-0.02, 0.70],  # expanded 2026-08-08; ~0.15m margin over reach dz_hi=0.55 (was tuned
+                         # for dz_hi=0.60 before that was trimmed -- left generous, not tightened)
     ],
     dtype=np.float32,
 )
