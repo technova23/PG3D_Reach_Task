@@ -16,6 +16,8 @@ from mani_skill.utils.structs.pose import Pose
 from pg3d.envs.maniskill_adapter.reach_config import REACH_TASK_SPECS, ReachGoalRegion
 from pg3d.envs.obstacles import (
     CABINET_COMPONENTS,
+    branch_gate_components,
+    gate_components,
     scaled_cabinet_components,
     transform_box_component,
     u_shape_components,
@@ -141,6 +143,27 @@ class PG3DReachEnv(BaseEnv):
                     )
                     self.pg3d_obstacle_actors.append(actor)
                 self.pg3d_obstacle = self.pg3d_obstacle_actors[0]
+            elif self.pg3d_obstacle_family in {"gate", "branch_gate"}:
+                self.pg3d_obstacle_components = (
+                    gate_components(half_extents)
+                    if self.pg3d_obstacle_family == "gate"
+                    else branch_gate_components(half_extents)
+                )
+                for component in self.pg3d_obstacle_components:
+                    actor = actors.build_box(
+                        half_sizes=list(component.half_extents),
+                        color=(
+                            [0.70, 0.20, 0.20, 1.0]
+                            if component.name == "branch_blocker"
+                            else [0.55, 0.55, 0.55, 1.0]
+                        ),
+                        **{
+                            **common,
+                            "name": f"pg3d_obstacle_{component.name}",
+                        },
+                    )
+                    self.pg3d_obstacle_actors.append(actor)
+                self.pg3d_obstacle = self.pg3d_obstacle_actors[0]
             elif self.pg3d_obstacle_family == "cylinder":
                 self.pg3d_obstacle = actors.build_cylinder(
                     radius=float(half_extents[0]),
@@ -216,7 +239,7 @@ class PG3DReachEnv(BaseEnv):
                         .reshape(1, 3)
                         .expand(batch_size, -1)
                     )
-                if self.pg3d_obstacle_family in {"cabinet", "u_shape"}:
+                if self.pg3d_obstacle_family in {"cabinet", "u_shape", "gate", "branch_gate"}:
                     root_center = obstacle_xyz[0].detach().cpu().numpy()
                     root_yaw = float(options.get("pg3d_obstacle_yaw", 0.0))
                     for actor, component in zip(

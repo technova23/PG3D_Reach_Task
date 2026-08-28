@@ -69,6 +69,8 @@ from pg3d.envs.maniskill_adapter.panda_collision import (
 from pg3d.envs.obstacles import (
     CABINET_COMPONENTS,
     U_SHAPE_REFERENCE_HALF_EXTENTS,
+    branch_gate_components,
+    gate_components,
     scaled_cabinet_components,
     transform_box_component,
     u_shape_components,
@@ -151,6 +153,8 @@ _CARTON_HALF_EXTENTS = (0.055, 0.08, 0.16)
 _CYLINDER_DIMENSIONS = (0.055, 0.055, 0.12)
 _CABINET_ENVELOPE_HALF_EXTENTS = (0.08, 0.085, 0.20)
 _U_SHAPE_ENVELOPE_HALF_EXTENTS = U_SHAPE_REFERENCE_HALF_EXTENTS
+_GATE_ENVELOPE_HALF_EXTENTS = (0.14, 0.12, 0.20)
+_BRANCH_GATE_ENVELOPE_HALF_EXTENTS = (0.14, 0.12, 0.20)
 
 
 @dataclass(frozen=True)
@@ -1626,14 +1630,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--obstacle-family",
-        choices=["box", "carton", "cylinder", "cabinet", "u_shape"],
+        choices=["box", "carton", "cylinder", "cabinet", "u_shape", "gate", "branch_gate"],
         default="box",
         help=(
             "Named embodied-obstacle family. Carton defaults to half-extents "
             f"{_CARTON_HALF_EXTENTS}; cylinder uses radius/half-length encoded as "
             f"{_CYLINDER_DIMENSIONS}; cabinet uses a composite open structure; "
-            f"u_shape defaults to envelope half-extents {_U_SHAPE_ENVELOPE_HALF_EXTENTS}. "
-            "Explicit --avoid-box-half-extents overrides box/carton/u_shape only."
+            f"u_shape defaults to envelope half-extents {_U_SHAPE_ENVELOPE_HALF_EXTENTS}; "
+            f"gate is two grounded panels forming a narrow slot, envelope half-extents "
+            f"{_GATE_ENVELOPE_HALF_EXTENTS} (see obstacles.gate_gap_width for the actual "
+            "gap width); branch_gate composes gate with a third panel that blocks the "
+            "+X-side detour past the slot, forcing one specific branch through it, "
+            f"envelope half-extents {_BRANCH_GATE_ENVELOPE_HALF_EXTENTS}. "
+            "Explicit --avoid-box-half-extents overrides box/carton/u_shape/gate/"
+            "branch_gate only."
         ),
     )
     parser.add_argument(
@@ -1804,6 +1814,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.avoid_shape = "box"
         if args.avoid_box_half_extents is None:
             args.avoid_box_half_extents = list(_CARTON_HALF_EXTENTS)
+    if args.embody_obstacle and args.obstacle_family == "gate":
+        args.avoid_shape = "box"
+        if args.avoid_box_half_extents is None:
+            args.avoid_box_half_extents = list(_GATE_ENVELOPE_HALF_EXTENTS)
+    if args.embody_obstacle and args.obstacle_family == "branch_gate":
+        args.avoid_shape = "box"
+        if args.avoid_box_half_extents is None:
+            args.avoid_box_half_extents = list(_BRANCH_GATE_ENVELOPE_HALF_EXTENTS)
     if args.embody_obstacle and args.avoid_shape not in ("box", "cuboid", "cylinder"):
         raise ValueError("--embody-obstacle currently requires a box or cylinder avoid shape")
     if (
@@ -5120,17 +5138,25 @@ def _finalize_constraints(
                 clearance_scale=float(args.avoid_clearance_scale),
             )
         )
-    if args.embody_obstacle and args.obstacle_family in {"cabinet", "u_shape"}:
+    if args.embody_obstacle and args.obstacle_family in {
+        "cabinet",
+        "u_shape",
+        "gate",
+        "branch_gate",
+    }:
         family = str(args.obstacle_family)
         if len(finalized) != 1 or not isinstance(finalized[0].region, BoxRegion):
             raise ValueError(f"{family} family requires one root BoxRegion before expansion")
         root = finalized[0]
         root_region = root.region
-        components = (
-            scaled_cabinet_components(float(root_region.half_extents[2]))
-            if family == "cabinet"
-            else u_shape_components(root_region.half_extents)
-        )
+        if family == "cabinet":
+            components = scaled_cabinet_components(float(root_region.half_extents[2]))
+        elif family == "u_shape":
+            components = u_shape_components(root_region.half_extents)
+        elif family == "gate":
+            components = gate_components(root_region.half_extents)
+        else:
+            components = branch_gate_components(root_region.half_extents)
         return [
             replace(
                 root,
@@ -6458,16 +6484,19 @@ def _validate_embodied_obstacle_geometry(
     if configured is None:
         raise ValueError("control environment has no configured pg3d obstacle actor")
     family = getattr(unwrapped, "pg3d_obstacle_family", None)
-    if family in {"cabinet", "u_shape"}:
+    if family in {"cabinet", "u_shape", "gate", "branch_gate"}:
         root_center = np.asarray(reset_options["pg3d_obstacle_center"], dtype=np.float32)
         root_yaw = float(reset_options["pg3d_obstacle_yaw"])
         expected_regions = []
         configured_dimensions = np.asarray(configured, dtype=np.float32)
-        components = (
-            scaled_cabinet_components(float(configured_dimensions[2]))
-            if family == "cabinet"
-            else u_shape_components(configured_dimensions)
-        )
+        if family == "cabinet":
+            components = scaled_cabinet_components(float(configured_dimensions[2]))
+        elif family == "u_shape":
+            components = u_shape_components(configured_dimensions)
+        elif family == "gate":
+            components = gate_components(configured_dimensions)
+        else:
+            components = branch_gate_components(configured_dimensions)
         for component in components:
             center, yaw = transform_box_component(component, center=root_center, yaw=root_yaw)
             expected_regions.append(

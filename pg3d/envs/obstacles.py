@@ -83,6 +83,81 @@ def u_shape_components(
     )
 
 
+GATE_ENVELOPE_HALF_EXTENTS = (0.14, 0.12, 0.20)
+BRANCH_GATE_ENVELOPE_HALF_EXTENTS = (0.14, 0.12, 0.20)
+
+
+def gate_gap_width(half_extents: tuple[float, float, float] | np.ndarray) -> float:
+    """Open slot width (meters) that ``gate_components``/``branch_gate_components``
+    would carve out of the given envelope -- exposed so a difficulty sweep can
+    report the actual physical gap instead of the raw envelope half-extents."""
+    envelope = np.asarray(half_extents, dtype=np.float32)
+    return float(0.8 * envelope[0])
+
+
+def gate_components(
+    half_extents: tuple[float, float, float] | np.ndarray,
+) -> tuple[BoxObstacleComponent, ...]:
+    """Build a narrow slot from two parallel grounded panels (real, embodied --
+    not a virtual/guidance-only region).
+
+    The family-local gap opens along ``X``; both panels run the full ``Y``
+    depth and ``Z`` height. ``half_extents`` describes the complete gate
+    envelope, split 40/60 between the open gap and the two panels (see
+    ``gate_gap_width``) so the gap scales down toward a gripper-width slot as
+    the envelope narrows -- mirrors ``u_shape_components``' scale-with-envelope
+    contract so a difficulty sweep can resize the family alone.
+    """
+    envelope = np.asarray(half_extents, dtype=np.float32)
+    if envelope.shape != (3,) or not np.all(np.isfinite(envelope)) or np.any(envelope <= 0.0):
+        raise ValueError("gate half-extents must contain three positive finite values")
+    half_x, half_y, half_z = (float(value) for value in envelope)
+    gap_half_width = half_x * 0.4
+    panel_half_thickness = (half_x - gap_half_width) / 2.0
+    panel_center_x = gap_half_width + panel_half_thickness
+    return (
+        BoxObstacleComponent(
+            "left_panel",
+            (panel_half_thickness, half_y, half_z),
+            (-panel_center_x, 0.0, 0.0),
+        ),
+        BoxObstacleComponent(
+            "right_panel",
+            (panel_half_thickness, half_y, half_z),
+            (panel_center_x, 0.0, 0.0),
+        ),
+    )
+
+
+def branch_gate_components(
+    half_extents: tuple[float, float, float] | np.ndarray,
+) -> tuple[BoxObstacleComponent, ...]:
+    """Gate slot plus one branch-blocking panel set back on the +X side.
+
+    Composes ``gate_components`` (the narrow slot the arm must thread) with a
+    third panel, offset along +Y beyond the right gate panel and aligned with
+    it in X. A trajectory that clears the gate by favoring the +X-side branch
+    is then forced into the blocker; only a route that favors -X through the
+    slot (or re-crosses to -X after it) avoids both obstacles. This is the
+    compound family: gate-threading and branch-avoidance must both be
+    satisfied by *one* trajectory, not resolved independently -- the
+    conjunction is the point, not either constraint alone.
+    """
+    gate = gate_components(half_extents)
+    envelope = np.asarray(half_extents, dtype=np.float32)
+    half_y, half_z = float(envelope[1]), float(envelope[2])
+    right_panel = next(component for component in gate if component.name == "right_panel")
+    blocker_half_thickness = half_y / 2.0
+    blocker_center_x = right_panel.local_center[0]
+    blocker_center_y = half_y + blocker_half_thickness
+    blocker = BoxObstacleComponent(
+        "branch_blocker",
+        (right_panel.half_extents[0], blocker_half_thickness, half_z),
+        (blocker_center_x, blocker_center_y, 0.0),
+    )
+    return (*gate, blocker)
+
+
 def scaled_cabinet_components(half_height: float) -> tuple[BoxObstacleComponent, ...]:
     """Scale the cabinet vertically while preserving its tabletop-supported shape."""
     if not np.isfinite(half_height) or half_height <= 0.0:
