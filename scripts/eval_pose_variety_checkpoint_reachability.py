@@ -59,6 +59,40 @@ def _quat_angular_distance_rad(q1_wxyz: np.ndarray, q2_wxyz: np.ndarray) -> floa
     return float(2.0 * np.arccos(dot))
 
 
+# Rest-pose TCP orientation (wxyz): tool z-axis straight down. Used only as a fixed
+# reference to report how far a sampled orientation tilts, in degrees -- a raw
+# quaternion isn't human-readable on its own.
+_DOWN_QUAT_WXYZ = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+
+
+def _tilt_from_down_deg(quat_wxyz: np.ndarray) -> float:
+    return float(np.degrees(_quat_angular_distance_rad(quat_wxyz, _DOWN_QUAT_WXYZ)))
+
+
+def _orientation_variety_stats_deg(quats: list[np.ndarray]) -> dict[str, float | int | None]:
+    """Pairwise angular spread (degrees) across a set of orientations.
+
+    Quantifies whether the orientations actually tested for one label (start /
+    waypoint / goal) across a config's --episodes-per-config episodes are spread
+    apart (FPS worked) or accidentally clustered -- independent of whether each
+    one turned out to be IK-reachable or the checkpoint reached it.
+    """
+    n = len(quats)
+    if n < 2:
+        return {"count": n, "min_deg": None, "mean_deg": None, "max_deg": None}
+    pairwise = [
+        float(np.degrees(_quat_angular_distance_rad(quats[i], quats[j])))
+        for i in range(n)
+        for j in range(i + 1, n)
+    ]
+    return {
+        "count": n,
+        "min_deg": float(np.min(pairwise)),
+        "mean_deg": float(np.mean(pairwise)),
+        "max_deg": float(np.max(pairwise)),
+    }
+
+
 def _build_ik_env_and_planner(variant: str) -> tuple[Any, Any, Any, np.ndarray]:
     """Cheap obs_mode='none' env + mplib planner, used only for IK pre-verification."""
     import gymnasium as gym
@@ -235,6 +269,16 @@ def main(argv: list[str] | None = None) -> int:
                     candidates, k=args.episodes_per_config, rng=rng
                 )
 
+            print("  orientation variety sampled for this config (pairwise spread, degrees):")
+            for label in labels:
+                stats = _orientation_variety_stats_deg(pools[label])
+                tilts = ", ".join(f"{_tilt_from_down_deg(q):.0f}" for q in pools[label])
+                print(
+                    f"    {label:8s}: min={stats['min_deg']:.1f} mean={stats['mean_deg']:.1f} "
+                    f"max={stats['max_deg']:.1f}  (tilt-from-down per episode: [{tilts}] deg)"
+                )
+
+            config_counts = {"total": 0, "ik_failed": 0, "waypoint_reached": 0, "goal_reached": 0}
             for episode_idx in range(args.episodes_per_config):
                 resolved: dict[str, tuple[np.ndarray, np.ndarray]] = {}
                 failure_label: str | None = None
@@ -257,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
                     resolved[label] = result
 
                 counts["total_episodes"] += 1
+                config_counts["total"] += 1
                 row: dict[str, Any] = {
                     "config": config_idx,
                     "episode": episode_idx,
@@ -266,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 if failure_label is not None:
                     counts["ik_failed"] += 1
+                    config_counts["ik_failed"] += 1
                     row["outcome"] = f"{failure_label}_ik_failed"
                     print(f"  [ep {episode_idx}] SKIP — {failure_label} pose not IK-reachable")
                     all_rows.append(row)
@@ -277,6 +323,13 @@ def main(argv: list[str] | None = None) -> int:
                 row["start_quat"] = start_quat.tolist()
                 row["waypoint_quat"] = waypoint_quat.tolist()
                 row["goal_quat"] = goal_quat.tolist()
+                print(
+                    f"  [ep {episode_idx}] IK-reachable — proceeding regardless of what the "
+                    f"checkpoint does with it. tilt-from-down: "
+                    f"start={_tilt_from_down_deg(start_quat):.0f}deg "
+                    f"waypoint={_tilt_from_down_deg(waypoint_quat):.0f}deg "
+                    f"goal={_tilt_from_down_deg(goal_quat):.0f}deg"
+                )
 
                 stage_targets = [
                     ("waypoint", positions[1], waypoint_quat),
@@ -400,37 +453,56 @@ def main(argv: list[str] | None = None) -> int:
                 row["total_steps"] = total_steps
                 if stage_reached_step["waypoint"] is not None:
                     counts["waypoint_reached"] += 1
+                    config_counts["waypoint_reached"] += 1
                 if stage_reached_step["goal"] is not None:
                     counts["goal_reached"] += 1
+                    config_counts["goal_reached"] += 1
                 row["outcome"] = (
                     "goal_reached"
                     if stage_reached_step["goal"] is not None
                     else ("waypoint_reached_only" if stage_reached_step["waypoint"] is not None else "failed")
                 )
 
+                # Video is saved unconditionally for every IK-reachable episode -- success
+                # or failure -- since a robustness test needs to SEE the failures too, not
+                # just the ones that happened to succeed.
                 if args.video_dir is not None:
                     video_path = args.video_dir / f"config_{config_idx:02d}_episode_{episode_idx:02d}.mp4"
                     save_video(video_path, [np.asarray(f) for f in frames], fps=args.video_fps)
                     row["video"] = str(video_path)
-                    print(f"  [ep {episode_idx}] video: {video_path}")
+                    print(f"  [ep {episode_idx}] outcome={row['outcome']}  video: {video_path}")
 
                 all_rows.append(row)
+
+            attempted = config_counts["total"] - config_counts["ik_failed"]
+            print(
+                f"  — config {config_idx:02d} success rate: "
+                f"goal_reached={config_counts['goal_reached']}/{attempted} attempted "
+                f"({100 * config_counts['goal_reached'] / max(attempted, 1):.1f}%), "
+                f"waypoint_reached={config_counts['waypoint_reached']}/{attempted} "
+                f"({100 * config_counts['waypoint_reached'] / max(attempted, 1):.1f}%), "
+                f"ik_unreachable={config_counts['ik_failed']}/{config_counts['total']}"
+            )
     finally:
         ik_solver.close()
         ik_env.close()
         sim_env.close()
         ghost_env.close()
 
-    print("\n── Summary")
-    print(f"   total episodes     : {counts['total_episodes']}")
-    print(f"   IK-unreachable     : {counts['ik_failed']}")
+    attempted_total = counts["total_episodes"] - counts["ik_failed"]
+    print("\n── Summary (checkpoint robustness across all configs)")
+    print(f"   total episodes         : {counts['total_episodes']}")
+    print(f"   IK-unreachable (skipped): {counts['ik_failed']}")
+    print(f"   attempted by checkpoint : {attempted_total}")
     print(
-        f"   waypoint reached   : {counts['waypoint_reached']} "
-        f"({100 * counts['waypoint_reached'] / max(counts['total_episodes'], 1):.1f}%)"
+        f"   waypoint success rate   : {counts['waypoint_reached']}/{attempted_total} "
+        f"({100 * counts['waypoint_reached'] / max(attempted_total, 1):.1f}% of attempted, "
+        f"{100 * counts['waypoint_reached'] / max(counts['total_episodes'], 1):.1f}% of all)"
     )
     print(
-        f"   goal reached       : {counts['goal_reached']} "
-        f"({100 * counts['goal_reached'] / max(counts['total_episodes'], 1):.1f}%)"
+        f"   goal success rate       : {counts['goal_reached']}/{attempted_total} "
+        f"({100 * counts['goal_reached'] / max(attempted_total, 1):.1f}% of attempted, "
+        f"{100 * counts['goal_reached'] / max(counts['total_episodes'], 1):.1f}% of all)"
     )
 
     if args.summary_json is not None:
