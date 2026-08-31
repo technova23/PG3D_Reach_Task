@@ -54,17 +54,6 @@ from typing import Any
 import numpy as np
 
 
-def _to_numpy(value: Any) -> np.ndarray:
-    """Coerce a torch tensor (CPU or GPU, batched or scalar) or numpy value to ndarray.
-
-    ManiSkill's GPU sim returns `terminated`/`truncated` as torch tensors; np.any()
-    doesn't accept torch's tensor-method kwargs, so callers must convert first.
-    """
-    if hasattr(value, "detach"):
-        value = value.detach().cpu().numpy()
-    return np.asarray(value)
-
-
 def _quat_angular_distance_rad(q1_wxyz: np.ndarray, q2_wxyz: np.ndarray) -> float:
     dot = float(np.clip(np.abs(np.dot(q1_wxyz, q2_wxyz)), 0.0, 1.0))
     return float(2.0 * np.arccos(dot))
@@ -206,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         rollout_observation_entry,
         save_video,
     )
+    from pg3d.utils.arrays import bool_any, frame_to_numpy
 
     try:
         import gymnasium as gym
@@ -360,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
                 obs_window = make_initial_obs_window(sim_entry, n_obs_steps=int(policy.n_obs_steps))
 
                 timer = TimingRecorder(enabled=False)
-                frames = [sim_env.render()]
+                frames = [frame_to_numpy(sim_env.render())]
                 stage_idx = 0
                 stage_steps = 0
                 stage_reached_step: dict[str, int | None] = {"waypoint": None, "goal": None}
@@ -427,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
                             obs_window = append_obs_window(
                                 obs_window, sim_entry, n_obs_steps=int(policy.n_obs_steps)
                             )
-                            frames.append(sim_env.render())
+                            frames.append(frame_to_numpy(sim_env.render()))
 
                             tcp = _tcp_pose(sim_env.unwrapped)
                             pos_err = float(np.linalg.norm(tcp[:3].astype(np.float64) - target_pos))
@@ -438,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
                                 reached_this_stage = True
                                 stage_reached_step[target_label] = total_steps
                                 break
-                            if bool(np.any(_to_numpy(terminated))) or bool(np.any(_to_numpy(truncated))):
+                            if bool_any(terminated) or bool_any(truncated):
                                 terminated_or_truncated = True
                                 break
                         if terminated_or_truncated:
@@ -479,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
                 # just the ones that happened to succeed.
                 if args.video_dir is not None:
                     video_path = args.video_dir / f"config_{config_idx:02d}_episode_{episode_idx:02d}.mp4"
-                    save_video(video_path, [_to_numpy(f) for f in frames], fps=args.video_fps)
+                    save_video(video_path, frames, fps=args.video_fps)
                     row["video"] = str(video_path)
                     print(f"  [ep {episode_idx}] outcome={row['outcome']}  video: {video_path}")
 
