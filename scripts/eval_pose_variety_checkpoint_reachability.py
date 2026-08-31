@@ -160,6 +160,52 @@ def _sample_workspace_triple(
     return points
 
 
+def _sync_pose_variety_markers(
+    sim_env: Any,
+    *,
+    sapien: Any,
+    actors: Any,
+    start_pos: np.ndarray,
+    waypoint_pos: np.ndarray,
+    goal_pos: np.ndarray,
+    marker_radius: float,
+) -> None:
+    """Point the env's built-in start/goal markers at OUR actual triple and add a
+    waypoint marker (the env has no built-in slot for one).
+
+    PG3DReachEnv (pg3d/envs/maniskill_adapter/reach_env.py) builds a red
+    ``start_site`` and a green ``goal_site`` sphere, but both are only ever
+    positioned by the env's own internal reset/goal-sampling logic -- which has
+    nothing to do with the start/waypoint/goal this script drives the episode
+    toward (we manually teleport the robot to ``start_pos`` after reset, and
+    steer via reranking toward ``waypoint_pos`` then ``goal_pos``). Left alone,
+    ``start_site`` sits at wherever the env's default reset put the robot (e.g.
+    the rest pose) and ``goal_site`` sits at the env's own randomly sampled
+    goal -- neither matches what's actually being tested, and there is no
+    marker at all for the waypoint stage. This re-points start_site/goal_site
+    to our real start/goal and adds a blue ``waypoint_site`` for the waypoint.
+    """
+    unwrapped = sim_env.unwrapped
+    if not hasattr(unwrapped, "waypoint_site"):
+        unwrapped.waypoint_site = actors.build_sphere(
+            unwrapped.scene,
+            radius=float(marker_radius),
+            color=[0.15, 0.45, 1.0, 1.0],  # blue -- distinct from red start / green goal
+            name="pose_variety_waypoint_site",
+            body_type="kinematic",
+            add_collision=False,
+            initial_pose=sapien.Pose(),
+        )
+    unwrapped.start_site.set_pose(sapien.Pose(p=np.asarray(start_pos, dtype=np.float32).tolist()))
+    unwrapped.waypoint_site.set_pose(
+        sapien.Pose(p=np.asarray(waypoint_pos, dtype=np.float32).tolist())
+    )
+    unwrapped.goal_site.set_pose(sapien.Pose(p=np.asarray(goal_pos, dtype=np.float32).tolist()))
+    update_render = getattr(unwrapped.scene, "update_render", None)
+    if callable(update_render):
+        update_render()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
@@ -201,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
         import gymnasium as gym
         import mani_skill.envs  # noqa: F401
         import sapien
+        from mani_skill.utils.building import actors
     except Exception as exc:  # noqa: BLE001
         print(f"Failed to import ManiSkill/SAPIEN: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -341,6 +388,15 @@ def main(argv: list[str] | None = None) -> int:
                     seed=args.seed + config_idx * 1000 + episode_idx, options={"reconfigure": True}
                 )
                 _set_robot_qpos(sim_env, start_qpos)
+                _sync_pose_variety_markers(
+                    sim_env,
+                    sapien=sapien,
+                    actors=actors,
+                    start_pos=positions[0],
+                    waypoint_pos=positions[1],
+                    goal_pos=positions[2],
+                    marker_radius=args.position_tolerance,
+                )
                 sim_obs, sim_info = _refresh_obs_after_manual_qpos(
                     sim_env, info=reset_info, gripper_open=args.gripper_open
                 )
@@ -351,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
 
                 timer = TimingRecorder(enabled=False)
                 frames = [frame_to_numpy(sim_env.render())]
+                ema_sim_action: np.ndarray | None = None
                 stage_idx = 0
                 stage_steps = 0
                 stage_reached_step: dict[str, int | None] = {"waypoint": None, "goal": None}
@@ -408,7 +465,19 @@ def main(argv: list[str] | None = None) -> int:
                                 high=getattr(sim_env.action_space, "high", None),
                                 gripper_open=args.gripper_open,
                             )
-                            sim_obs, _reward, terminated, truncated, sim_info = sim_env.step(sim_action)
+                            # EMA-smooth the executed action to damp the vibratory,
+                            # per-replan-chunk-boundary jitter seen in raw chunk execution
+                            # (mirrors abhinav/main's --action-ema-alpha in
+                            # rollout_dp3_reach_policy.py / train_dp3_reach.py's rollout
+                            # eval). State persists across the whole episode, not per stage.
+                            if ema_sim_action is None or args.action_ema_alpha >= 1.0:
+                                ema_sim_action = sim_action
+                            else:
+                                ema_sim_action = (
+                                    args.action_ema_alpha * sim_action
+                                    + (1.0 - args.action_ema_alpha) * ema_sim_action
+                                )
+                            sim_obs, _reward, terminated, truncated, sim_info = sim_env.step(ema_sim_action)
                             total_steps += 1
                             stage_steps += 1
                             sim_entry = rollout_observation_entry(
@@ -542,6 +611,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--position-tolerance", type=float, default=0.02)
     p.add_argument("--rotation-tolerance", type=float, default=0.35, help="Radians.")
     p.add_argument("--max-steps-per-stage", type=int, default=60)
+    p.add_argument(
+        "--action-ema-alpha",
+        type=float,
+        default=0.6,
+        help=(
+            "EMA smoothing factor applied to each executed sim action, persisted across "
+            "the whole episode. 1.0 = no smoothing (raw, vibratory chunk-boundary jitter); "
+            "lower = heavier smoothing. Matches abhinav/main's --action-ema-alpha."
+        ),
+    )
     p.add_argument("--k-schedule", type=int, nargs="+", default=[16, 32, 64])
     p.add_argument("--policy-batch-size", type=int, default=64)
     p.add_argument("--gripper-open", type=float, default=0.04)
@@ -563,6 +642,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("tolerances must be non-negative")
     if args.max_steps_per_stage <= 0:
         raise ValueError("--max-steps-per-stage must be positive")
+    if not (0.0 < args.action_ema_alpha <= 1.0):
+        raise ValueError("--action-ema-alpha must be in (0.0, 1.0]")
     if args.video_fps <= 0:
         raise ValueError("--video-fps must be positive")
     return args
