@@ -54,6 +54,17 @@ from typing import Any
 import numpy as np
 
 
+def _to_numpy(value: Any) -> np.ndarray:
+    """Coerce a torch tensor (CPU or GPU, batched or scalar) or numpy value to ndarray.
+
+    ManiSkill's GPU sim returns `terminated`/`truncated` as torch tensors; np.any()
+    doesn't accept torch's tensor-method kwargs, so callers must convert first.
+    """
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
 def _quat_angular_distance_rad(q1_wxyz: np.ndarray, q2_wxyz: np.ndarray) -> float:
     dot = float(np.clip(np.abs(np.dot(q1_wxyz, q2_wxyz)), 0.0, 1.0))
     return float(2.0 * np.arccos(dot))
@@ -427,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
                                 reached_this_stage = True
                                 stage_reached_step[target_label] = total_steps
                                 break
-                            if bool(np.any(terminated)) or bool(np.any(truncated)):
+                            if bool(np.any(_to_numpy(terminated))) or bool(np.any(_to_numpy(truncated))):
                                 terminated_or_truncated = True
                                 break
                         if terminated_or_truncated:
