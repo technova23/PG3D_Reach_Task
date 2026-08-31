@@ -479,7 +479,7 @@ def main(argv: list[str] | None = None) -> int:
                 # just the ones that happened to succeed.
                 if args.video_dir is not None:
                     video_path = args.video_dir / f"config_{config_idx:02d}_episode_{episode_idx:02d}.mp4"
-                    save_video(video_path, [np.asarray(f) for f in frames], fps=args.video_fps)
+                    save_video(video_path, [_to_numpy(f) for f in frames], fps=args.video_fps)
                     row["video"] = str(video_path)
                     print(f"  [ep {episode_idx}] outcome={row['outcome']}  video: {video_path}")
 
