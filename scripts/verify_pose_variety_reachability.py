@@ -83,7 +83,11 @@ def _build_env_and_planner(variant: str) -> tuple[Any, Any, Any, np.ndarray]:
     )
     n_ik = len(solver.planner.user_joint_names)
     rest_qpos = np.asarray(u.agent.robot.get_qpos()).reshape(-1)[:n_ik].astype(np.float32)
-    return env, solver, solver.planner, rest_qpos
+    # Return the solver itself as "planner" -- _resolve_reachable_orientation and
+    # _plan_multisegment_trajectory call planner.move_to_pose_with_screw(...), which
+    # only the ManiSkill solver wrapper exposes (the raw mplib Planner, solver.planner,
+    # only has .IK).
+    return env, solver, solver, rest_qpos
 
 
 def _sample_workspace_triple(
