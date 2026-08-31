@@ -184,18 +184,27 @@ def _sync_pose_variety_markers(
     goal -- neither matches what's actually being tested, and there is no
     marker at all for the waypoint stage. This re-points start_site/goal_site
     to our real start/goal and adds a blue ``waypoint_site`` for the waypoint.
+
+    Rebuilds ``waypoint_site`` fresh EVERY call rather than caching it on the
+    env: each episode's reset uses ``options={"reconfigure": True}``, which
+    tears down and rebuilds the whole SAPIEN scene (a new ``unwrapped.scene``
+    object) -- that's also why the env's own start_site/goal_site come back
+    correctly every episode, since PG3DReachEnv's _load_scene recreates them
+    each reconfigure. A cached ``waypoint_site`` actor built only once would
+    reference an actor destroyed by that rebuild from episode 2 onward,
+    silently doing nothing -- which is exactly why the waypoint marker showed
+    up only in the very first video.
     """
     unwrapped = sim_env.unwrapped
-    if not hasattr(unwrapped, "waypoint_site"):
-        unwrapped.waypoint_site = actors.build_sphere(
-            unwrapped.scene,
-            radius=float(marker_radius),
-            color=[0.15, 0.45, 1.0, 1.0],  # blue -- distinct from red start / green goal
-            name="pose_variety_waypoint_site",
-            body_type="kinematic",
-            add_collision=False,
-            initial_pose=sapien.Pose(),
-        )
+    unwrapped.waypoint_site = actors.build_sphere(
+        unwrapped.scene,
+        radius=float(marker_radius),
+        color=[0.15, 0.45, 1.0, 1.0],  # blue -- distinct from red start / green goal
+        name="pose_variety_waypoint_site",
+        body_type="kinematic",
+        add_collision=False,
+        initial_pose=sapien.Pose(),
+    )
     unwrapped.start_site.set_pose(sapien.Pose(p=np.asarray(start_pos, dtype=np.float32).tolist()))
     unwrapped.waypoint_site.set_pose(
         sapien.Pose(p=np.asarray(waypoint_pos, dtype=np.float32).tolist())
