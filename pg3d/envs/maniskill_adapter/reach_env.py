@@ -90,7 +90,10 @@ class PG3DReachEnv(BaseEnv):
         self.waypoint_site = (
             actors.build_sphere(
                 self.scene,
-                radius=self.goal_thresh,
+                # Deliberately larger than goal_site: during the waypoint stage the
+                # green goal marker sits at the SAME position (the waypoint is the
+                # goal then), so an equal-sized blue sphere would be hidden inside it.
+                radius=self.goal_thresh * 1.6,
                 color=[0.15, 0.45, 1.0, 1.0],  # blue -- distinct from red start / green goal
                 name="waypoint_site",
                 body_type="kinematic",

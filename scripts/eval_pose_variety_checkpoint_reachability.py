@@ -160,11 +160,29 @@ def _sample_workspace_triple(
     return points
 
 
+def _set_site_pose(env: Any, site_name: str, position: np.ndarray) -> None:
+    """Move one marker actor, using the ONLY pose-set form that works here.
+
+    Mirrors dataset_generation.write_maniskill_reach_dataset._set_start_site_pose
+    exactly: ManiSkill's BATCHED ``Pose.create_from_pq(<(1,3) array>)``, not a raw
+    ``sapien.Pose(p=...)``. On this GPU-backed sim a raw sapien.Pose does not
+    reliably land in the CUDA rigid-body buffer, so the actor silently keeps its
+    old pose -- which is why earlier attempts left the waypoint marker stuck AND
+    left goal_site (and therefore the policy's goal conditioning, see
+    _sync_pose_variety_markers) pinned to the env's own randomly sampled goal.
+    """
+    site = getattr(env.unwrapped, site_name, None)
+    if site is None:
+        return
+    from mani_skill.utils.structs.pose import Pose
+
+    site.set_pose(Pose.create_from_pq(np.asarray(position, dtype=np.float32).reshape(1, 3)))
+
+
 def _sync_pose_variety_markers(
     sim_env: Any,
     *,
-    sapien: Any,
-    start_pos: np.ndarray,
+    segment_start_pos: np.ndarray,
     waypoint_pos: np.ndarray,
     active_target_pos: np.ndarray,
 ) -> None:
@@ -186,32 +204,29 @@ def _sync_pose_variety_markers(
     diffusion model already sampled, and those samples are themselves centered
     on wherever goal_site says the goal is.
 
-    ``start_site`` (red) and ``waypoint_site`` (blue, only when the env was
-    constructed with ``enable_waypoint_marker=True`` -- see sim_env's
-    gym.make call in main()) are purely cosmetic fixed reference markers, set
-    once and left alone. ``waypoint_site`` must be built inside the env's own
-    _load_scene (i.e. as part of the normal reconfigure lifecycle, same as
-    start_site/goal_site), NOT added dynamically after reset: a marker actor
-    added post-reconfigure onto a GPU-backed sim's already-initialized scene
-    never actually tracks pose updates in the render output (verified by two
-    failed attempts at that approach -- the actor rendered, immovably, at
-    wherever it was first created).
+    Marker semantics, matching "waypoint is the goal, then the start point":
+
+    * ``start_site`` (red)    = the CURRENT segment's start -- the sampled start
+      during stage 0, then the WAYPOINT during stage 1 (the robot really is
+      starting from there for that segment).
+    * ``goal_site`` (green)   = ``active_target_pos``, the current segment's
+      target: waypoint during stage 0, real goal during stage 1.
+    * ``waypoint_site`` (blue, larger; only when the env was constructed with
+      ``enable_waypoint_marker=True`` -- see sim_env's gym.make call in main())
+      = a fixed reference at the waypoint for the whole episode, so it stays
+      visible in the video both before and after it's been passed. It's built
+      inside the env's own _load_scene (normal reconfigure lifecycle, same as
+      start_site/goal_site) rather than added dynamically after reset.
 
     Caller is responsible for refreshing sim_entry/obs_window (e.g. via
     _refresh_obs_after_manual_qpos) after calling this without stepping
     physics -- this only moves the SAPIEN actors, it does not re-derive the
     already-computed observation entries that fed the policy on prior steps.
     """
-    unwrapped = sim_env.unwrapped
-    unwrapped.start_site.set_pose(sapien.Pose(p=np.asarray(start_pos, dtype=np.float32).tolist()))
-    if getattr(unwrapped, "waypoint_site", None) is not None:
-        unwrapped.waypoint_site.set_pose(
-            sapien.Pose(p=np.asarray(waypoint_pos, dtype=np.float32).tolist())
-        )
-    unwrapped.goal_site.set_pose(
-        sapien.Pose(p=np.asarray(active_target_pos, dtype=np.float32).tolist())
-    )
-    update_render = getattr(unwrapped.scene, "update_render", None)
+    _set_site_pose(sim_env, "start_site", segment_start_pos)
+    _set_site_pose(sim_env, "waypoint_site", waypoint_pos)
+    _set_site_pose(sim_env, "goal_site", active_target_pos)
+    update_render = getattr(sim_env.unwrapped.scene, "update_render", None)
     if callable(update_render):
         update_render()
 
@@ -447,12 +462,11 @@ def main(argv: list[str] | None = None) -> int:
                 _set_robot_qpos(sim_env, start_qpos)
                 _sync_pose_variety_markers(
                     sim_env,
-                    sapien=sapien,
-                    start_pos=positions[0],
+                    # Stage 0: start at the sampled start, and the WAYPOINT is the goal
+                    # -- goal_site is the policy's real conditioning signal, so this is
+                    # what makes the checkpoint actually aim at the waypoint at all.
+                    segment_start_pos=positions[0],
                     waypoint_pos=positions[1],
-                    # Stage 0 targets the waypoint -- see _sync_pose_variety_markers'
-                    # docstring for why goal_site must actually be the ACTIVE target,
-                    # not the final goal, for the policy to attempt the waypoint at all.
                     active_target_pos=positions[1],
                 )
                 sim_obs, sim_info = _refresh_obs_after_manual_qpos(
@@ -462,6 +476,25 @@ def main(argv: list[str] | None = None) -> int:
                     sim_obs, sim_info, env=sim_env, crop_config=crop_config
                 )
                 obs_window = make_initial_obs_window(sim_entry, n_obs_steps=int(policy.n_obs_steps))
+
+                # Verify the goal-conditioning the policy ACTUALLY sees matches the
+                # waypoint we just pointed goal_site at. This is read back out of the
+                # observation itself (via info["extra"]["goal_pos"]), so a mismatch here
+                # means the marker pose-set silently didn't land -- exactly the failure
+                # that previously left the policy chasing the env's own random goal.
+                conditioned_on = np.asarray(sim_entry["target_position"], dtype=np.float64)
+                if not np.allclose(conditioned_on, positions[1].astype(np.float64), atol=1e-3):
+                    print(
+                        f"  [ep {episode_idx}] WARNING — policy goal-conditioning is "
+                        f"{conditioned_on.round(3).tolist()} but the waypoint target is "
+                        f"{positions[1].astype(np.float64).round(3).tolist()}; "
+                        "goal_site did not take the new pose"
+                    )
+                else:
+                    print(
+                        f"  [ep {episode_idx}] stage 0 — policy conditioned on waypoint "
+                        f"goal_xyz={conditioned_on.round(3).tolist()}"
+                    )
 
                 timer = TimingRecorder(enabled=False)
                 frames = [frame_to_numpy(sim_env.render())]
@@ -565,40 +598,54 @@ def main(argv: list[str] | None = None) -> int:
                                 f"  [ep {episode_idx}] {target_label} reached at step {total_steps} "
                                 f"(pos_err={pos_err:.4f} rot_err={np.degrees(rot_err):.1f}deg)"
                             )
-                            if stage_idx == len(stage_targets) - 1:
-                                break
-                            stage_idx += 1
-                            stage_steps = 0
-                            # Retarget the policy's actual goal-conditioning signal
-                            # (goal_site) to the next stage's target -- no physics step,
-                            # only the goal moves -- then refresh sim_entry/obs_window so
-                            # the very first replan of the new stage is already correctly
-                            # conditioned (not stale on the just-completed stage's target
-                            # for one more replan cycle).
-                            next_label, next_pos, _next_quat = stage_targets[stage_idx]
-                            _sync_pose_variety_markers(
-                                sim_env,
-                                sapien=sapien,
-                                start_pos=positions[0],
-                                waypoint_pos=positions[1],
-                                active_target_pos=next_pos,
-                            )
-                            sim_obs, sim_info = _refresh_obs_after_manual_qpos(
-                                sim_env, info=sim_info, gripper_open=args.gripper_open
-                            )
-                            sim_entry = rollout_observation_entry(
-                                sim_obs, sim_info, env=sim_env, crop_config=crop_config
-                            )
-                            obs_window = make_initial_obs_window(
-                                sim_entry, n_obs_steps=int(policy.n_obs_steps)
-                            )
-                            print(
-                                f"  [ep {episode_idx}] retargeting policy goal-conditioning "
-                                f"to {next_label} at {np.asarray(next_pos, dtype=np.float64).round(3).tolist()}"
-                            )
                         elif stage_steps >= args.max_steps_per_stage:
-                            print(f"  [ep {episode_idx}] {target_label} FAILED — step budget exhausted")
+                            print(
+                                f"  [ep {episode_idx}] {target_label} FAILED — step budget "
+                                "exhausted (continuing to the next stage anyway)"
+                            )
+                        else:
+                            # Stage still has budget left -- replan and keep going.
+                            continue
+
+                        if stage_idx == len(stage_targets) - 1:
                             break
+
+                        # Hand off to the next segment. Whether the waypoint was actually
+                        # reached or the budget ran out, we still run the goal segment so
+                        # every video shows both halves of the intended motion.
+                        stage_idx += 1
+                        stage_steps = 0
+                        next_label, next_pos, _next_quat = stage_targets[stage_idx]
+                        # The waypoint now becomes this segment's START POINT, and the
+                        # real goal becomes the target. goal_site is the policy's actual
+                        # conditioning signal, so retargeting it here is what makes the
+                        # checkpoint switch from chasing the waypoint to chasing the goal.
+                        _sync_pose_variety_markers(
+                            sim_env,
+                            segment_start_pos=positions[1],
+                            waypoint_pos=positions[1],
+                            active_target_pos=next_pos,
+                        )
+                        # No physics step happened -- only the goal moved -- so refresh
+                        # sim_entry/obs_window explicitly, otherwise the first replan of
+                        # the new stage would still be conditioned on the old target.
+                        sim_obs, sim_info = _refresh_obs_after_manual_qpos(
+                            sim_env, info=sim_info, gripper_open=args.gripper_open
+                        )
+                        sim_entry = rollout_observation_entry(
+                            sim_obs, sim_info, env=sim_env, crop_config=crop_config
+                        )
+                        obs_window = make_initial_obs_window(
+                            sim_entry, n_obs_steps=int(policy.n_obs_steps)
+                        )
+                        conditioned_on = np.asarray(
+                            sim_entry["target_position"], dtype=np.float64
+                        ).round(3)
+                        print(
+                            f"  [ep {episode_idx}] retargeting policy goal-conditioning to "
+                            f"{next_label} at {np.asarray(next_pos, dtype=np.float64).round(3).tolist()} "
+                            f"— policy now sees goal_xyz={conditioned_on.tolist()}"
+                        )
                 finally:
                     if was_training:
                         policy.train()
