@@ -164,52 +164,53 @@ def _sync_pose_variety_markers(
     sim_env: Any,
     *,
     sapien: Any,
-    actors: Any,
     start_pos: np.ndarray,
     waypoint_pos: np.ndarray,
-    goal_pos: np.ndarray,
-    marker_radius: float,
+    active_target_pos: np.ndarray,
 ) -> None:
-    """Point the env's built-in start/goal markers at OUR actual triple and add a
-    waypoint marker (the env has no built-in slot for one).
+    """Point start_site/goal_site/waypoint_site at OUR actual triple.
 
-    PG3DReachEnv (pg3d/envs/maniskill_adapter/reach_env.py) builds a red
-    ``start_site`` and a green ``goal_site`` sphere, but both are only ever
-    positioned by the env's own internal reset/goal-sampling logic -- which has
-    nothing to do with the start/waypoint/goal this script drives the episode
-    toward (we manually teleport the robot to ``start_pos`` after reset, and
-    steer via reranking toward ``waypoint_pos`` then ``goal_pos``). Left alone,
-    ``start_site`` sits at wherever the env's default reset put the robot (e.g.
-    the rest pose) and ``goal_site`` sits at the env's own randomly sampled
-    goal -- neither matches what's actually being tested, and there is no
-    marker at all for the waypoint stage. This re-points start_site/goal_site
-    to our real start/goal and adds a blue ``waypoint_site`` for the waypoint.
+    ``goal_site`` is NOT purely cosmetic: PG3DReachEnv._get_obs_extra exposes
+    ``goal_site.pose.p`` as ``info["extra"]["goal_pos"]``, which
+    pg3d/envs/maniskill_adapter/observation.py reads into
+    ``sim_gt.target_position`` -- i.e. the actual goal-conditioning signal fed
+    into the DP3 policy's observation (both ``obs["goal_xyz"]`` and, if the
+    checkpoint uses goal-marker point-cloud tokens, points literally inserted
+    into the point cloud at this position). So ``goal_site`` must be driven to
+    whichever position is the CURRENTLY ACTIVE stage target
+    (``active_target_pos`` -- the waypoint while stage 0 is running, then the
+    real goal once stage 0 is done), not just the final goal: leaving it fixed
+    at the final goal for the whole episode is why the policy was observed
+    heading straight for goal and never attempting the waypoint at all --
+    CartesianPoseConstraint-based reranking only reorders the K candidates the
+    diffusion model already sampled, and those samples are themselves centered
+    on wherever goal_site says the goal is.
 
-    Rebuilds ``waypoint_site`` fresh EVERY call rather than caching it on the
-    env: each episode's reset uses ``options={"reconfigure": True}``, which
-    tears down and rebuilds the whole SAPIEN scene (a new ``unwrapped.scene``
-    object) -- that's also why the env's own start_site/goal_site come back
-    correctly every episode, since PG3DReachEnv's _load_scene recreates them
-    each reconfigure. A cached ``waypoint_site`` actor built only once would
-    reference an actor destroyed by that rebuild from episode 2 onward,
-    silently doing nothing -- which is exactly why the waypoint marker showed
-    up only in the very first video.
+    ``start_site`` (red) and ``waypoint_site`` (blue, only when the env was
+    constructed with ``enable_waypoint_marker=True`` -- see sim_env's
+    gym.make call in main()) are purely cosmetic fixed reference markers, set
+    once and left alone. ``waypoint_site`` must be built inside the env's own
+    _load_scene (i.e. as part of the normal reconfigure lifecycle, same as
+    start_site/goal_site), NOT added dynamically after reset: a marker actor
+    added post-reconfigure onto a GPU-backed sim's already-initialized scene
+    never actually tracks pose updates in the render output (verified by two
+    failed attempts at that approach -- the actor rendered, immovably, at
+    wherever it was first created).
+
+    Caller is responsible for refreshing sim_entry/obs_window (e.g. via
+    _refresh_obs_after_manual_qpos) after calling this without stepping
+    physics -- this only moves the SAPIEN actors, it does not re-derive the
+    already-computed observation entries that fed the policy on prior steps.
     """
     unwrapped = sim_env.unwrapped
-    unwrapped.waypoint_site = actors.build_sphere(
-        unwrapped.scene,
-        radius=float(marker_radius),
-        color=[0.15, 0.45, 1.0, 1.0],  # blue -- distinct from red start / green goal
-        name="pose_variety_waypoint_site",
-        body_type="kinematic",
-        add_collision=False,
-        initial_pose=sapien.Pose(),
-    )
     unwrapped.start_site.set_pose(sapien.Pose(p=np.asarray(start_pos, dtype=np.float32).tolist()))
-    unwrapped.waypoint_site.set_pose(
-        sapien.Pose(p=np.asarray(waypoint_pos, dtype=np.float32).tolist())
+    if getattr(unwrapped, "waypoint_site", None) is not None:
+        unwrapped.waypoint_site.set_pose(
+            sapien.Pose(p=np.asarray(waypoint_pos, dtype=np.float32).tolist())
+        )
+    unwrapped.goal_site.set_pose(
+        sapien.Pose(p=np.asarray(active_target_pos, dtype=np.float32).tolist())
     )
-    unwrapped.goal_site.set_pose(sapien.Pose(p=np.asarray(goal_pos, dtype=np.float32).tolist()))
     update_render = getattr(unwrapped.scene, "update_render", None)
     if callable(update_render):
         update_render()
@@ -222,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
 
     from dataset_generation.write_maniskill_reach_dataset import (
         _farthest_point_select_orientations,
+        _plan_multisegment_trajectory,
+        _pose_with_orientation,
         _refresh_obs_after_manual_qpos,
         _resolve_reachable_orientation,
         _sample_broad_orientation_sapien,
@@ -256,7 +259,6 @@ def main(argv: list[str] | None = None) -> int:
         import gymnasium as gym
         import mani_skill.envs  # noqa: F401
         import sapien
-        from mani_skill.utils.building import actors
     except Exception as exc:  # noqa: BLE001
         print(f"Failed to import ManiSkill/SAPIEN: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -276,7 +278,12 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         return 1
 
-    sim_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode="rgb_array"))
+    sim_env_kwargs = _env_kwargs(metadata, render_mode="rgb_array")
+    # Blue waypoint marker, built into the env's own _load_scene (see reach_env.py) so
+    # it tracks pose updates correctly on the GPU-backed sim -- opt-in only for this
+    # script; ghost_env (never rendered) and every other env/script are unaffected.
+    sim_env_kwargs["enable_waypoint_marker"] = True
+    sim_env = gym.make(str(metadata["env_id"]), **sim_env_kwargs)
     ghost_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
 
     adapter = DP3ChunkPolicyAdapter(
@@ -298,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     counts = {
         "total_episodes": 0,
         "ik_failed": 0,
+        "motion_plan_infeasible": 0,
         "waypoint_reached": 0,
         "goal_reached": 0,
     }
@@ -335,7 +343,13 @@ def main(argv: list[str] | None = None) -> int:
                     f"max={stats['max_deg']:.1f}  (tilt-from-down per episode: [{tilts}] deg)"
                 )
 
-            config_counts = {"total": 0, "ik_failed": 0, "waypoint_reached": 0, "goal_reached": 0}
+            config_counts = {
+                "total": 0,
+                "ik_failed": 0,
+                "motion_plan_infeasible": 0,
+                "waypoint_reached": 0,
+                "goal_reached": 0,
+            }
             for episode_idx in range(args.episodes_per_config):
                 resolved: dict[str, tuple[np.ndarray, np.ndarray]] = {}
                 failure_label: str | None = None
@@ -380,6 +394,40 @@ def main(argv: list[str] | None = None) -> int:
                 row["start_quat"] = start_quat.tolist()
                 row["waypoint_quat"] = waypoint_quat.tolist()
                 row["goal_quat"] = goal_quat.tolist()
+
+                # Each pose being independently IK-reachable (from rest_qpos, above) is
+                # NOT enough -- two individually-reachable poses can still require
+                # incompatible arm configurations, with no collision-free path between
+                # them. Verify the triple is INTER-feasible: a single chained
+                # start->waypoint->goal motion plan (mirrors
+                # verify_pose_variety_reachability.py's ground-truth check) where each
+                # segment starts from where the previous one actually ended, not from
+                # rest_qpos again. Skip the checkpoint entirely if this fails -- testing
+                # robustness on a triple no continuous trajectory can even connect isn't
+                # a fair test of the checkpoint.
+                chained_poses = [
+                    _pose_with_orientation(sapien, position=positions[1], quat=waypoint_quat),
+                    _pose_with_orientation(sapien, position=positions[2], quat=goal_quat),
+                ]
+                inter_feasible_plan = _plan_multisegment_trajectory(
+                    planner=planner,
+                    env=ik_env,
+                    poses=chained_poses,
+                    start_qpos=start_qpos,
+                    suppress_planner_output=True,
+                    smooth_trajectory=True,
+                )
+                if inter_feasible_plan is None:
+                    counts["motion_plan_infeasible"] += 1
+                    config_counts["motion_plan_infeasible"] += 1
+                    row["outcome"] = "motion_plan_infeasible"
+                    print(
+                        f"  [ep {episode_idx}] SKIP — start/waypoint/goal each individually "
+                        "IK-reachable, but no collision-free start->waypoint->goal plan "
+                        "connects them (not inter-feasible)"
+                    )
+                    all_rows.append(row)
+                    continue
                 print(
                     f"  [ep {episode_idx}] IK-reachable — proceeding regardless of what the "
                     f"checkpoint does with it. tilt-from-down: "
@@ -400,11 +448,12 @@ def main(argv: list[str] | None = None) -> int:
                 _sync_pose_variety_markers(
                     sim_env,
                     sapien=sapien,
-                    actors=actors,
                     start_pos=positions[0],
                     waypoint_pos=positions[1],
-                    goal_pos=positions[2],
-                    marker_radius=args.position_tolerance,
+                    # Stage 0 targets the waypoint -- see _sync_pose_variety_markers'
+                    # docstring for why goal_site must actually be the ACTIVE target,
+                    # not the final goal, for the policy to attempt the waypoint at all.
+                    active_target_pos=positions[1],
                 )
                 sim_obs, sim_info = _refresh_obs_after_manual_qpos(
                     sim_env, info=reset_info, gripper_open=args.gripper_open
@@ -520,6 +569,33 @@ def main(argv: list[str] | None = None) -> int:
                                 break
                             stage_idx += 1
                             stage_steps = 0
+                            # Retarget the policy's actual goal-conditioning signal
+                            # (goal_site) to the next stage's target -- no physics step,
+                            # only the goal moves -- then refresh sim_entry/obs_window so
+                            # the very first replan of the new stage is already correctly
+                            # conditioned (not stale on the just-completed stage's target
+                            # for one more replan cycle).
+                            next_label, next_pos, _next_quat = stage_targets[stage_idx]
+                            _sync_pose_variety_markers(
+                                sim_env,
+                                sapien=sapien,
+                                start_pos=positions[0],
+                                waypoint_pos=positions[1],
+                                active_target_pos=next_pos,
+                            )
+                            sim_obs, sim_info = _refresh_obs_after_manual_qpos(
+                                sim_env, info=sim_info, gripper_open=args.gripper_open
+                            )
+                            sim_entry = rollout_observation_entry(
+                                sim_obs, sim_info, env=sim_env, crop_config=crop_config
+                            )
+                            obs_window = make_initial_obs_window(
+                                sim_entry, n_obs_steps=int(policy.n_obs_steps)
+                            )
+                            print(
+                                f"  [ep {episode_idx}] retargeting policy goal-conditioning "
+                                f"to {next_label} at {np.asarray(next_pos, dtype=np.float64).round(3).tolist()}"
+                            )
                         elif stage_steps >= args.max_steps_per_stage:
                             print(f"  [ep {episode_idx}] {target_label} FAILED — step budget exhausted")
                             break
@@ -553,14 +629,19 @@ def main(argv: list[str] | None = None) -> int:
 
                 all_rows.append(row)
 
-            attempted = config_counts["total"] - config_counts["ik_failed"]
+            attempted = (
+                config_counts["total"]
+                - config_counts["ik_failed"]
+                - config_counts["motion_plan_infeasible"]
+            )
             print(
                 f"  — config {config_idx:02d} success rate: "
                 f"goal_reached={config_counts['goal_reached']}/{attempted} attempted "
                 f"({100 * config_counts['goal_reached'] / max(attempted, 1):.1f}%), "
                 f"waypoint_reached={config_counts['waypoint_reached']}/{attempted} "
                 f"({100 * config_counts['waypoint_reached'] / max(attempted, 1):.1f}%), "
-                f"ik_unreachable={config_counts['ik_failed']}/{config_counts['total']}"
+                f"ik_unreachable={config_counts['ik_failed']}/{config_counts['total']}, "
+                f"not_inter_feasible={config_counts['motion_plan_infeasible']}/{config_counts['total']}"
             )
     finally:
         ik_solver.close()
@@ -568,10 +649,13 @@ def main(argv: list[str] | None = None) -> int:
         sim_env.close()
         ghost_env.close()
 
-    attempted_total = counts["total_episodes"] - counts["ik_failed"]
+    attempted_total = (
+        counts["total_episodes"] - counts["ik_failed"] - counts["motion_plan_infeasible"]
+    )
     print("\n── Summary (checkpoint robustness across all configs)")
     print(f"   total episodes         : {counts['total_episodes']}")
     print(f"   IK-unreachable (skipped): {counts['ik_failed']}")
+    print(f"   not inter-feasible (skipped): {counts['motion_plan_infeasible']}")
     print(f"   attempted by checkpoint : {attempted_total}")
     print(
         f"   waypoint success rate   : {counts['waypoint_reached']}/{attempted_total} "
