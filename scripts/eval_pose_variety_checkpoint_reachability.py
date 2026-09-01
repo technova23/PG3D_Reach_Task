@@ -269,7 +269,22 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         return 1
 
-    sim_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode="rgb_array"))
+    # metadata["env_kwargs"] carries whatever max_episode_steps the ORIGINAL dataset
+    # was generated with (often much shorter than this script's own --max-steps
+    # budget, since that dataset's episodes were single reach segments, not a full
+    # arbitrary-pose-variety rollout). Left alone, ManiSkill's TimeLimit wrapper
+    # truncates at that baked-in value regardless of --max-steps, silently capping
+    # every episode short and being misreported here as "truncated early". Override
+    # it explicitly to this script's own step budget.
+    print(
+        f"metadata env_kwargs max_episode_steps="
+        f"{metadata.get('env_kwargs', {}).get('max_episode_steps')!r} "
+        f"-> overriding to --max-steps={args.max_steps}"
+    )
+    sim_env = gym.make(
+        str(metadata["env_id"]),
+        **_env_kwargs(metadata, render_mode="rgb_array", max_episode_steps=args.max_steps),
+    )
     ghost_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
 
     adapter = DP3ChunkPolicyAdapter(
@@ -568,7 +583,8 @@ def main(argv: list[str] | None = None) -> int:
                             break
                     if not reached_goal:
                         reason = (
-                            "episode truncated early"
+                            f"episode truncated at step {total_steps} "
+                            f"(pos_err={pos_err:.4f} rot_err={np.degrees(rot_err):.1f}deg)"
                             if truncated_early
                             else f"step budget ({args.max_steps}) exhausted"
                         )
