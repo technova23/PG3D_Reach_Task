@@ -296,7 +296,19 @@ def main(argv: list[str] | None = None) -> int:
     world_model = GeometricWorldModel(provider)
 
     rng = np.random.default_rng(args.seed)
-    bounds_world = np.asarray(XARM7_REACH_WORKSPACE_BOUNDS, dtype=np.float32)
+    bounds_world = np.asarray(XARM7_REACH_WORKSPACE_BOUNDS, dtype=np.float32).copy()
+    # XARM7_REACH_WORKSPACE_BOUNDS' height (Z) row is [base_z + 0.05, base_z + 0.55] --
+    # i.e. 5cm to 55cm above the table (see XARM7_REACH_BOX_BASE in reach_config.py).
+    # Override just the Z row to this script's own --min-height/--max-height, scoped
+    # to sampling here only -- NOT touching the shared constant, which other
+    # scripts/training/dataset-gen still read unmodified.
+    base_z_offset = float(bounds_world[2, 0]) - 0.05  # recover base_position[2]
+    bounds_world[2, 0] = base_z_offset + args.min_height
+    bounds_world[2, 1] = base_z_offset + args.max_height
+    print(
+        f"start/goal height range: {args.min_height:.2f}m to {args.max_height:.2f}m "
+        f"above table (world Z {bounds_world[2, 0]:.3f} to {bounds_world[2, 1]:.3f})"
+    )
 
     if args.video_dir is not None:
         args.video_dir.mkdir(parents=True, exist_ok=True)
@@ -714,6 +726,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--extra-orientation-attempts", type=int, default=3)
     p.add_argument(
+        "--min-height",
+        type=float,
+        default=0.05,
+        help="Minimum start/goal height (m) above the table. XARM7_REACH_WORKSPACE_BOUNDS default is 0.05.",
+    )
+    p.add_argument(
+        "--max-height",
+        type=float,
+        default=0.25,
+        help="Maximum start/goal height (m) above the table. XARM7_REACH_WORKSPACE_BOUNDS default is 0.55.",
+    )
+    p.add_argument(
         "--min-pairwise-distance",
         type=float,
         default=0.15,
@@ -753,6 +777,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--extra-orientation-attempts must be non-negative")
     if args.min_pairwise_distance < 0.0:
         raise ValueError("--min-pairwise-distance must be non-negative")
+    if args.min_height < 0.0:
+        raise ValueError("--min-height must be non-negative")
+    if args.max_height <= args.min_height:
+        raise ValueError("--max-height must be greater than --min-height")
     if args.position_resample_attempts <= 0:
         raise ValueError("--position-resample-attempts must be positive")
     if args.position_tolerance < 0.0 or args.rotation_tolerance < 0.0:
