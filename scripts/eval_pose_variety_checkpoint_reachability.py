@@ -270,20 +270,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # metadata["env_kwargs"] carries whatever max_episode_steps the ORIGINAL dataset
-    # was generated with (often much shorter than this script's own --max-steps
-    # budget, since that dataset's episodes were single reach segments, not a full
-    # arbitrary-pose-variety rollout). Left alone, ManiSkill's TimeLimit wrapper
-    # truncates at that baked-in value regardless of --max-steps, silently capping
-    # every episode short and being misreported here as "truncated early". Override
-    # it explicitly to this script's own step budget.
+    # was generated with. ManiSkill's TimeLimit wrapper truncates at that value, so if
+    # it's BELOW this script's --max-steps budget the episode gets cut short and
+    # misreported as "truncated early". Raise the env ceiling to at least our budget --
+    # but never LOWER it, so a generous metadata limit isn't thrown away; the while
+    # loop already caps the episode at args.max_steps either way.
+    _meta_max_steps = metadata.get("env_kwargs", {}).get("max_episode_steps")
+    _env_max_steps = max(int(args.max_steps), int(_meta_max_steps or 0))
     print(
-        f"metadata env_kwargs max_episode_steps="
-        f"{metadata.get('env_kwargs', {}).get('max_episode_steps')!r} "
-        f"-> overriding to --max-steps={args.max_steps}"
+        f"metadata env_kwargs max_episode_steps={_meta_max_steps!r}, "
+        f"--max-steps={args.max_steps} -> env limit set to {_env_max_steps}"
     )
     sim_env = gym.make(
         str(metadata["env_id"]),
-        **_env_kwargs(metadata, render_mode="rgb_array", max_episode_steps=args.max_steps),
+        **_env_kwargs(metadata, render_mode="rgb_array", max_episode_steps=_env_max_steps),
     )
     ghost_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
 
@@ -485,6 +485,10 @@ def main(argv: list[str] | None = None) -> int:
                 goal_reached_step: int | None = None
                 reached_goal = False
                 truncated_early = False
+                best_pos_err = float("inf")
+                best_rot_err = float("inf")
+                best_pos_err_step = -1
+                best_rot_err_step = -1
                 total_steps = 0
                 was_training = policy.training
                 policy.eval()
@@ -552,6 +556,19 @@ def main(argv: list[str] | None = None) -> int:
                             rot_err = _quat_angular_distance_rad(
                                 tcp[3:7].astype(np.float64), target_quat.astype(np.float64)
                             )
+                            # Track the best each error got INDEPENDENTLY over the whole
+                            # episode. If rotation gets close at some point but the final
+                            # frame is far, the policy can reach the orientation and then
+                            # drifts off it (a tuning/stopping problem). If it never gets
+                            # close at all, the orientation is simply outside what this
+                            # position-conditioned checkpoint can produce (a capability
+                            # limit that reranking over K samples can't fix).
+                            if pos_err < best_pos_err:
+                                best_pos_err = pos_err
+                                best_pos_err_step = total_steps
+                            if rot_err < best_rot_err:
+                                best_rot_err = rot_err
+                                best_rot_err_step = total_steps
                             if pos_err <= args.position_tolerance and rot_err <= args.rotation_tolerance:
                                 reached_goal = True
                                 goal_reached_step = total_steps
@@ -583,18 +600,30 @@ def main(argv: list[str] | None = None) -> int:
                             break
                     if not reached_goal:
                         reason = (
-                            f"episode truncated at step {total_steps} "
-                            f"(pos_err={pos_err:.4f} rot_err={np.degrees(rot_err):.1f}deg)"
+                            f"episode truncated at step {total_steps}"
                             if truncated_early
                             else f"step budget ({args.max_steps}) exhausted"
                         )
-                        print(f"  [ep {episode_idx}] goal NOT reached — {reason}")
+                        print(
+                            f"  [ep {episode_idx}] goal NOT reached — {reason}. "
+                            f"final pos_err={pos_err:.4f} rot_err={np.degrees(rot_err):.1f}deg | "
+                            f"BEST pos_err={best_pos_err:.4f}@step{best_pos_err_step} "
+                            f"rot_err={np.degrees(best_rot_err):.1f}deg@step{best_rot_err_step} "
+                            f"(tolerances: pos<={args.position_tolerance} "
+                            f"rot<={np.degrees(args.rotation_tolerance):.1f}deg)"
+                        )
                 finally:
                     if was_training:
                         policy.train()
 
                 row["goal_reached_step"] = goal_reached_step
                 row["total_steps"] = total_steps
+                row["final_pos_err"] = float(pos_err)
+                row["final_rot_err_deg"] = float(np.degrees(rot_err))
+                row["best_pos_err"] = float(best_pos_err)
+                row["best_pos_err_step"] = best_pos_err_step
+                row["best_rot_err_deg"] = float(np.degrees(best_rot_err))
+                row["best_rot_err_step"] = best_rot_err_step
                 if goal_reached_step is not None:
                     counts["goal_reached"] += 1
                     config_counts["goal_reached"] += 1
@@ -672,7 +701,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--num-configs", type=int, default=4, help="Distinct start/goal position pairs.")
     p.add_argument("--episodes-per-config", type=int, default=5, help="Orientation variants per config.")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--orientation-cone-deg", type=float, default=120.0)
+    p.add_argument(
+        "--orientation-cone-deg",
+        type=float,
+        default=60.0,
+        help=(
+            "Max tilt (degrees) of sampled start/goal orientations away from "
+            "straight-down. Samples are drawn uniform-by-solid-angle within this cone "
+            "(see _sample_broad_orientation_sapien), so a smaller value keeps the "
+            "tested orientations closer to the training distribution's mode."
+        ),
+    )
     p.add_argument("--extra-orientation-attempts", type=int, default=3)
     p.add_argument(
         "--min-pairwise-distance",
