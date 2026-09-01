@@ -469,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
                 ema_sim_action: np.ndarray | None = None
                 goal_reached_step: int | None = None
                 reached_goal = False
-                terminated_or_truncated = False
+                truncated_early = False
                 total_steps = 0
                 was_training = policy.training
                 policy.eval()
@@ -499,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
                             args.max_steps - total_steps,
                         )
                         reached_goal = False
-                        terminated_or_truncated = False
+                        truncated_early = False
                         for policy_action in decision.selected_chunk.actions[:steps_to_execute]:
                             sim_action = policy_action_to_sim_action(
                                 policy_action,
@@ -522,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
                                     args.action_ema_alpha * sim_action
                                     + (1.0 - args.action_ema_alpha) * ema_sim_action
                                 )
-                            sim_obs, _reward, terminated, truncated, sim_info = sim_env.step(ema_sim_action)
+                            sim_obs, _reward, _terminated, truncated, sim_info = sim_env.step(ema_sim_action)
                             total_steps += 1
                             sim_entry = rollout_observation_entry(
                                 sim_obs, sim_info, env=sim_env, crop_config=crop_config
@@ -541,10 +541,24 @@ def main(argv: list[str] | None = None) -> int:
                                 reached_goal = True
                                 goal_reached_step = total_steps
                                 break
-                            if bool_any(terminated) or bool_any(truncated):
-                                terminated_or_truncated = True
+                            # NOTE: `terminated` is intentionally NOT treated as a stop
+                            # condition here. PG3DReachEnv.evaluate() derives it from
+                            # POSITION ALONE (tcp_to_goal_dist <= goal_thresh=0.025m by
+                            # default -- see reach_env.py), with no orientation check at
+                            # all -- almost the same threshold as this script's own
+                            # --position-tolerance (0.02m). Breaking on it was cutting
+                            # episodes off the instant position got close, before
+                            # rotation could converge, and logging them "failed" even
+                            # when the arm was still actively closing the last bit of
+                            # rotation error. This script's own position+rotation check
+                            # above is the sole authority on "reached" -- gymnasium
+                            # doesn't require reset() immediately after terminated=True,
+                            # so continuing to step is safe. Only `truncated` (a real
+                            # episode-length/physics cutoff) still stops the episode.
+                            if bool_any(truncated):
+                                truncated_early = True
                                 break
-                        if terminated_or_truncated:
+                        if truncated_early:
                             break
                         if reached_goal:
                             print(
@@ -554,8 +568,8 @@ def main(argv: list[str] | None = None) -> int:
                             break
                     if not reached_goal:
                         reason = (
-                            "episode terminated/truncated early"
-                            if terminated_or_truncated
+                            "episode truncated early"
+                            if truncated_early
                             else f"step budget ({args.max_steps}) exhausted"
                         )
                         print(f"  [ep {episode_idx}] goal NOT reached — {reason}")
