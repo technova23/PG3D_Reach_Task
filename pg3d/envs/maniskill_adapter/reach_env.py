@@ -32,7 +32,6 @@ class PG3DReachEnv(BaseEnv):
         goal_thresh: float = 0.025,
         require_static: bool = False,
         robot_init_qpos_noise: float = 0.0,
-        enable_waypoint_marker: bool = False,
         **kwargs: Any,
     ) -> None:
         self.goal_center = goal_center
@@ -41,13 +40,6 @@ class PG3DReachEnv(BaseEnv):
         self.goal_thresh = goal_thresh
         self.require_static = require_static
         self.robot_init_qpos_noise = robot_init_qpos_noise
-        # Off by default -- this only exists for scripts (e.g.
-        # eval_pose_variety_checkpoint_reachability.py) that drive a third,
-        # intermediate target and want a visible marker for it. Gated behind a
-        # flag rather than always building it so ordinary dataset-gen/training/eval
-        # runs (whose point clouds/renders were never built expecting a third
-        # marker sphere) see no change in scene geometry.
-        self.enable_waypoint_marker = enable_waypoint_marker
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     @property
@@ -87,22 +79,6 @@ class PG3DReachEnv(BaseEnv):
             add_collision=False,
             initial_pose=sapien.Pose(),
         )
-        self.waypoint_site = (
-            actors.build_sphere(
-                self.scene,
-                # Deliberately larger than goal_site: during the waypoint stage the
-                # green goal marker sits at the SAME position (the waypoint is the
-                # goal then), so an equal-sized blue sphere would be hidden inside it.
-                radius=self.goal_thresh * 1.6,
-                color=[0.15, 0.45, 1.0, 1.0],  # blue -- distinct from red start / green goal
-                name="waypoint_site",
-                body_type="kinematic",
-                add_collision=False,
-                initial_pose=sapien.Pose(),
-            )
-            if self.enable_waypoint_marker
-            else None
-        )
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict[str, Any]) -> None:
         with torch.device(self.device):
@@ -136,12 +112,6 @@ class PG3DReachEnv(BaseEnv):
                 goal_xyz = center + (torch.rand((batch_size, 3)) * 2.0 - 1.0) * half_extents
             self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
             self.start_site.set_pose(Pose.create_from_pq(self.agent.tcp_pose.p))
-            if self.waypoint_site is not None:
-                # Placeholder -- callers that actually use a waypoint (e.g.
-                # eval_pose_variety_checkpoint_reachability.py) reposition this
-                # explicitly after reset. Default it to the goal pose so it's at
-                # least not sitting at the world origin if left untouched.
-                self.waypoint_site.set_pose(Pose.create_from_pq(goal_xyz))
 
     def _get_obs_extra(self, info: dict[str, Any]) -> dict[str, Any]:
         return {
