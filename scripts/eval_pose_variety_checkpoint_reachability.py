@@ -337,6 +337,15 @@ def main(argv: list[str] | None = None) -> int:
 
             pools: dict[str, list[np.ndarray]] = {}
             for label in labels:
+                if label == "start" and not args.randomize_start_orientation:
+                    # Keep start orientation fixed straight-down (the natural rest
+                    # approach) so every episode has an easy, consistent starting
+                    # condition -- only the GOAL orientation varies. This isolates
+                    # what's being tested to "can the checkpoint steer to an arbitrary
+                    # goal orientation", without also asking it to recover from an
+                    # awkward/varied start.
+                    pools[label] = [_DOWN_QUAT_WXYZ.copy() for _ in range(args.episodes_per_config)]
+                    continue
                 pool_size = max(args.episodes_per_config * 4, 12)
                 candidates = [
                     _sample_broad_orientation_sapien(rng, cone_deg=args.orientation_cone_deg)
@@ -726,10 +735,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--extra-orientation-attempts", type=int, default=3)
     p.add_argument(
+        "--randomize-start-orientation",
+        action="store_true",
+        default=False,
+        help=(
+            "By default start orientation is fixed straight-down (the natural rest "
+            "approach) and only the GOAL orientation is randomized within "
+            "--orientation-cone-deg -- isolates testing to 'can the checkpoint steer "
+            "to an arbitrary goal orientation' without also demanding recovery from "
+            "an awkward start. Pass this to randomize start orientation too."
+        ),
+    )
+    p.add_argument(
         "--min-height",
         type=float,
-        default=0.05,
-        help="Minimum start/goal height (m) above the table. XARM7_REACH_WORKSPACE_BOUNDS default is 0.05.",
+        default=0.10,
+        help=(
+            "Minimum start/goal height (m) above the table. Raised from the "
+            "XARM7_REACH_WORKSPACE_BOUNDS default of 0.05 -- low + heavily tilted goal "
+            "poses let the gripper BODY (fingers/wrist, not just the TCP point) dip "
+            "into the table even when the TCP itself clears --min-height, since a "
+            "tilted wrist extends below/around the TCP frame."
+        ),
     )
     p.add_argument(
         "--max-height",
