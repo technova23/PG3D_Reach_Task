@@ -19,6 +19,7 @@ class GhostGeometrySnapshot:
     q: Array
     eef_position: Array
     robot_point_cloud: Array
+    eef_orientation: Array | None = None
 
 
 class ManiSkillGhostPandaGeometryProvider(RobotGeometryProvider):
@@ -54,6 +55,24 @@ class ManiSkillGhostPandaGeometryProvider(RobotGeometryProvider):
     def end_effector_position(self, q: Array) -> Array:
         """Return the ghost-env TCP position for one qpos."""
         return self._snapshot(q).eef_position
+
+    def end_effector_orientation(self, q: Array) -> Array:
+        """Return the ghost-env TCP orientation (wxyz quaternion) for one qpos.
+
+        Real per-qpos forward kinematics, same as end_effector_position -- NOT the
+        caller's current/starting orientation. GeometricWorldModel.imagine() calls
+        this once per imagined timestep per candidate, so different action chunks
+        (and different points along one chunk) get genuinely different orientations,
+        which is what lets CartesianPoseConstraint-based reranking actually
+        discriminate on rotation instead of scoring every candidate identically.
+        """
+        orientation = self._snapshot(q).eef_orientation
+        if orientation is None:
+            raise RuntimeError(
+                "ghost ManiSkill observation's tcp_pose did not include an orientation "
+                "(shape < 7) -- cannot compute end_effector_orientation"
+            )
+        return orientation
 
     def end_effector_position_only(self, q: Array) -> Array:
         """Return TCP position after setting qpos without rendering a point cloud."""
@@ -132,10 +151,15 @@ class ManiSkillGhostPandaGeometryProvider(RobotGeometryProvider):
         robot_points = _deterministic_sample(robot_points, self.max_robot_points)
         if adapted.robot_state.tcp_pose is None or adapted.robot_state.tcp_pose.shape[0] < 3:
             raise RuntimeError("ghost ManiSkill observation did not include tcp_pose")
+        tcp_pose = adapted.robot_state.tcp_pose
+        eef_orientation = (
+            tcp_pose[3:7].astype(np.float32, copy=True) if tcp_pose.shape[0] >= 7 else None
+        )
         snapshot = GhostGeometrySnapshot(
             q=qpos.astype(np.float32, copy=True),
-            eef_position=adapted.robot_state.tcp_pose[:3].astype(np.float32, copy=True),
+            eef_position=tcp_pose[:3].astype(np.float32, copy=True),
             robot_point_cloud=robot_points.astype(np.float32, copy=True),
+            eef_orientation=eef_orientation,
         )
         self._cache = snapshot
         return snapshot

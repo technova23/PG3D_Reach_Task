@@ -57,11 +57,22 @@ class GeometricWorldModel:
         )
 
         eef_positions: list[Array] = []
+        eef_orientations_list: list[Array] = []
         robot_clouds: list[Array] = []
         scene_clouds: list[Array] = []
         robot_masks: list[Array] = []
         for q_step in q:
             eef_positions.append(_eef_position(self.geometry_provider, q_step))
+            # Real per-step, per-candidate forward-kinematics orientation -- NOT the
+            # observation's current/starting orientation repeated. Different action
+            # chunks (and different timesteps within one chunk) produce genuinely
+            # different orientations here, which is what lets CartesianPoseConstraint-
+            # based reranking actually discriminate on rotation instead of scoring
+            # every candidate identically (see end_effector_orientation's docstring
+            # on RobotGeometryProvider for the contract this depends on).
+            eef_orientations_list.append(
+                _eef_orientation(self.geometry_provider, q_step)
+            )
             robot_cloud = _robot_point_cloud(self.geometry_provider, q_step)
             scene_cloud, robot_mask = compose_robot_cloud(static_scene, robot_cloud)
             robot_clouds.append(robot_cloud)
@@ -81,11 +92,6 @@ class GeometricWorldModel:
         if metadata:
             rollout_metadata.update(metadata)
 
-        eef_orientations = None
-        if observation.robot_state.tcp_pose is not None and observation.robot_state.tcp_pose.shape[0] >= 7:
-            orientation = np.asarray(observation.robot_state.tcp_pose[3:7], dtype=np.float32)
-            eef_orientations = np.repeat(orientation.reshape(1, 4), repeats=q.shape[0], axis=0)
-
         return ImaginedRollout(
             q=q,
             eef_path=np.stack(eef_positions, axis=0).astype(np.float32, copy=False),
@@ -94,7 +100,7 @@ class GeometricWorldModel:
             robot_masks=robot_masks,
             action_chunk=action_chunk,
             metadata=rollout_metadata,
-            eef_orientations=eef_orientations,
+            eef_orientations=np.stack(eef_orientations_list, axis=0).astype(np.float32, copy=False),
         )
 
 
@@ -103,6 +109,15 @@ def _eef_position(provider: RobotGeometryProvider, q: Array) -> Array:
     if eef.shape != (3,):
         raise ValueError(f"end_effector_position must have shape (3,), got {eef.shape}")
     return eef.astype(np.float32, copy=True)
+
+
+def _eef_orientation(provider: RobotGeometryProvider, q: Array) -> Array:
+    orientation = as_float_array(
+        provider.end_effector_orientation(q), name="end_effector_orientation", ndim=1
+    )
+    if orientation.shape != (4,):
+        raise ValueError(f"end_effector_orientation must have shape (4,), got {orientation.shape}")
+    return orientation.astype(np.float32, copy=True)
 
 
 def _robot_point_cloud(provider: RobotGeometryProvider, q: Array) -> Array:

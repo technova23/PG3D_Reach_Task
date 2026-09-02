@@ -65,6 +65,16 @@ class RobotGeometryProvider(Protocol):
         """Return the world-frame end-effector position for one joint state as `[3]`."""
         ...
 
+    def end_effector_orientation(self, q: Array) -> Array:
+        """Return the end-effector orientation for one joint state as a `[4]` wxyz quaternion.
+
+        Must be real forward kinematics for the GIVEN `q`, not the caller's current/
+        starting orientation -- GeometricWorldModel.imagine() calls this once per
+        imagined timestep, and CartesianPoseConstraint-based reranking depends on
+        different joint states actually producing different orientations here.
+        """
+        ...
+
     def robot_point_cloud(self, q: Array) -> Array:
         """Return the world-frame robot point cloud for one joint state as `[N, 3]`."""
         ...

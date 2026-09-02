@@ -21,6 +21,14 @@ class DeterministicGeometry:
     def end_effector_position(self, q: Array) -> Array:
         return np.asarray([q[0], q[1], q[2]], dtype=np.float32)
 
+    def end_effector_orientation(self, q: Array) -> Array:
+        # Deterministic, genuinely q-dependent (not a frozen/repeated value) wxyz unit
+        # quaternion -- a small rotation about Z scaled by q[0], normalized.
+        half_angle = float(q[0]) * 0.5
+        return np.asarray(
+            [np.cos(half_angle), 0.0, 0.0, np.sin(half_angle)], dtype=np.float32
+        )
+
     def robot_point_cloud(self, q: Array) -> Array:
         return np.asarray(
             [
