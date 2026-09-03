@@ -17,7 +17,26 @@ def goal_marker_offsets(
     num_points: int = DEFAULT_GOAL_MARKER_POINTS,
     radius: float = DEFAULT_GOAL_MARKER_RADIUS,
 ) -> Array:
-    """Return deterministic structured offsets used for target-centered goal tokens."""
+    """Return deterministic points on a sphere shell, used for target-centered goal tokens.
+
+    Fibonacci/golden-angle spiral placement -- purely a function of `num_points`,
+    no RNG, so `offsets[k]` means the exact same thing on every call. That
+    determinism matters beyond just reproducibility: these offsets also feed
+    `PointNetEncoderXYZ.goal_marker_mlp` (pg3d/policies/dp3/modules.py), which
+    flattens the marker points into one fixed-length vector rather than pooling
+    them order-invariantly -- index k has to be the same offset direction every
+    call, or the MLP sees a different function of the same target position each
+    time. Matches the golden-angle construction already used for the TCP marker
+    in dataset_generation/write_maniskill_reach_dataset.py::_marker_sphere_points
+    (minus that function's extra radial "ring" jitter -- every point here sits
+    exactly on the sphere shell at `radius`).
+
+    A sphere is rotationally symmetric (SO(3)-invariant): unlike an asymmetric
+    marker, rotating it by the target orientation would produce an identical
+    point set, so this shape carries no orientation information by construction
+    -- same as the cross+ring pattern it replaces, which also never varied with
+    target orientation despite being asymmetric in a fixed, world-frame sense.
+    """
     if num_points < 0:
         raise ValueError("num_points must be non-negative")
     if radius < 0:
@@ -29,37 +48,13 @@ def goal_marker_offsets(
     if r == 0:
         return np.zeros((num_points, 3), dtype=np.float32)
 
-    pattern: list[np.ndarray] = [np.zeros(3, dtype=np.float32)]
-    cross_dirs = np.asarray(
-        [
-            [1.0, 0.0, 0.0],
-            [-1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, -1.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, -1.0],
-        ],
-        dtype=np.float32,
-    )
-    for direction in cross_dirs:
-        pattern.append(r * direction)
-
-    ring_count = max(0, num_points - len(pattern))
-    for idx in range(ring_count):
-        angle = 2.0 * np.pi * idx / max(ring_count, 1)
-        ring_radius = r * (0.70 if idx % 2 == 0 else 1.00)
-        z_offset = r * 0.25 * (1.0 if idx % 4 in {0, 1} else -1.0)
-        pattern.append(
-            np.asarray(
-                [ring_radius * np.cos(angle), ring_radius * np.sin(angle), z_offset],
-                dtype=np.float32,
-            )
-        )
-
-    if num_points <= len(pattern):
-        return np.asarray(pattern[:num_points], dtype=np.float32)
-    repeats = int(np.ceil(num_points / len(pattern)))
-    return np.tile(np.asarray(pattern, dtype=np.float32), (repeats, 1))[:num_points]
+    indices = np.arange(num_points, dtype=np.float64)
+    golden_angle = np.pi * (3.0 - np.sqrt(5.0))
+    z = 1.0 - 2.0 * (indices + 0.5) / float(num_points)
+    radial = np.sqrt(np.maximum(0.0, 1.0 - z * z))
+    theta = indices * golden_angle
+    shell = np.stack([radial * np.cos(theta), radial * np.sin(theta), z], axis=1)
+    return (r * shell).astype(np.float32)
 
 
 def goal_marker_points(

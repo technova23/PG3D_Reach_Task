@@ -195,6 +195,7 @@ def run_generation(
                 start_sample_attempts=args.start_sample_attempts,
                 min_start_goal_distance=args.min_start_goal_distance,
                 acceptance_success_distance=args.acceptance_success_distance,
+                acceptance_success_rotation_deg=args.acceptance_success_rotation_deg,
                 saliency_config=_point_cloud_saliency_config(args),
                 require_complete_variant_set=not args.allow_partial_variant_sets,
                 suppress_planner_output=not args.show_planner_output,
@@ -297,6 +298,7 @@ def run_generation(
             "max_joint_accel": args.max_joint_accel,
             "max_raw_plan_multiplier": args.max_raw_plan_multiplier,
             "acceptance_success_distance": args.acceptance_success_distance,
+            "acceptance_success_rotation_deg": args.acceptance_success_rotation_deg,
             "allow_partial_variant_sets": args.allow_partial_variant_sets,
             "show_planner_output": args.show_planner_output,
             "planner": planner_name,
@@ -505,6 +507,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--acceptance-success-rotation-deg",
+        type=float,
+        default=5.0,
+        help=(
+            "writer-side ROTATION success tolerance in degrees, checked alongside "
+            "--acceptance-success-distance before a step is counted as 'reached' and "
+            "before the hold phase locks in. Without this, the env's own success flag "
+            "is position-only (see PG3DReachEnv.evaluate()), so every demo previously "
+            "taught 'stop moving once positionally close, whatever your current "
+            "orientation is' -- the hold qpos was captured at first POSITION success "
+            "regardless of how far off the gripper's orientation still was. Now hold "
+            "only locks in once both position AND rotation are within tolerance; if "
+            "neither is ever reached simultaneously, the episode replays out (no early "
+            "hold) and is accepted only if the best simultaneous (position, rotation) "
+            "step falls within both tolerances (see _replay_planned_positions_as_episode)."
+        ),
+    )
+    parser.add_argument(
         "--min-base-clearance",
         type=float,
         default=0.06,
@@ -710,6 +730,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("cannot use both --overwrite and --append")
     if args.acceptance_success_distance <= 0:
         raise ValueError("--acceptance-success-distance must be positive")
+    if args.acceptance_success_rotation_deg <= 0:
+        raise ValueError("--acceptance-success-rotation-deg must be positive")
     if args.min_base_clearance < 0:
         raise ValueError("--min-base-clearance must be non-negative")
     if args.table_margin < 0:
@@ -826,6 +848,8 @@ def _collect_episode(
         hold_steps=hold_steps,
         settle_steps=settle_steps,
         acceptance_success_distance=0.025,
+        acceptance_success_rotation_deg=5.0,
+        goal_orientation_quat=np.asarray(goal_pose.q, dtype=np.float32).reshape(4),
         gripper_open=gripper_open,
         obs=obs,
         info=info,
@@ -868,6 +892,145 @@ def _quat_angular_distance_deg(q1_sapien: np.ndarray, q2_sapien: np.ndarray) -> 
     """Geodesic angular distance in degrees between two SAPIEN [w,x,y,z] quaternions."""
     dot = float(np.clip(np.abs(np.dot(q1_sapien, q2_sapien)), 0.0, 1.0))
     return float(np.degrees(2.0 * np.arccos(dot)))
+
+
+def _orientation_tilt_bands(
+    cone_deg: float, *, band_width_deg: float = 10.0
+) -> list[tuple[float, float]]:
+    """[(lo, hi), ...] tilt-from-down bands tiling [0, cone_deg] in band_width_deg steps.
+
+    e.g. cone_deg=60, band_width_deg=10 -> [(0,10), (10,20), (20,30), (30,40),
+    (40,50), (50,60)]. Replaces FPS-based orientation selection (which -- with the
+    small k this pipeline actually draws per reset -- systematically over-samples
+    near the cone edge and under-samples small/medium tilts, since maximizing
+    pairwise spread pushes points outward). Explicit bands instead guarantee every
+    difficulty tier gets covered.
+    """
+    if cone_deg <= 0:
+        return [(0.0, 0.0)]
+    num_bands = max(1, int(round(cone_deg / band_width_deg)))
+    edges = np.linspace(0.0, cone_deg, num_bands + 1)
+    return [(float(edges[i]), float(edges[i + 1])) for i in range(num_bands)]
+
+
+def _banded_orientation_assignment(
+    idx: int,
+    bands: list[tuple[float, float]],
+    *,
+    rng: np.random.Generator,
+) -> tuple[float, float, int, float]:
+    """Auto-assign (band_lo_deg, band_hi_deg, band_idx, azimuth_rad) for family `idx`.
+
+    Fully code-decided -- no caller-supplied azimuth, no fixed schedule. Band
+    (tilt-magnitude tier) is round-robin: `idx % num_bands`. With more families
+    than bands, every band is used once before any band repeats, so band coverage
+    is automatically maximized for whatever `variants_per_reset` is (e.g. 7
+    families over 6 bands -> bands 0-5 each used once, then band 0 reused for
+    family 6 -- never band 0 used twice before band 5 is touched). Azimuth
+    (direction around the vertical axis) is drawn fresh and uniformly at random
+    from `rng` on every call, so repeated visits to the same band naturally land
+    at different, unpredetermined directions rather than a fixed side.
+    """
+    num_bands = len(bands)
+    band_idx = idx % num_bands
+    azimuth_rad = float(rng.uniform(0.0, 2.0 * np.pi))
+    band_lo_deg, band_hi_deg = bands[band_idx]
+    return band_lo_deg, band_hi_deg, band_idx, azimuth_rad
+
+
+def _sample_banded_orientation_sapien(
+    rng: np.random.Generator,
+    *,
+    band_lo_deg: float,
+    band_hi_deg: float,
+    azimuth_rad: float,
+) -> np.ndarray:
+    """Like `_sample_broad_orientation_sapien` but the tilt magnitude is drawn from
+    `[band_lo_deg, band_hi_deg]` (still solid-angle-uniform within that annulus, not
+    the whole cone from 0) and the azimuth is caller-supplied rather than random --
+    lets `_banded_orientation_assignment` place samples at specific, reproducible
+    directions around the vertical axis instead of a random one every draw.
+    """
+    from scipy.spatial.transform import Rotation
+
+    costheta = rng.uniform(np.cos(np.radians(band_hi_deg)), np.cos(np.radians(band_lo_deg)))
+    theta = np.arccos(costheta)
+    base_rot = Rotation.from_quat([1, 0, 0, 0])
+    tilt_axis = np.array([np.cos(azimuth_rad), np.sin(azimuth_rad), 0.0])
+    tilt_rot = Rotation.from_rotvec(tilt_axis * theta)
+    final_rot = tilt_rot * base_rot
+    ori_quat_xyzw = final_rot.as_quat().astype(np.float32)
+    return np.array(
+        [ori_quat_xyzw[3], ori_quat_xyzw[0], ori_quat_xyzw[1], ori_quat_xyzw[2]],
+        dtype=np.float32,
+    )
+
+
+def _resolve_reachable_orientation_banded(
+    *,
+    planner: Any,
+    env: Any,
+    sapien: Any,
+    position: np.ndarray,
+    bands: list[tuple[float, float]],
+    band_idx: int,
+    azimuth_rad: float,
+    seed_qpos: np.ndarray,
+    rng: np.random.Generator,
+    in_band_attempts: int = 4,
+    azimuth_jitter_rad: float = np.radians(25.0),
+    suppress_planner_output: bool = True,
+) -> tuple[np.ndarray, np.ndarray, tuple[float, float]] | None:
+    """IK-resolve one orientation within `bands[band_idx]` degrees of straight-down.
+
+    Retries first stay IN-BAND: only the azimuth is re-jittered around
+    `azimuth_rad` (`in_band_attempts` tries), preserving the requested difficulty
+    tier -- unlike a cone-wide fallback, which could silently swap a "50-60 degree"
+    request for a barely-tilted one and quietly erase that band from the dataset.
+    Only if nothing in-band is IK-reachable after all attempts does it fall back to
+    the NEXT LOWER band (`band_idx - 1`, ..., down to band 0) at the SAME azimuth --
+    i.e. it eases off tilt magnitude one rung at a time along the same ladder,
+    rather than jumping to an unrelated band or straight to straight-down. Returns
+    `(qpos, quat, (used_lo_deg, used_hi_deg))`, or None if band 0 itself is
+    unreachable at this position (that position should be treated as infeasible for
+    orientation randomization here, independent of tilt).
+    """
+    band_lo_deg, band_hi_deg = bands[band_idx]
+    for attempt in range(in_band_attempts):
+        phi = (
+            azimuth_rad
+            if attempt == 0
+            else azimuth_rad + rng.uniform(-azimuth_jitter_rad, azimuth_jitter_rad)
+        )
+        candidate_quat = _sample_banded_orientation_sapien(
+            rng, band_lo_deg=band_lo_deg, band_hi_deg=band_hi_deg, azimuth_rad=phi
+        )
+        plan = _plan_to_pose(
+            planner=planner,
+            env=env,
+            pose=_pose_with_orientation(sapien, position=position, quat=candidate_quat),
+            start_qpos=seed_qpos,
+            suppress_planner_output=suppress_planner_output,
+        )
+        if plan is not None:
+            final_qpos, _status = plan
+            return final_qpos, candidate_quat, (band_lo_deg, band_hi_deg)
+    if band_idx > 0:
+        return _resolve_reachable_orientation_banded(
+            planner=planner,
+            env=env,
+            sapien=sapien,
+            position=position,
+            bands=bands,
+            band_idx=band_idx - 1,
+            azimuth_rad=azimuth_rad,
+            seed_qpos=seed_qpos,
+            rng=rng,
+            in_band_attempts=in_band_attempts,
+            azimuth_jitter_rad=azimuth_jitter_rad,
+            suppress_planner_output=suppress_planner_output,
+        )
+    return None
 
 
 def _farthest_point_select_orientations(
@@ -982,6 +1145,7 @@ def _collect_multimodal_episodes(
     start_sample_attempts: int,
     min_start_goal_distance: float,
     acceptance_success_distance: float,
+    acceptance_success_rotation_deg: float,
     saliency_config: PointCloudSaliencyConfig,
     require_complete_variant_set: bool,
     suppress_planner_output: bool,
@@ -1181,6 +1345,8 @@ def _collect_multimodal_episodes(
             hold_steps=hold_steps,
             settle_steps=settle_steps,
             acceptance_success_distance=acceptance_success_distance,
+            acceptance_success_rotation_deg=acceptance_success_rotation_deg,
+            goal_orientation_quat=np.asarray(variant_goal_pose.q, dtype=np.float32).reshape(4),
             gripper_open=gripper_open,
             obs=obs,
             info=info,
@@ -1242,6 +1408,8 @@ def _replay_planned_positions_as_episode(
     hold_steps: int,
     settle_steps: int,
     acceptance_success_distance: float,
+    acceptance_success_rotation_deg: float,
+    goal_orientation_quat: np.ndarray | None,
     gripper_open: float,
     obs: Any,
     info: Any,
@@ -1250,15 +1418,50 @@ def _replay_planned_positions_as_episode(
     metadata: dict[str, Any],
     viewer_step_delay: float = 0.0,
 ) -> ReachEpisodeData | None:
+    """Replay a planned joint trajectory and record dataset rows.
+
+    "Success" here requires BOTH position (env's own ``info["success"]``, which is
+    position-only -- see ``PG3DReachEnv.evaluate()``) AND rotation (TCP orientation
+    within ``acceptance_success_rotation_deg`` of ``goal_orientation_quat``) at the
+    SAME step. Gating hold on position alone would (and previously did) teach every
+    demo "stop moving once positionally close, whatever orientation you're currently
+    at" -- the hold qpos was captured at first position-success regardless of
+    remaining rotation error, baking a "don't bother correcting orientation" signal
+    into the entire dataset. Now the settle phase keeps running (up to
+    ``settle_steps``) until both conditions are met together, and hold only locks in
+    once they are. ``goal_orientation_quat=None`` disables the rotation gate entirely
+    (treated as always-satisfied) for callers that don't have a target orientation.
+    """
     unwrapped = env.unwrapped
     rows: list[dict[str, np.ndarray]] = []
     successes: list[bool] = []
     distances: list[float] = []
+    rotation_errors_deg: list[float] = []
+    env_successes: list[bool] = []
     first_success_step: int | None = None
     pre_hold_final_distance: float | None = None
+    pre_hold_final_rotation_error_deg: float | None = None
     hold_qpos: np.ndarray | None = None  # qpos captured where success was first reached
     hold_steps_recorded = 0
     settle_steps_recorded = 0
+    goal_quat = (
+        np.asarray(goal_orientation_quat, dtype=np.float32).reshape(4)
+        if goal_orientation_quat is not None
+        else None
+    )
+
+    def _post_step_metrics() -> tuple[bool, float, float, bool]:
+        """(combined_success, distance, rotation_error_deg, env_success) after a step."""
+        env_success = _bool_info(info, "success")
+        distance = _float_info(info, "tcp_to_goal_dist", default=_tcp_to_goal_distance(unwrapped))
+        if goal_quat is None:
+            rotation_error_deg = 0.0
+        else:
+            actual_quat = _tcp_pose(unwrapped)[3:7]
+            rotation_error_deg = _quat_angular_distance_deg(actual_quat, goal_quat)
+        combined_success = bool(env_success) and rotation_error_deg <= acceptance_success_rotation_deg
+        return combined_success, distance, rotation_error_deg, bool(env_success)
+
     planned_step_limit = max(1, max_steps - settle_steps)
     for planned_qpos in positions[:planned_step_limit]:
         sim_action = _format_sim_action(env, planned_qpos, gripper_action=gripper_open)
@@ -1274,15 +1477,17 @@ def _replay_planned_positions_as_episode(
         )
         obs, _reward, terminated, truncated, info = env.step(sim_action)
         _render_viewer_frame(env, viewer_step_delay)
-        success = _bool_info(info, "success")
-        distance = _float_info(info, "tcp_to_goal_dist", default=_tcp_to_goal_distance(unwrapped))
+        success, distance, rotation_error_deg, env_success = _post_step_metrics()
         row["success"] = np.asarray(success, dtype=bool)
         rows.append(row)
         successes.append(success)
         distances.append(distance)
+        rotation_errors_deg.append(rotation_error_deg)
+        env_successes.append(env_success)
         if success:
             first_success_step = len(rows)
             pre_hold_final_distance = distance
+            pre_hold_final_rotation_error_deg = rotation_error_deg
             hold_qpos = _to_numpy(unwrapped.agent.robot.qpos).reshape(-1)
             break
         if _bool_any(terminated) or _bool_any(truncated):
@@ -1310,16 +1515,18 @@ def _replay_planned_positions_as_episode(
         )
         obs, _reward, _terminated, truncated, info = env.step(sim_action)
         _render_viewer_frame(env, viewer_step_delay)
-        success = _bool_info(info, "success")
-        distance = _float_info(info, "tcp_to_goal_dist", default=_tcp_to_goal_distance(unwrapped))
+        success, distance, rotation_error_deg, env_success = _post_step_metrics()
         row["success"] = np.asarray(success, dtype=bool)
         rows.append(row)
         successes.append(success)
         distances.append(distance)
+        rotation_errors_deg.append(rotation_error_deg)
+        env_successes.append(env_success)
         settle_steps_recorded += 1
         if success:
             first_success_step = len(rows)
             pre_hold_final_distance = distance
+            pre_hold_final_rotation_error_deg = rotation_error_deg
             hold_qpos = _to_numpy(unwrapped.agent.robot.qpos).reshape(-1)
             break
         if _bool_any(truncated):
@@ -1330,9 +1537,9 @@ def _replay_planned_positions_as_episode(
         and hold_steps_recorded < hold_steps
         and len(rows) < max_steps
     ):
-        # Lock the hold to the pose where success was first reached so the TCP stays
-        # inside the goal threshold rather than drifting toward the (possibly slightly
-        # off-target) final planned qpos.
+        # Lock the hold to the pose where success (position AND rotation) was first
+        # reached, so both stay inside tolerance rather than drifting toward the
+        # (possibly slightly off-target) final planned qpos.
         sim_action = _hold_sim_action(env, gripper_open=gripper_open, qpos=hold_qpos)
         row = _dataset_row_from_obs(
             obs=obs,
@@ -1346,12 +1553,13 @@ def _replay_planned_positions_as_episode(
         )
         obs, _reward, _terminated, truncated, info = env.step(sim_action)
         _render_viewer_frame(env, viewer_step_delay)
-        success = _bool_info(info, "success")
-        distance = _float_info(info, "tcp_to_goal_dist", default=_tcp_to_goal_distance(unwrapped))
+        success, distance, rotation_error_deg, env_success = _post_step_metrics()
         row["success"] = np.asarray(success, dtype=bool)
         rows.append(row)
         successes.append(success)
         distances.append(distance)
+        rotation_errors_deg.append(rotation_error_deg)
+        env_successes.append(env_success)
         hold_steps_recorded += 1
         if _bool_any(truncated):
             break
@@ -1362,13 +1570,30 @@ def _replay_planned_positions_as_episode(
         default=_tcp_to_goal_distance(unwrapped),
     )
     min_distance = float(np.min(distances)) if distances else final_distance
-    accepted_success = (first_success_step is not None) or (min_distance <= acceptance_success_distance)
-    if accepted_success and first_success_step is None and successes:
-        closest_idx = int(np.argmin(np.asarray(distances, dtype=np.float32)))
-        first_success_step = closest_idx + 1
-        pre_hold_final_distance = float(distances[closest_idx])
-        successes[closest_idx] = True
-        rows[closest_idx]["success"] = np.asarray(True, dtype=bool)
+    min_rotation_error_deg = (
+        float(np.min(rotation_errors_deg)) if rotation_errors_deg else 0.0
+    )
+    # Retroactive acceptance: neither position nor rotation individually reaching
+    # their best-ever value is enough -- they must both be within tolerance at the
+    # SAME step. Mirrors CartesianPoseConstraint.cost's tolerance-clipped combined
+    # metric (scripts/eval_pose_variety_checkpoint_reachability.py's reranker) so the
+    # writer's acceptance bar matches what eval actually checks.
+    combined_violation = [
+        max(d - acceptance_success_distance, 0.0)
+        + max(np.radians(r) - np.radians(acceptance_success_rotation_deg), 0.0)
+        for d, r in zip(distances, rotation_errors_deg, strict=True)
+    ]
+    best_idx = int(np.argmin(combined_violation)) if combined_violation else None
+    best_is_within_tolerance = (
+        best_idx is not None and combined_violation[best_idx] <= 1e-6
+    )
+    accepted_success = (first_success_step is not None) or best_is_within_tolerance
+    if accepted_success and first_success_step is None and best_idx is not None:
+        first_success_step = best_idx + 1
+        pre_hold_final_distance = float(distances[best_idx])
+        pre_hold_final_rotation_error_deg = float(rotation_errors_deg[best_idx])
+        successes[best_idx] = True
+        rows[best_idx]["success"] = np.asarray(True, dtype=bool)
     metadata = {
         **metadata,
         "length": len(rows),
@@ -1378,10 +1603,13 @@ def _replay_planned_positions_as_episode(
         "settle_steps_requested": settle_steps,
         "settle_steps_recorded": settle_steps_recorded,
         "pre_hold_final_distance": pre_hold_final_distance,
+        "pre_hold_final_rotation_error_deg": pre_hold_final_rotation_error_deg,
         "final_distance": final_distance,
         "min_distance": min_distance,
-        "env_success": first_success_step is not None and min_distance <= 0.025,
+        "min_rotation_error_deg": min_rotation_error_deg,
+        "env_success": any(env_successes) and min_distance <= 0.025,
         "acceptance_success_distance": acceptance_success_distance,
+        "acceptance_success_rotation_deg": acceptance_success_rotation_deg,
         "success": accepted_success,
     }
     return ReachEpisodeData(
@@ -1443,29 +1671,20 @@ def generate_multimodal_waypoints(
 
     specs = _trajectory_variant_specs(variants_per_reset)
 
-    # Per-family start/goal orientation pools. FPS-selected so the orientations used
-    # across this reset's episodes are spread out rather than clustered together --
-    # see _farthest_point_select_orientations. Independent pools for start vs. goal
-    # since both need broad SO(3) coverage for arbitrary orientation steering at
-    # inference time (not just "start != goal within one episode").
-    start_quat_pool: list[np.ndarray] = []
-    goal_quat_pool: list[np.ndarray] = []
-    if randomize_start_goal_orientation:
-        candidate_pool_size = max(len(specs) * 4, 12)
-        start_candidates = [
-            _sample_broad_orientation_sapien(rng, cone_deg=orientation_cone_deg)
-            for _ in range(candidate_pool_size)
-        ]
-        goal_candidates = [
-            _sample_broad_orientation_sapien(rng, cone_deg=orientation_cone_deg)
-            for _ in range(candidate_pool_size)
-        ]
-        start_quat_pool = _farthest_point_select_orientations(
-            start_candidates, k=len(specs), rng=rng
-        )
-        goal_quat_pool = _farthest_point_select_orientations(
-            goal_candidates, k=len(specs), rng=rng
-        )
+    # Per-family start/goal orientation bands: 10-degree tilt-magnitude rungs
+    # (0-10, 10-20, ..., up to orientation_cone_deg), round-robin assigned across
+    # families so band coverage is maximized (see _banded_orientation_assignment).
+    # Replaces FPS-based pool selection, which -- at the small k this pipeline draws
+    # per reset -- systematically clusters near the cone edge and starves
+    # small/medium tilts (see _orientation_tilt_bands). If a family's assigned
+    # (start_band, goal_band) combination isn't jointly IK-feasible,
+    # _resolve_reachable_orientation_banded first retries within the SAME band
+    # (different azimuth), then eases down the ladder one band at a time; if even
+    # band 0 (straight down) fails at that position, that side's orientation for
+    # this family silently reverts to the reset's unrandomized default -- made
+    # explicit below via a print + per-variant metadata flag, since a family quietly
+    # losing its requested difficulty tier would otherwise be invisible in the data.
+    tilt_bands = _orientation_tilt_bands(orientation_cone_deg, band_width_deg=10.0)
 
     variants: list[dict[str, Any]] = []
     failed_family_count = 0
@@ -1476,38 +1695,80 @@ def generate_multimodal_waypoints(
         family_goal_quat = goal_quat
         family_goal_pose = goal_pose
         if randomize_start_goal_orientation:
-            start_resolution = _resolve_reachable_orientation(
+            start_band_lo, start_band_hi, start_band_idx, start_azimuth = (
+                _banded_orientation_assignment(spec_idx, tilt_bands, rng=rng)
+            )
+            start_resolution = _resolve_reachable_orientation_banded(
                 planner=planner,
                 env=env,
                 sapien=sapien,
                 position=start.astype(np.float32),
-                primary_quat=start_quat_pool[spec_idx],
+                bands=tilt_bands,
+                band_idx=start_band_idx,
+                azimuth_rad=start_azimuth,
                 seed_qpos=start_qpos,
                 rng=rng,
-                cone_deg=orientation_cone_deg,
                 suppress_planner_output=suppress_planner_output,
             )
+            start_fell_back = start_resolution is None
+            used_start_band: tuple[float, float] | None = None
             if start_resolution is not None:
-                family_start_qpos, family_start_quat = start_resolution
-            goal_resolution = _resolve_reachable_orientation(
+                family_start_qpos, family_start_quat, used_start_band = start_resolution
+            else:
+                # Every band down to and including band 0 (straight down) failed to
+                # IK-plan at this position/seed_qpos -- not a difficulty-tier issue,
+                # the position itself can't take ANY orientation here from this seed.
+                # Silently keep the reset's unrandomized default start orientation
+                # rather than dropping the family entirely; make it visible instead.
+                print(
+                    f"[seed {seed}] family {spec.family_id}:{spec.name} start "
+                    f"orientation: requested band {start_band_lo:.0f}-{start_band_hi:.0f}deg "
+                    "unreachable at EVERY band down to 0-10deg -- falling back to "
+                    "this reset's default (unrandomized) start orientation",
+                    flush=True,
+                )
+            goal_band_lo, goal_band_hi, goal_band_idx, goal_azimuth = (
+                _banded_orientation_assignment(spec_idx, tilt_bands, rng=rng)
+            )
+            goal_resolution = _resolve_reachable_orientation_banded(
                 planner=planner,
                 env=env,
                 sapien=sapien,
                 position=goal.astype(np.float32),
-                primary_quat=goal_quat_pool[spec_idx],
+                bands=tilt_bands,
+                band_idx=goal_band_idx,
+                azimuth_rad=goal_azimuth,
                 seed_qpos=family_start_qpos,
                 rng=rng,
-                cone_deg=orientation_cone_deg,
                 suppress_planner_output=suppress_planner_output,
             )
+            goal_fell_back = goal_resolution is None
+            used_goal_band: tuple[float, float] | None = None
             if goal_resolution is not None:
-                _goal_final_qpos, family_goal_quat = goal_resolution
+                _goal_final_qpos, family_goal_quat, used_goal_band = goal_resolution
                 family_goal_pose = _pose_with_orientation(
                     sapien, position=goal.astype(np.float32), quat=family_goal_quat
                 )
+            else:
+                # Same fallback as start, from the (possibly band-adjusted) resolved
+                # start qpos -- goal is unreachable at ANY tilt from this specific
+                # start, not just at its requested band.
+                print(
+                    f"[seed {seed}] family {spec.family_id}:{spec.name} goal "
+                    f"orientation: requested band {goal_band_lo:.0f}-{goal_band_hi:.0f}deg "
+                    "unreachable at EVERY band down to 0-10deg from the resolved "
+                    "start -- falling back to this reset's default (unrandomized) "
+                    "goal orientation",
+                    flush=True,
+                )
             print(
                 f"[seed {seed}] family {spec.family_id}:{spec.name} orientation: "
-                f"start={family_start_quat.tolist()} goal={family_goal_quat.tolist()}",
+                f"start={family_start_quat.tolist()} "
+                f"(requested_band={start_band_lo:.0f}-{start_band_hi:.0f}deg "
+                f"used_band={'FELL_BACK_TO_DEFAULT' if used_start_band is None else f'{used_start_band[0]:.0f}-{used_start_band[1]:.0f}deg'}) "
+                f"goal={family_goal_quat.tolist()} "
+                f"(requested_band={goal_band_lo:.0f}-{goal_band_hi:.0f}deg "
+                f"used_band={'FELL_BACK_TO_DEFAULT' if used_goal_band is None else f'{used_goal_band[0]:.0f}-{used_goal_band[1]:.0f}deg'})",
                 flush=True,
             )
         selected_variant: dict[str, Any] | None = None
@@ -1646,6 +1907,23 @@ def generate_multimodal_waypoints(
                 "start_orientation_quat": family_start_quat.tolist(),
                 "goal_orientation_quat": family_goal_quat.tolist(),
             }
+            if randomize_start_goal_orientation:
+                selected_variant["start_orientation_band_deg"] = (
+                    None if used_start_band is None else list(used_start_band)
+                )
+                selected_variant["goal_orientation_band_deg"] = (
+                    None if used_goal_band is None else list(used_goal_band)
+                )
+                selected_variant["start_orientation_requested_band_deg"] = [
+                    start_band_lo,
+                    start_band_hi,
+                ]
+                selected_variant["goal_orientation_requested_band_deg"] = [
+                    goal_band_lo,
+                    goal_band_hi,
+                ]
+                selected_variant["start_orientation_fell_back_to_default"] = start_fell_back
+                selected_variant["goal_orientation_fell_back_to_default"] = goal_fell_back
             print(
                 f"[seed {seed}] family {spec.family_id}:{spec.name} first feasible "
                 f"candidate at attempt {attempt_idx}/{max_attempts}: "
