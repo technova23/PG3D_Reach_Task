@@ -269,6 +269,8 @@ def run_generation(
                 reach_workspace_bounds=args.reach_workspace_bounds,
             ).tolist(),
             "reach_workspace_bounds": args.reach_workspace_bounds.tolist(),
+            "min_height_override": args.min_height,
+            "max_height_override": args.max_height,
             "start_sample_attempts": args.start_sample_attempts,
             "min_start_goal_distance": args.min_start_goal_distance,
             "min_base_clearance": args.min_base_clearance,
@@ -399,6 +401,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Wider table-safe Cartesian bounds used for goal sampling, start sampling, "
             "and waypoint detours. Defaults to a conservative Panda-reachable table box."
         ),
+    )
+    parser.add_argument(
+        "--min-height",
+        type=float,
+        default=None,
+        help=(
+            "Override just the Z_MIN row of --reach-workspace-bounds (and "
+            "--start-bounds, if it was also passed explicitly) to this world-frame "
+            "height in meters -- X/Y and any Z bound you did NOT override here are "
+            "left untouched. Lets you constrain start/goal/waypoint sampling height "
+            "without having to respecify the whole 6-float box. Applied AFTER "
+            "--reach-workspace-bounds/--start-bounds resolve to their defaults, so "
+            "it works whether or not you also passed those flags."
+        ),
+    )
+    parser.add_argument(
+        "--max-height",
+        type=float,
+        default=None,
+        help="Override just the Z_MAX row of --reach-workspace-bounds (and "
+        "--start-bounds, if given) -- see --min-height.",
     )
     parser.add_argument(
         "--randomize-start",
@@ -701,6 +724,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.reach_workspace_bounds = np.asarray(
             args.reach_workspace_bounds, dtype=np.float32
         ).reshape(3, 2)
+    if args.min_height is not None or args.max_height is not None:
+        if (
+            args.min_height is not None
+            and args.max_height is not None
+            and args.min_height >= args.max_height
+        ):
+            raise ValueError("--min-height must be less than --max-height")
+        # Only touch the Z row; X/Y (and whichever of Z_MIN/Z_MAX wasn't overridden)
+        # are left exactly as --reach-workspace-bounds/--start-bounds resolved above.
+        if args.min_height is not None:
+            args.reach_workspace_bounds[2, 0] = args.min_height
+        if args.max_height is not None:
+            args.reach_workspace_bounds[2, 1] = args.max_height
+        if args.start_bounds is not None:
+            if args.min_height is not None:
+                args.start_bounds[2, 0] = args.min_height
+            if args.max_height is not None:
+                args.start_bounds[2, 1] = args.max_height
+        # start_bounds falls back to reach_workspace_bounds at runtime when unset
+        # (see _start_workspace_bounds), so leaving it None here already inherits
+        # the override above -- no separate case needed.
     args.action_mode = _action_mode(args.action_mode)
     if args.hold_steps < 0:
         raise ValueError("--hold-steps must be non-negative")
