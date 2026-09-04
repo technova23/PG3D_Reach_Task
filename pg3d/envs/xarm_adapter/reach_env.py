@@ -41,7 +41,24 @@ from pg3d.envs.xarm_adapter.reach_config import (
     XARM7_SIM_CAM_WIDTH,
 )
 
-ROBOT_BASE_POSE = sapien.Pose(p=[-0.615, 0.0, 0.0])
+ROBOT_BASE_POSE = sapien.Pose(p=[0.0, 0.0, 0.0])
+
+# Origin-shifted 2026-09-04: was sapien.Pose(p=[-0.615, 0.0, 0.0]) -- see the
+# matching ROBOT_BASE_POSITION note in xarm_adapter/reach_config.py for why
+# (base-frame == world-frame, matching the real hand-eye calibration
+# convention). This constant and ROBOT_BASE_POSITION are two INDEPENDENT
+# copies and must be kept in sync by hand if either changes again.
+#
+# ManiSkill's TableSceneBuilder places the table at a fixed absolute world
+# pose every episode, independent of the robot (see
+# https://github.com/haosulab/ManiSkill/blob/main/mani_skill/utils/scene_builder/table/scene_builder.py)
+# -- moving the robot to the origin without compensating would silently shift
+# it 0.615m relative to the table, a real change in physical arrangement, not
+# just a relabeling. _offset_table_for_origin_shift (called from
+# PG3DReachXArm7Env._initialize_episode below) re-applies exactly that offset
+# to the table every episode, since ManiSkill's own initialize() resets the
+# table's pose on every reset.
+_TABLE_ORIGIN_SHIFT_X = 0.615
 
 
 
@@ -68,7 +85,27 @@ class PG3DReachXArm7Env(PG3DReachEnv):
         qpos = torch.tensor(rest_qpos, dtype=torch.float32, device=self.device).unsqueeze(0).expand(b, -1)
         self.agent.reset(qpos)
         super()._initialize_episode(env_idx, options)
+        self._offset_table_for_origin_shift()
         self._randomize_camera_pose()
+
+    def _offset_table_for_origin_shift(self) -> None:
+        """Re-apply the table's origin-shift compensation offset every episode.
+
+        super()._initialize_episode() above just called
+        TableSceneBuilder.initialize(), which resets self.table_scene.table to
+        ManiSkill's own fixed absolute world pose -- unrelated to ROBOT_BASE_POSE
+        -- so this has to run AFTER that, every episode (a one-time fix after
+        build() would be silently overwritten on the very next reset). See
+        _TABLE_ORIGIN_SHIFT_X above for why this offset exists at all.
+        """
+        from mani_skill.utils.structs.pose import Pose
+
+        table = getattr(self.table_scene, "table", None)
+        if table is None:
+            return
+        shifted_p = np.array(table.pose.p, dtype=np.float32).reshape(-1, 3).copy()
+        shifted_p[:, 0] += _TABLE_ORIGIN_SHIFT_X
+        table.set_pose(Pose.create_from_pq(p=shifted_p, q=table.pose.q))
 
     def _randomize_camera_pose(self) -> None:
         """Jitter base_camera's pose each episode -- position by up to +/-10cm and

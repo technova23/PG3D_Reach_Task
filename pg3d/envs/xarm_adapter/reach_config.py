@@ -63,29 +63,47 @@ import numpy as np
 from scipy.spatial.transform import Rotation as _Rotation
 
 # World position where the env bolts the xArm7 base (see xarm_adapter/reach_env.py).
-ROBOT_BASE_POSITION = np.array([-0.615, 0.0, 0.0], dtype=np.float32)
+#
+# Origin-shifted 2026-09-04: was [-0.615, 0.0, 0.0]. Robot base now sits at the
+# world origin -- base-frame coordinates and world-frame coordinates are the
+# same thing, matching how the real hand-eye calibration (XARM7_CAM_T_BASE/
+# XARM7_CAM_Q_WXYZ below) already expresses camera pose in the robot's own base
+# frame. This is a pure relabeling of the whole scene, not a physical change --
+# ManiSkill's TableSceneBuilder places the table at a FIXED absolute world pose
+# independent of the robot (see
+# https://github.com/haosulab/ManiSkill/blob/main/mani_skill/utils/scene_builder/table/scene_builder.py),
+# so PG3DReachXArm7Env._initialize_episode (xarm_adapter/reach_env.py) now
+# explicitly re-offsets the table by the same +0.615m in x every episode to
+# keep the actual physical arrangement identical to before this shift -- see
+# _TABLE_ORIGIN_SHIFT_X / _offset_table_for_origin_shift there. This constant
+# and ROBOT_BASE_POSE in xarm_adapter/reach_env.py are two INDEPENDENT copies
+# (not one derived from the other) and must be kept in sync by hand.
+ROBOT_BASE_POSITION = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
 # Base-relative sampling box [ [dx_lo,dx_hi], [dy_lo,dy_hi], [dz_lo,dz_hi] ].
-# Symmetric in dy (left/right of the robot). dx_lo=0.18 is UNCHANGED from the
-# 2026-07-02 re-tune (see module docstring) -- kept deliberately even in this
-# 2026-09-04 update below the box's own documented self-collision blind spot
-# (xarm_gripper_base_link folding into link6 at low dx + high lateral/height),
-# not because it was re-measured with this update.
+# Symmetric in dy (left/right of the robot). dx_lo=0.18 is UNCHANGED since the
+# 2026-07-02 re-tune (see module docstring) -- kept deliberately below every
+# subsequent update, including this one, below the box's own documented
+# self-collision blind spot (xarm_gripper_base_link folding into link6 at low
+# dx + high lateral/height), not because it was itself re-measured.
 #
-# 2026-09-04: dx_hi, dy, dz_hi replaced with the PHYSICALLY MEASURED real-robot
-# workspace (0.90m forward, +/-0.345m lateral, 0.05-0.53m height) -- previously
-# these were simulation-only estimates (see the 2026-08-08/2026-08-1x history
-# below), now grounded in an actual measurement of the real bench. NOT YET
-# RE-VERIFIED against this exact combination -- re-run
-# `scripts/verify_xarm7_reachability.py --variant gripper --grid 9` before
-# trusting this box for a full data-gen run, since dx_hi grew substantially
-# (0.65->0.90) and the prior corner/interior reachability numbers below no
-# longer apply to it.
+# 2026-09-04 (superseded same-day, see next note): first pass at the PHYSICALLY
+# MEASURED real-robot workspace (0.90m forward, +/-0.345m lateral, 0.05-0.53m
+# height) -- previously these were simulation-only estimates (see the
+# 2026-08-08/2026-08-1x history below).
+#
+# 2026-09-04 (revised): forward/lateral re-measured -- dx_hi corrected
+# 0.90->0.69m, dy widened +/-0.345->+/-0.45m. dz_hi (0.53m) unchanged from the
+# same-day first pass. NOT YET RE-VERIFIED against this exact combination --
+# re-run `scripts/verify_xarm7_reachability.py --variant gripper --grid 9`
+# before trusting this box for a full data-gen run; the prior corner/interior
+# reachability numbers in this docstring predate both 2026-09-04 passes and
+# don't apply to either.
 XARM7_REACH_BOX_BASE = np.array(
     [
-        [0.18, 0.90],     # forward (dx) — measured real workspace, 2026-09-04 (was 0.65)
-        [-0.345, 0.345],  # lateral (dy) — measured real workspace, 2026-09-04 (was +/-0.42)
-        [0.05, 0.53],     # height  (dz) above the base/table surface — measured, 2026-09-04 (was 0.55)
+        [0.18, 0.69],   # forward (dx) — measured real workspace, 2026-09-04 revision (was 0.90, before that 0.65)
+        [-0.45, 0.45],  # lateral (dy) — measured real workspace, 2026-09-04 revision (was +/-0.345, before that +/-0.42)
+        [0.05, 0.53],   # height  (dz) above the base/table surface — measured, 2026-09-04 (unchanged this revision)
     ],
     dtype=np.float32,
 )
@@ -105,9 +123,9 @@ XARM7_MAX_ENVELOPE_BASE = np.array(
 # Table-agnostic in XY (anchored to the base, not the table footprint).
 XARM7_CROP_BOX_BASE = np.array(
     [
-        [-0.15, 1.00],  # widened 2026-09-04 to keep ~0.10m margin over reach dx_hi=0.90 (was 0.75/dx_hi=0.65)
-        [-0.55, 0.55],  # unchanged -- still >0.10m margin over the narrower reach dy=+/-0.345 (2026-09-04)
-        [-0.02, 0.70],  # expanded 2026-08-08; still >0.15m margin over reach dz_hi=0.53 (2026-09-04, was 0.55)
+        [-0.15, 0.79],  # re-tuned 2026-09-04 revision to keep ~0.10m margin over reach dx_hi=0.69 (was 1.00/dx_hi=0.90)
+        [-0.55, 0.55],  # unchanged -- still ~0.10m margin over the wider reach dy=+/-0.45 (2026-09-04 revision)
+        [-0.02, 0.70],  # expanded 2026-08-08; still >0.15m margin over reach dz_hi=0.53 (2026-09-04, unchanged)
     ],
     dtype=np.float32,
 )
