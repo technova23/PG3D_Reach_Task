@@ -192,6 +192,7 @@ def run_generation(
                     reach_workspace_bounds=args.reach_workspace_bounds,
                 ),
                 reach_workspace_bounds=args.reach_workspace_bounds,
+                waypoint_reach_workspace_bounds=args.waypoint_reach_workspace_bounds,
                 start_sample_attempts=args.start_sample_attempts,
                 min_start_goal_distance=args.min_start_goal_distance,
                 acceptance_success_distance=args.acceptance_success_distance,
@@ -280,6 +281,9 @@ def run_generation(
             "reach_workspace_bounds": args.reach_workspace_bounds.tolist(),
             "min_height_override": args.min_height,
             "max_height_override": args.max_height,
+            "waypoint_reach_workspace_bounds": args.waypoint_reach_workspace_bounds.tolist(),
+            "waypoint_min_height_override": args.waypoint_min_height,
+            "waypoint_max_height_override": args.waypoint_max_height,
             "start_sample_attempts": args.start_sample_attempts,
             "min_start_goal_distance": args.min_start_goal_distance,
             "min_base_clearance": args.min_base_clearance,
@@ -419,10 +423,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Override just the Z_MIN row of --reach-workspace-bounds (and "
             "--start-bounds, if it was also passed explicitly) to this world-frame "
             "height in meters -- X/Y and any Z bound you did NOT override here are "
-            "left untouched. Lets you constrain start/goal/waypoint sampling height "
-            "without having to respecify the whole 6-float box. Applied AFTER "
-            "--reach-workspace-bounds/--start-bounds resolve to their defaults, so "
-            "it works whether or not you also passed those flags."
+            "left untouched. Constrains START and GOAL sampling height only -- "
+            "waypoints (intermediate detour points) are NOT capped by this; see "
+            "--waypoint-min-height/--waypoint-max-height if you also want to bound "
+            "or explicitly widen those (families like upper_arc/high_loop need "
+            "vertical room ABOVE the start/goal range to actually arc). Applied "
+            "AFTER --reach-workspace-bounds/--start-bounds resolve to their "
+            "defaults, so it works whether or not you also passed those flags."
         ),
     )
     parser.add_argument(
@@ -431,6 +438,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override just the Z_MAX row of --reach-workspace-bounds (and "
         "--start-bounds, if given) -- see --min-height.",
+    )
+    parser.add_argument(
+        "--waypoint-min-height",
+        type=float,
+        default=None,
+        help=(
+            "Override just the Z_MIN row used for WAYPOINT (intermediate detour "
+            "point) sampling, independently of --min-height. Defaults to whatever "
+            "--reach-workspace-bounds/--min-height resolved to (i.e. same ceiling "
+            "as start/goal, the old behavior) if not given. Pass this to let "
+            "waypoints range lower than start/goal are allowed to."
+        ),
+    )
+    parser.add_argument(
+        "--waypoint-max-height",
+        type=float,
+        default=None,
+        help=(
+            "Override just the Z_MAX row used for waypoint sampling, independently "
+            "of --max-height -- e.g. keep start/goal capped at 0.25m while letting "
+            "upper_arc/high_loop-style waypoints reach up to 0.55m. See "
+            "--waypoint-min-height."
+        ),
     )
     parser.add_argument(
         "--randomize-start",
@@ -754,6 +784,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # start_bounds falls back to reach_workspace_bounds at runtime when unset
         # (see _start_workspace_bounds), so leaving it None here already inherits
         # the override above -- no separate case needed.
+    # Waypoint height range is a SEPARATE box from start/goal's, defaulting to a
+    # copy of the (possibly --min-height/--max-height overridden) reach_workspace_bounds
+    # above -- i.e. same ceiling as start/goal, matching old behavior -- unless
+    # --waypoint-min-height/--waypoint-max-height explicitly widen or narrow it
+    # further. This is what lets e.g. upper_arc/high_loop waypoints range above a
+    # start/goal ceiling that --max-height deliberately capped lower.
+    args.waypoint_reach_workspace_bounds = args.reach_workspace_bounds.copy()
+    if args.waypoint_min_height is not None or args.waypoint_max_height is not None:
+        if (
+            args.waypoint_min_height is not None
+            and args.waypoint_max_height is not None
+            and args.waypoint_min_height >= args.waypoint_max_height
+        ):
+            raise ValueError("--waypoint-min-height must be less than --waypoint-max-height")
+        if args.waypoint_min_height is not None:
+            args.waypoint_reach_workspace_bounds[2, 0] = args.waypoint_min_height
+        if args.waypoint_max_height is not None:
+            args.waypoint_reach_workspace_bounds[2, 1] = args.waypoint_max_height
     args.action_mode = _action_mode(args.action_mode)
     if args.hold_steps < 0:
         raise ValueError("--hold-steps must be non-negative")
@@ -1204,6 +1252,7 @@ def _collect_multimodal_episodes(
     randomize_start: bool,
     start_bounds: np.ndarray,
     reach_workspace_bounds: np.ndarray,
+    waypoint_reach_workspace_bounds: np.ndarray | None = None,
     start_sample_attempts: int,
     min_start_goal_distance: float,
     acceptance_success_distance: float,
@@ -1231,7 +1280,11 @@ def _collect_multimodal_episodes(
         _waypoint_workspace_bounds(
             env_id,
             crop_config,
-            reach_workspace_bounds=reach_workspace_bounds,
+            reach_workspace_bounds=(
+                reach_workspace_bounds
+                if waypoint_reach_workspace_bounds is None
+                else waypoint_reach_workspace_bounds
+            ),
         ),
         table_margin,
     )

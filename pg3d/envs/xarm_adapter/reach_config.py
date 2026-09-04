@@ -66,17 +66,26 @@ from scipy.spatial.transform import Rotation as _Rotation
 ROBOT_BASE_POSITION = np.array([-0.615, 0.0, 0.0], dtype=np.float32)
 
 # Base-relative sampling box [ [dx_lo,dx_hi], [dy_lo,dy_hi], [dz_lo,dz_hi] ].
-# Symmetric in dy (left/right of the robot). dx_lo/dy verified 8/8 corners + 100.0%
-# interior at the 2026-07-02 re-tune (see module docstring); dx_hi/dz_hi were
-# expanded 2026-08-08 then trimmed to dz_hi=0.55 to land near Panda's own achieved
-# reachability bar (4/8 corners, 93.1% interior) rather than a stricter 100% target
-# -- see module docstring's "Benchmarked against Panda" note. This exact combo not
-# yet independently re-swept; re-run verify_xarm7_reachability.py to confirm.
+# Symmetric in dy (left/right of the robot). dx_lo=0.18 is UNCHANGED from the
+# 2026-07-02 re-tune (see module docstring) -- kept deliberately even in this
+# 2026-09-04 update below the box's own documented self-collision blind spot
+# (xarm_gripper_base_link folding into link6 at low dx + high lateral/height),
+# not because it was re-measured with this update.
+#
+# 2026-09-04: dx_hi, dy, dz_hi replaced with the PHYSICALLY MEASURED real-robot
+# workspace (0.90m forward, +/-0.345m lateral, 0.05-0.53m height) -- previously
+# these were simulation-only estimates (see the 2026-08-08/2026-08-1x history
+# below), now grounded in an actual measurement of the real bench. NOT YET
+# RE-VERIFIED against this exact combination -- re-run
+# `scripts/verify_xarm7_reachability.py --variant gripper --grid 9` before
+# trusting this box for a full data-gen run, since dx_hi grew substantially
+# (0.65->0.90) and the prior corner/interior reachability numbers below no
+# longer apply to it.
 XARM7_REACH_BOX_BASE = np.array(
     [
-        [0.18, 0.65],   # forward (dx) — expanded 2026-08-08 from 0.50
-        [-0.42, 0.42],  # lateral (dy) — symmetric, unchanged (already Panda-comparable)
-        [0.05, 0.55],   # height  (dz) above the base/table surface — from 0.37, via 0.60, to 0.55
+        [0.18, 0.90],     # forward (dx) — measured real workspace, 2026-09-04 (was 0.65)
+        [-0.345, 0.345],  # lateral (dy) — measured real workspace, 2026-09-04 (was +/-0.42)
+        [0.05, 0.53],     # height  (dz) above the base/table surface — measured, 2026-09-04 (was 0.55)
     ],
     dtype=np.float32,
 )
@@ -96,10 +105,9 @@ XARM7_MAX_ENVELOPE_BASE = np.array(
 # Table-agnostic in XY (anchored to the base, not the table footprint).
 XARM7_CROP_BOX_BASE = np.array(
     [
-        [-0.15, 0.75],  # expanded 2026-08-08 to keep ~0.10m margin over reach dx_hi=0.65
-        [-0.55, 0.55],
-        [-0.02, 0.70],  # expanded 2026-08-08; ~0.15m margin over reach dz_hi=0.55 (was tuned
-                         # for dz_hi=0.60 before that was trimmed -- left generous, not tightened)
+        [-0.15, 1.00],  # widened 2026-09-04 to keep ~0.10m margin over reach dx_hi=0.90 (was 0.75/dx_hi=0.65)
+        [-0.55, 0.55],  # unchanged -- still >0.10m margin over the narrower reach dy=+/-0.345 (2026-09-04)
+        [-0.02, 0.70],  # expanded 2026-08-08; still >0.15m margin over reach dz_hi=0.53 (2026-09-04, was 0.55)
     ],
     dtype=np.float32,
 )
