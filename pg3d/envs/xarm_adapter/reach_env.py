@@ -201,9 +201,21 @@ class PG3DReachXArm7Env(PG3DReachEnv):
 
     @property
     def _default_human_render_camera_configs(self) -> CameraConfig:
-        # Front-facing third-person view: camera at world [0.7, 0, 0.45] looking toward
-        # workspace center [-0.315, 0, 0.22].  Y=0 so no diagonal offset.
-        pose = sapien_utils.look_at(eye=[0.7, 0.0, 0.45], target=[-0.315, 0.0, 0.22])
+        # Front-facing third-person view, base-relative (Y=0 so no diagonal
+        # offset) -- NOT the real calibrated sensor camera (that's
+        # _default_sensor_configs above), purely a cosmetic render/video view.
+        # Base-relative offsets below were derived from what used to be a
+        # hardcoded absolute-world look_at(eye=[0.7,0,0.45],
+        # target=[-0.315,0,0.22]), tuned back when ROBOT_BASE_POSE sat at
+        # [-0.615,0,0]: eye_rel = eye_old - old_base = [1.315,0,0.45],
+        # target_rel = target_old - old_base = [0.30,0,0.22]. Expressing it
+        # this way (instead of another hardcoded absolute pose) means it
+        # can't silently go stale again the way it did across the 2026-09-04
+        # origin shift -- it was left as an absolute pose then and ended up
+        # far too close to the robot once the base moved out from under it.
+        eye = (np.array(ROBOT_BASE_POSE.p) + np.array([1.315, 0.0, 0.45])).tolist()
+        target = (np.array(ROBOT_BASE_POSE.p) + np.array([0.30, 0.0, 0.22])).tolist()
+        pose = sapien_utils.look_at(eye=eye, target=target)
         return CameraConfig("render_camera", pose, 640, 480, float(np.deg2rad(60)), 0.1, 10.0)
 
 
