@@ -225,6 +225,14 @@ def run_generation(
                     )
                     continue
                 episodes.append(episode)
+                rotation_error_deg = episode.metadata.get(
+                    "pre_hold_final_rotation_error_deg"
+                )
+                if rotation_error_deg is None:
+                    rotation_error_deg = episode.metadata.get("min_rotation_error_deg")
+                rotation_error_str = (
+                    f"{rotation_error_deg:.1f}deg" if rotation_error_deg is not None else "n/a"
+                )
                 print(
                     "demo "
                     f"{len(episodes)}/{args.num_demos}: seed={seed} "
@@ -232,7 +240,8 @@ def run_generation(
                     f"steps={episode.state.shape[0]} "
                     f"hold={episode.metadata.get('hold_steps_recorded')} "
                     f"success={episode.metadata.get('success')} "
-                    f"final_distance={episode.metadata.get('final_distance'):.4f}",
+                    f"final_distance={episode.metadata.get('final_distance'):.4f} "
+                    f"rot_err={rotation_error_str}",
                     flush=True,
                 )
     except Exception as exc:
@@ -961,22 +970,31 @@ def _banded_orientation_assignment(
     idx: int,
     bands: list[tuple[float, float]],
     *,
+    band_order: list[int],
     rng: np.random.Generator,
 ) -> tuple[float, float, int, float]:
     """Auto-assign (band_lo_deg, band_hi_deg, band_idx, azimuth_rad) for family `idx`.
 
-    Fully code-decided -- no caller-supplied azimuth, no fixed schedule. Band
-    (tilt-magnitude tier) is round-robin: `idx % num_bands`. With more families
-    than bands, every band is used once before any band repeats, so band coverage
-    is automatically maximized for whatever `variants_per_reset` is (e.g. 7
-    families over 6 bands -> bands 0-5 each used once, then band 0 reused for
-    family 6 -- never band 0 used twice before band 5 is touched). Azimuth
-    (direction around the vertical axis) is drawn fresh and uniformly at random
-    from `rng` on every call, so repeated visits to the same band naturally land
-    at different, unpredetermined directions rather than a fixed side.
+    Fully code-decided -- no caller-supplied azimuth. `band_order` is a
+    permutation of `range(len(bands))`, generated ONCE per reset by the caller
+    (see generate_multimodal_waypoints) so WHICH family gets which band is
+    randomized freshly every reset, instead of a fixed `idx % num_bands` mapping
+    that would always tie e.g. "left_wide" to the same tilt band. Round-robin
+    coverage is still guaranteed: `band_order` is a full permutation, so every
+    band is used once before any band repeats, whatever the family count is.
+
+    The returned `band_idx` indexes into the CANONICAL (ascending-tilt) `bands`
+    list, never a shuffled copy of it -- `bands` itself must stay in ascending
+    order because `_resolve_reachable_orientation_banded`'s IK fallback steps
+    `band_idx - 1` to ease off tilt magnitude one rung at a time; that only means
+    "next smaller tilt" if the list it indexes into was never reordered.
+
+    Azimuth (direction around the vertical axis) is drawn fresh and uniformly at
+    random from `rng` on every call, so repeated visits to the same band naturally
+    land at different, unpredetermined directions rather than a fixed side.
     """
     num_bands = len(bands)
-    band_idx = idx % num_bands
+    band_idx = band_order[idx % num_bands]
     azimuth_rad = float(rng.uniform(0.0, 2.0 * np.pi))
     band_lo_deg, band_hi_deg = bands[band_idx]
     return band_lo_deg, band_hi_deg, band_idx, azimuth_rad
@@ -1729,6 +1747,17 @@ def generate_multimodal_waypoints(
     # explicit below via a print + per-variant metadata flag, since a family quietly
     # losing its requested difficulty tier would otherwise be invisible in the data.
     tilt_bands = _orientation_tilt_bands(orientation_cone_deg, band_width_deg=10.0)
+    # Which family gets which band is randomized freshly per reset -- independently
+    # for start vs. goal -- via a permutation of band indices, so e.g. "left_wide"
+    # isn't tied to the SAME tilt band on every single reset (band_idx = spec_idx %
+    # num_bands alone would do that, deterministically). Round-robin coverage is
+    # unchanged (band_order is a full permutation, so every band is still used once
+    # before any repeats); only WHICH family lands on which band moves. `tilt_bands`
+    # itself stays in canonical ascending-tilt order -- _resolve_reachable_orientation_banded's
+    # fallback steps band_idx-1 to ease off tilt magnitude one rung at a time, which
+    # only means "next smaller tilt" if the list it indexes into is never reordered.
+    start_band_order = [int(i) for i in rng.permutation(len(tilt_bands))]
+    goal_band_order = [int(i) for i in rng.permutation(len(tilt_bands))]
 
     variants: list[dict[str, Any]] = []
     failed_family_count = 0
@@ -1740,7 +1769,9 @@ def generate_multimodal_waypoints(
         family_goal_pose = goal_pose
         if randomize_start_goal_orientation:
             start_band_lo, start_band_hi, start_band_idx, start_azimuth = (
-                _banded_orientation_assignment(spec_idx, tilt_bands, rng=rng)
+                _banded_orientation_assignment(
+                    spec_idx, tilt_bands, band_order=start_band_order, rng=rng
+                )
             )
             start_resolution = _resolve_reachable_orientation_banded(
                 planner=planner,
@@ -1772,7 +1803,9 @@ def generate_multimodal_waypoints(
                     flush=True,
                 )
             goal_band_lo, goal_band_hi, goal_band_idx, goal_azimuth = (
-                _banded_orientation_assignment(spec_idx, tilt_bands, rng=rng)
+                _banded_orientation_assignment(
+                    spec_idx, tilt_bands, band_order=goal_band_order, rng=rng
+                )
             )
             goal_resolution = _resolve_reachable_orientation_banded(
                 planner=planner,
@@ -2158,7 +2191,13 @@ def _trajectory_variant_specs(
             lateral_jitter=0.025,
             vertical_jitter=0.015,
         ),
-        TrajectoryFamilySpec(11, "extreme_detour", 0.75, 0.38, (0.30, 0.60), 1.00),
+        # "extreme_detour" (previously id 11, lateral_scale=0.75, vertical_scale=0.38)
+        # removed -- was the largest single-waypoint detour of the 12 base families.
+        # The >12-family auto-generation loop below (idx from len(base_specs) up)
+        # still produces "extreme_detour_N"-named families of similar or larger
+        # scale if --trajectory-variants-per-reset exceeds len(base_specs) (now 11)
+        # -- lower that flag too if you also want to avoid regenerating this
+        # category via the overflow path.
     ]
     if variants_per_reset <= len(base_specs):
         return base_specs[:variants_per_reset]
@@ -2217,6 +2256,18 @@ def _sample_waypoint_set(
     if spec.name == "shallow_direct":
         lateral_mag = max(0.02, min(0.06, 0.15 * distance))
         vertical_mag = max(0.01, min(0.04, 0.10 * distance))
+
+    # Randomize the OVERALL magnitude per attempt (independently for lateral vs.
+    # vertical), on top of the distance-based mag above -- without this, every
+    # candidate from one family lands at nearly the same curvature depth (only the
+    # small per-waypoint xy/z noise and ratio jitter below varied it), so the
+    # printed "deviation" was barely distinguishable attempt-to-attempt or even
+    # family-to-family. This widens the actual spread of path_direct_ratio /
+    # max_line_deviation across the dataset while _trajectory_quality's
+    # min_curve_offset gate still enforces a floor so a family never degenerates
+    # into a near-straight line.
+    lateral_mag *= float(rng.uniform(0.5, 1.6))
+    vertical_mag *= float(rng.uniform(0.5, 1.6))
 
     # Family specs can intentionally be extreme; cap their effective scale here so they
     # stay sampleable in tight workspaces without erasing left/right/up/down identity.
