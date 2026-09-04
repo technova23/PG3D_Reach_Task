@@ -27,8 +27,17 @@ def register_pg3d_xarm7_robotiq_reach_envs() -> None:
     from pg3d.envs.xarm_adapter import reach_env  # noqa: F401
 
 
+def register_pg3d_xarm7_pick_envs() -> None:
+    """Register ``xarm7_gripper`` agent and ``PG3DPick-XArm7-Gripper-*`` env ids.
+
+    Reach env with one added dynamic, graspable cube -- see pick_env.py.
+    """
+    from pg3d.envs.xarm_adapter import pick_env  # noqa: F401
+
+
 __all__ = [
     "register_pg3d_xarm7_reach_envs",
     "register_pg3d_xarm7_gripper_reach_envs",
     "register_pg3d_xarm7_robotiq_reach_envs",
+    "register_pg3d_xarm7_pick_envs",
 ]
