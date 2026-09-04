@@ -585,9 +585,10 @@ def main(argv: list[str] | None = None) -> int:
                 # short vertical lift from an already-feasible grasp qpos is
                 # very unlikely to be the thing that breaks feasibility to a
                 # nearby place pose, so this is a fair proxy, not exact.
-                grasp_end_qpos = np.asarray(
-                    inter_feasible_plan["position"][-1], dtype=np.float32
-                )
+                # _plan_multisegment_trajectory returns (positions, status) --
+                # a tuple, NOT the raw dict _move_to_pose_with_screw gives.
+                inter_feasible_positions, _inter_feasible_status = inter_feasible_plan
+                grasp_end_qpos = np.asarray(inter_feasible_positions[-1], dtype=np.float32)
                 place_feasible_plan = _plan_multisegment_trajectory(
                     planner=planner,
                     env=ik_env,
