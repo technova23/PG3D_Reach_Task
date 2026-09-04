@@ -175,6 +175,7 @@ def run_generation(
                 waypoint_attempts=args.waypoint_attempts,
                 min_base_clearance=args.min_base_clearance,
                 table_margin=args.table_margin,
+                min_table_clearance=args.min_table_clearance,
                 waypoint_xy_noise=args.waypoint_xy_noise,
                 waypoint_z_noise=args.waypoint_z_noise,
                 lateral_z_offset=args.lateral_z_offset,
@@ -288,6 +289,7 @@ def run_generation(
             "min_start_goal_distance": args.min_start_goal_distance,
             "min_base_clearance": args.min_base_clearance,
             "table_margin": args.table_margin,
+            "min_table_clearance": args.min_table_clearance,
             "note": (
                 "Starts are sampled as Cartesian TCP poses, accepted only when the ManiSkill "
                 "Panda motion planner can reach them from the reset configuration. The script "
@@ -301,6 +303,7 @@ def run_generation(
             "waypoint_attempts": args.waypoint_attempts,
             "min_base_clearance": args.min_base_clearance,
             "table_margin": args.table_margin,
+            "min_table_clearance": args.min_table_clearance,
             "waypoint_xy_noise": args.waypoint_xy_noise,
             "waypoint_z_noise": args.waypoint_z_noise,
             "lateral_z_offset": args.lateral_z_offset,
@@ -605,6 +608,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--min-table-clearance",
+        type=float,
+        default=0.02,
+        help=(
+            "minimum height above the robot base/table surface (z=robot_base_position[2]) "
+            "required for the start, every intermediate waypoint, and the goal of a "
+            "candidate trajectory, in meters. A geometric floor check against the raw "
+            "Cartesian waypoint set (before motion planning), not a mesh-to-mesh physics "
+            "collision check -- candidates that dip within this margin of the table are "
+            "resampled like any other infeasible geometry (see generate_multimodal_waypoints)."
+        ),
+    )
+    parser.add_argument(
         "--waypoint-xy-noise",
         type=float,
         default=0.04,
@@ -837,6 +853,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--min-base-clearance must be non-negative")
     if args.table_margin < 0:
         raise ValueError("--table-margin must be non-negative")
+    if args.min_table_clearance < 0:
+        raise ValueError("--min-table-clearance must be non-negative")
     if args.waypoint_xy_noise < 0:
         raise ValueError("--waypoint-xy-noise must be non-negative")
     if args.waypoint_z_noise < 0:
@@ -1239,6 +1257,7 @@ def _collect_multimodal_episodes(
     waypoint_attempts: int,
     min_base_clearance: float,
     table_margin: float,
+    min_table_clearance: float,
     waypoint_xy_noise: float,
     waypoint_z_noise: float,
     lateral_z_offset: float,
@@ -1387,6 +1406,7 @@ def _collect_multimodal_episodes(
             variants_per_reset=variants_per_reset,
             max_attempts=waypoint_attempts,
             min_base_clearance=min_base_clearance,
+            min_table_clearance=min_table_clearance,
             waypoint_xy_noise=waypoint_xy_noise,
             waypoint_z_noise=waypoint_z_noise,
             lateral_z_offset=lateral_z_offset,
@@ -1419,6 +1439,12 @@ def _collect_multimodal_episodes(
             flush=True,
         )
         return []
+
+    # Same table-floor reference used by generate_multimodal_waypoints' coarse
+    # through-point check -- recomputed here so the fine-grained replay check
+    # below (ground-truth simulated TCP height at every step, not just the raw
+    # waypoints) uses an identical threshold.
+    min_replay_table_clearance_z = float(robot_base_position[2]) + float(min_table_clearance)
 
     episodes: list[ReachEpisodeData] = []
     for variant in variants:
@@ -1468,6 +1494,7 @@ def _collect_multimodal_episodes(
             positions=variant["positions"],
             saliency_config=saliency_config,
             viewer_step_delay=viewer_step_delay,
+            min_table_clearance_z=min_replay_table_clearance_z,
             metadata={
                 "seed": seed,
                 "planner_status": variant["planner_status"],
@@ -1532,6 +1559,7 @@ def _replay_planned_positions_as_episode(
     saliency_config: PointCloudSaliencyConfig | None,
     metadata: dict[str, Any],
     viewer_step_delay: float = 0.0,
+    min_table_clearance_z: float | None = None,
 ) -> ReachEpisodeData | None:
     """Replay a planned joint trajectory and record dataset rows.
 
@@ -1546,6 +1574,17 @@ def _replay_planned_positions_as_episode(
     ``settle_steps``) until both conditions are met together, and hold only locks in
     once they are. ``goal_orientation_quat=None`` disables the rotation gate entirely
     (treated as always-satisfied) for callers that don't have a target orientation.
+
+    ``min_table_clearance_z`` (absolute world/base z, i.e. table_z + a clearance
+    margin -- see ``--min-table-clearance``) is a SECOND, redundant table-floor
+    check on top of ``generate_multimodal_waypoints``' coarse check against the
+    raw sampled through-points: here the actual ground-truth simulated TCP height
+    is read from the physics engine after every replayed step (not just the
+    handful of Cartesian waypoints that seeded the plan), so it also catches a
+    dip the motion planner introduced *between* two compliant waypoints. A
+    violation stops replay immediately and forces the episode's acceptance to
+    False (see ``accepted_success`` below), same discard path as any other
+    unsuccessful replay -- ``None`` disables this check entirely.
     """
     unwrapped = env.unwrapped
     rows: list[dict[str, np.ndarray]] = []
@@ -1559,6 +1598,9 @@ def _replay_planned_positions_as_episode(
     hold_qpos: np.ndarray | None = None  # qpos captured where success was first reached
     hold_steps_recorded = 0
     settle_steps_recorded = 0
+    table_clearance_violated = False
+    table_clearance_violation_step: int | None = None
+    min_tcp_z_seen: float | None = None
     goal_quat = (
         np.asarray(goal_orientation_quat, dtype=np.float32).reshape(4)
         if goal_orientation_quat is not None
@@ -1576,6 +1618,13 @@ def _replay_planned_positions_as_episode(
             rotation_error_deg = _quat_angular_distance_deg(actual_quat, goal_quat)
         combined_success = bool(env_success) and rotation_error_deg <= acceptance_success_rotation_deg
         return combined_success, distance, rotation_error_deg, bool(env_success)
+
+    def _check_table_clearance() -> bool:
+        """Update min-TCP-z tracking; return True iff this step violates the floor."""
+        nonlocal min_tcp_z_seen
+        tcp_z = float(_tcp_pose(unwrapped)[2])
+        min_tcp_z_seen = tcp_z if min_tcp_z_seen is None else min(min_tcp_z_seen, tcp_z)
+        return min_table_clearance_z is not None and tcp_z < min_table_clearance_z
 
     planned_step_limit = max(1, max_steps - settle_steps)
     for planned_qpos in positions[:planned_step_limit]:
@@ -1599,6 +1648,10 @@ def _replay_planned_positions_as_episode(
         distances.append(distance)
         rotation_errors_deg.append(rotation_error_deg)
         env_successes.append(env_success)
+        if _check_table_clearance():
+            table_clearance_violated = True
+            table_clearance_violation_step = len(rows)
+            break
         if success:
             first_success_step = len(rows)
             pre_hold_final_distance = distance
@@ -1614,6 +1667,7 @@ def _replay_planned_positions_as_episode(
     final_planned_qpos = positions[-1]
     while (
         first_success_step is None
+        and not table_clearance_violated
         and settle_steps_recorded < settle_steps
         and len(rows) < max_steps
     ):
@@ -1638,6 +1692,10 @@ def _replay_planned_positions_as_episode(
         rotation_errors_deg.append(rotation_error_deg)
         env_successes.append(env_success)
         settle_steps_recorded += 1
+        if _check_table_clearance():
+            table_clearance_violated = True
+            table_clearance_violation_step = len(rows)
+            break
         if success:
             first_success_step = len(rows)
             pre_hold_final_distance = distance
@@ -1649,6 +1707,7 @@ def _replay_planned_positions_as_episode(
 
     while (
         first_success_step is not None
+        and not table_clearance_violated
         and hold_steps_recorded < hold_steps
         and len(rows) < max_steps
     ):
@@ -1676,6 +1735,10 @@ def _replay_planned_positions_as_episode(
         rotation_errors_deg.append(rotation_error_deg)
         env_successes.append(env_success)
         hold_steps_recorded += 1
+        if _check_table_clearance():
+            table_clearance_violated = True
+            table_clearance_violation_step = len(rows)
+            break
         if _bool_any(truncated):
             break
 
@@ -1709,10 +1772,25 @@ def _replay_planned_positions_as_episode(
         pre_hold_final_rotation_error_deg = float(rotation_errors_deg[best_idx])
         successes[best_idx] = True
         rows[best_idx]["success"] = np.asarray(True, dtype=bool)
+    if table_clearance_violated:
+        # Overrides any position/rotation acceptance above -- a trajectory that
+        # dipped within min_table_clearance_z of the table gets discarded
+        # regardless of whether it still nominally reached the goal.
+        accepted_success = False
+        print(
+            f"[seed {metadata.get('seed')}] table clearance VIOLATED at replay step "
+            f"{table_clearance_violation_step} (min_tcp_z_seen={min_tcp_z_seen:.4f} "
+            f"< min_table_clearance_z={min_table_clearance_z:.4f}) -- discarding episode",
+            flush=True,
+        )
     metadata = {
         **metadata,
         "length": len(rows),
         "first_success_step": first_success_step,
+        "table_clearance_violated": table_clearance_violated,
+        "table_clearance_violation_step": table_clearance_violation_step,
+        "min_tcp_z_seen": min_tcp_z_seen,
+        "min_table_clearance_z": min_table_clearance_z,
         "hold_steps_requested": hold_steps,
         "hold_steps_recorded": hold_steps_recorded,
         "settle_steps_requested": settle_steps,
@@ -1754,6 +1832,7 @@ def generate_multimodal_waypoints(
     variants_per_reset: int,
     max_attempts: int,
     min_base_clearance: float,
+    min_table_clearance: float,
     waypoint_xy_noise: float,
     waypoint_z_noise: float,
     lateral_z_offset: float,
@@ -1782,6 +1861,25 @@ def generate_multimodal_waypoints(
     delta = goal - start
     distance = float(np.linalg.norm(delta))
     if distance < 1e-6:
+        return []
+
+    # Geometric table-floor check -- NOT a mesh-to-mesh physics collision check
+    # against the actual gripper/table collision meshes, just a cheap z-coordinate
+    # floor on the raw Cartesian points that make up a candidate trajectory (the
+    # start, every intermediate waypoint, and the goal), evaluated before the
+    # (expensive) motion planner ever runs. Table surface is at the same z as the
+    # robot base (see reach_config.py's "height above the base/table surface"
+    # convention) -- ROBOT_BASE_POSITION[2], passed in here as
+    # `robot_base_position[2]`.
+    table_z = float(np.asarray(robot_base_position, dtype=np.float64).reshape(3)[2])
+    min_allowed_z = table_z + float(min_table_clearance)
+    if start[2] < min_allowed_z or goal[2] < min_allowed_z:
+        print(
+            f"[seed {seed}] rejected: start/goal violates --min-table-clearance "
+            f"(table_z={table_z:.4f} min_allowed_z={min_allowed_z:.4f} "
+            f"start_z={start[2]:.4f} goal_z={goal[2]:.4f})",
+            flush=True,
+        )
         return []
 
     specs = _trajectory_variant_specs(variants_per_reset)
@@ -1903,6 +2001,7 @@ def generate_multimodal_waypoints(
             )
         selected_variant: dict[str, Any] | None = None
         geometry_candidates = 0
+        table_clearance_failures = 0
         planned_candidates = 0
         planner_failures = 0
         quality_candidates = 0
@@ -1942,6 +2041,22 @@ def generate_multimodal_waypoints(
                     )
                 continue
             geometry_candidates += 1
+
+            lowest_waypoint_z = min(float(waypoint[2]) for waypoint in waypoints)
+            if lowest_waypoint_z < min_allowed_z:
+                table_clearance_failures += 1
+                if attempt_idx % progress_interval == 0 or attempt_idx == max_attempts:
+                    print(
+                        f"[seed {seed}] family {spec.family_id}:{spec.name} "
+                        f"attempt {attempt_idx}/{max_attempts}: "
+                        f"geometry_ok={geometry_candidates} "
+                        f"table_clearance_fail={table_clearance_failures} "
+                        f"planner_ok={planned_candidates} planner_fail={planner_failures} quality_ok={quality_candidates} "
+                        f"resampled_long={resampled_long_candidates} raw_too_long={raw_too_long_candidates} "
+                        f"lowest_waypoint_z={lowest_waypoint_z:.4f} min_allowed_z={min_allowed_z:.4f}",
+                        flush=True,
+                    )
+                continue
 
             if randomize_start_goal_orientation:
                 waypoint_poses = [

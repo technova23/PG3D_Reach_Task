@@ -142,28 +142,39 @@ XARM7_REACH_WORKSPACE_BOUNDS = world_bounds(XARM7_REACH_BOX_BASE)
 XARM7_WORKSPACE_BOUNDS = world_bounds(XARM7_CROP_BOX_BASE)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Camera extrinsics — eye-to-hand calibration (AX = XB), 6 samples.
-# RMS reprojection: 9.5284 mm translation, 1.4328° rotation (see
-# eye_to_hand_custom.py "FINAL RESULT: Base to Camera Transformation" output).
+# Camera extrinsics — eye-on-base calibration, `xarm_rs_on_base_calibration`
+# (`calibration_type: eye_on_base`, `tracking_base_frame: camera_color_optical_frame`).
+# Source calibration gives translation + a ROS/geometry_msgs quaternion
+# (x, y, z, w — scalar LAST) for base -> camera_color_optical_frame, i.e. the
+# same "camera pose in robot base frame, OpenCV/pinhole optical convention"
+# semantics as the calibration this replaced, just quaternion-encoded instead
+# of matrix-encoded. Converted to `XARM7_CAM_R_BASE_OPENCV` below via
+# `Rotation.from_quat([x, y, z, w])` (scipy's own default input order already
+# matches ROS's scalar-last order, so no reindex is needed on the way in --
+# only the SAPIEN-side wxyz reindex further down is needed). Raw quaternion
+# norm was 1.0000471 (not exactly unit) -- normalized before conversion.
 #
-# "Base to Camera" output from the calibration script = camera pose expressed
-# in robot base frame, OpenCV/pinhole optical convention (z-forward, y-down,
-# x-right — this is what cv2 hand-eye solvers produce).
+# NOTE: this calibration did not come with an RMS reprojection error report
+# (unlike the previous one, which had 9.5284mm / 1.4328deg from
+# eye_to_hand_custom.py) -- XARM7_CAM_CALIB_ERROR_TRANSLATION_STD_M/
+# ROTATION_STD_DEG below are still the OLD calibration's measured RMS values
+# and should be re-measured/updated once this camera has its own error report.
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Camera origin in robot base frame [m].
-XARM7_CAM_T_BASE = np.array([1.7103, 0.0043, 0.7097], dtype=np.float64)
+XARM7_CAM_T_BASE = np.array(
+    [1.0795605013716922, -0.6623893074061149, 0.42449609765716245], dtype=np.float64
+)
 
 # Rotation matrix: each COLUMN is an OpenCV-optical-frame camera axis expressed
-# in the robot base frame (this is the raw calibration script output).
-#   col 0 = camera +x (right)   ≈ base +y
-#   col 1 = camera +y (down)    ≈ base -z
-#   col 2 = camera +z (optical/forward) ≈ base -x
+# in the robot base frame. Derived from the calibration's raw quaternion
+# (x, y, z, w) = (-0.7159689816418976, -0.2618685692246198, 0.3499625258496742,
+# 0.5444572899362736) via `Rotation.from_quat(...).as_matrix()` (normalized first).
 XARM7_CAM_R_BASE_OPENCV = np.array(
     [
-        [ 0.0534,  0.0868, -0.9948],
-        [ 0.9985, -0.0156,  0.0522],
-        [-0.0110, -0.9961, -0.0875],
+        [ 0.617938, -0.006099, -0.786203],
+        [ 0.755988, -0.270051,  0.596284],
+        [-0.215952, -0.962827, -0.162264],
     ],
     dtype=np.float64,
 )
