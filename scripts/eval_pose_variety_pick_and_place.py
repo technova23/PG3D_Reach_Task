@@ -40,15 +40,21 @@ Design, mirroring eval_pose_variety_checkpoint_reachability.py's structure:
   own independent random approach orientation (--place-orientation-cone-deg).
   This is the "sample another random point as goal, and some random
   orientation" for the place step.
-* Robot START orientation is fixed straight-down by default (the natural
-  rest approach) -- pass --randomize-start-orientation to vary it too. This
-  IS the "keep an option that the start pose should be downwards" CLI
-  requirement: down is the DEFAULT, randomizing is opt-in.
-* Every (start, grasp, place) pose is IK-verified with mplib (ground truth)
-  before any policy rollout is attempted, exactly like the reach eval: each
-  pose individually reachable AND both start->grasp and grasp->place
-  inter-feasible (a collision-free plan actually connects them), or the
-  episode is skipped and counted, never silently dropped.
+* Robot START is always the env's own fixed rest configuration
+  (``agent.keyframes["rest"].qpos``, gripper facing straight down) -- the
+  SAME configuration every episode resets to, not a separately sampled
+  Cartesian pose. "From its natural position facing downwards, the robot
+  must be able to go towards the cube and pick it up."
+* Every (grasp, place) pose is IK-verified with mplib (ground truth) before
+  any policy rollout is attempted, exactly like the reach eval: each pose
+  individually reachable AND both rest->grasp and grasp->place inter-feasible
+  (a collision-free plan actually connects them), or the episode is skipped
+  and counted, never silently dropped.
+* Markers: start_site (red) sits at the cube -- there's no separate start
+  pose left to mark, so it's repurposed as "what's being picked up".
+  goal_site (green) tracks whichever target is currently active: the grasp
+  pose during the pick phase, the place pose (== the place_site landing-zone
+  cylinder's own position) during the place phase.
 * PICK phase: rejection-free reranking (K candidate DP3 action chunks per
   replan, scored by imagined-rollout distance to a CartesianPoseConstraint at
   the grasp pose, lowest cost executed), gripper held OPEN via
@@ -95,7 +101,6 @@ import numpy as np
 
 from pg3d.utils.arrays import to_numpy as _to_numpy
 from scripts.eval_pose_variety_checkpoint_reachability import (
-    _DOWN_QUAT_WXYZ,
     _build_ik_env_and_planner,
     _orientation_variety_stats_deg,
     _quat_angular_distance_rad,
@@ -131,7 +136,7 @@ def _sample_cube_position(
     return rng.uniform(bounds[:, 0], bounds[:, 1]).astype(np.float32)
 
 
-def _sample_start_position(
+def _sample_place_position(
     rng: np.random.Generator,
     *,
     bounds_world: np.ndarray,
@@ -139,14 +144,7 @@ def _sample_start_position(
     min_distance: float,
     resample_attempts: int,
 ) -> np.ndarray:
-    """Sample a genuinely separate start position, >= min_distance from `reference`.
-
-    Mirrors eval_pose_variety_checkpoint_reachability._sample_workspace_pair's
-    intent: "start" is a real, distinct Cartesian pose elsewhere in the
-    workspace the robot must transit FROM, not the grasp position itself --
-    you cannot resolve two different orientations (start vs. grasp) as
-    separate IK-feasible poses at the exact same point.
-    """
+    """Sample a place position, >= min_distance from `reference` (the cube)."""
     bounds = np.asarray(bounds_world, dtype=np.float32).reshape(3, 2)
     best = None
     for _ in range(max(resample_attempts, 1)):
@@ -157,16 +155,21 @@ def _sample_start_position(
     return best
 
 
-def _sync_pick_markers(sim_env: Any, *, start_pos: np.ndarray, grasp_pos: np.ndarray) -> None:
-    """Point start_site (red) at the resolved start, goal_site (green) at the grasp pose.
+def _sync_pick_markers(sim_env: Any, *, marker_pos: np.ndarray, target_pos: np.ndarray) -> None:
+    """Point start_site (red) near the cube, goal_site (green) at the current target.
 
-    goal_site is NOT cosmetic here either -- same as
-    eval_pose_variety_checkpoint_reachability._sync_pose_variety_markers, its
-    pose is what PG3DReachEnv._get_obs_extra exposes as the policy's actual
-    goal-conditioning signal.
+    start_site is now purely informational -- the robot's actual start is
+    always its fixed rest configuration (see main()'s use of rest_qpos), not
+    a separate sampled Cartesian pose, so there is no longer a meaningful
+    "start position" to mark. Repurposed to sit at/near the cube instead, so
+    the video makes clear what's being picked up. goal_site is NOT cosmetic:
+    same as eval_pose_variety_checkpoint_reachability._sync_pose_variety_markers,
+    its pose is what PG3DReachEnv._get_obs_extra exposes as the policy's
+    actual goal-conditioning signal -- grasp_position during the pick phase,
+    place_position (== the place_site cylinder's own position) during place.
     """
-    _set_site_pose(sim_env, "start_site", start_pos)
-    _set_site_pose(sim_env, "goal_site", grasp_pos)
+    _set_site_pose(sim_env, "start_site", marker_pos)
+    _set_site_pose(sim_env, "goal_site", target_pos)
     update_render = getattr(sim_env.unwrapped.scene, "update_render", None)
     if callable(update_render):
         update_render()
@@ -185,7 +188,6 @@ def main(argv: list[str] | None = None) -> int:
         _refresh_obs_after_manual_qpos,
         _resolve_reachable_orientation,
         _sample_broad_orientation_sapien,
-        _set_robot_qpos,
         _tcp_pose,
     )
     from pg3d.constraints import CartesianPoseConstraint
@@ -398,20 +400,14 @@ def main(argv: list[str] | None = None) -> int:
     place_bounds[2, 0] = place_target_z
     place_bounds[2, 1] = place_target_z
 
-    # START position is a genuinely SEPARATE Cartesian pose the robot must
-    # transit FROM (see _sample_start_position) -- its own height range,
-    # independent of the cube's fixed table-surface Z.
-    start_bounds = base_bounds.copy()
-    start_bounds[2, 0] = base_z_offset + args.start_min_height
-    start_bounds[2, 1] = base_z_offset + args.start_max_height
-
     print(
         f"cube rests at world Z={cube_rest_z:.3f} (table Z={table_z:.3f} + "
         f"cube_half_size={args.cube_half_size}); grasp target Z={grasp_target_z:.3f} "
         f"(+ --grasp-height-offset={args.grasp_height_offset}); "
         f"place target Z={place_target_z:.3f} (+ --place-height-offset="
         f"{args.place_height_offset}), place radius={args.place_radius}m; "
-        f"start height range Z={start_bounds[2, 0]:.3f} to {start_bounds[2, 1]:.3f}"
+        f"start = robot's fixed rest configuration (rest_qpos, facing down) -- "
+        f"NOT a separately sampled Cartesian pose (see main()'s design note)"
     )
 
     if args.video_dir is not None:
@@ -433,37 +429,19 @@ def main(argv: list[str] | None = None) -> int:
             cube_center = _sample_cube_position(rng, bounds_world=cube_bounds)
             grasp_position = cube_center.copy()
             grasp_position[2] = grasp_target_z
-            place_position = _sample_start_position(
+            place_position = _sample_place_position(
                 rng,
                 bounds_world=place_bounds,
                 reference=grasp_position,
                 min_distance=args.min_grasp_place_distance,
                 resample_attempts=args.position_resample_attempts,
             )
-            start_position = _sample_start_position(
-                rng,
-                bounds_world=start_bounds,
-                reference=grasp_position,
-                min_distance=args.min_start_grasp_distance,
-                resample_attempts=args.position_resample_attempts,
-            )
             print(
                 f"\n=== cube position {pos_idx:02d} — center={cube_center.tolist()} "
-                f"start={start_position.tolist()} place={place_position.tolist()} ==="
+                f"place={place_position.tolist()} "
+                f"(robot starts every episode from its fixed rest pose) ==="
             )
 
-            start_pool = (
-                [_DOWN_QUAT_WXYZ.copy() for _ in range(args.episodes_per_position)]
-                if not args.randomize_start_orientation
-                else _farthest_point_select_orientations(
-                    [
-                        _sample_broad_orientation_sapien(rng, cone_deg=args.orientation_cone_deg)
-                        for _ in range(max(args.episodes_per_position * 4, 12))
-                    ],
-                    k=args.episodes_per_position,
-                    rng=rng,
-                )
-            )
             grasp_pool = _farthest_point_select_orientations(
                 [
                     _sample_broad_orientation_sapien(rng, cone_deg=args.orientation_cone_deg)
@@ -511,7 +489,6 @@ def main(argv: list[str] | None = None) -> int:
                 resolved: dict[str, tuple[np.ndarray, np.ndarray]] = {}
                 failure_label: str | None = None
                 for label, position, primary_quat, cone_deg in (
-                    ("start", start_position, start_pool[episode_idx], args.orientation_cone_deg),
                     ("grasp", grasp_position, grasp_pool[episode_idx], args.orientation_cone_deg),
                     ("place", place_position, place_pool[episode_idx], args.place_orientation_cone_deg),
                 ):
@@ -539,7 +516,6 @@ def main(argv: list[str] | None = None) -> int:
                     "episode": episode_idx,
                     "cube_center": cube_center.tolist(),
                     "grasp_position": grasp_position.tolist(),
-                    "start_position": start_position.tolist(),
                     "place_position": place_position.tolist(),
                 }
                 if failure_label is not None:
@@ -550,18 +526,21 @@ def main(argv: list[str] | None = None) -> int:
                     all_rows.append(row)
                     continue
 
-                start_qpos, start_quat = resolved["start"]
                 grasp_quat = resolved["grasp"][1]
                 place_quat = resolved["place"][1]
-                row["start_quat"] = start_quat.tolist()
                 row["grasp_quat"] = grasp_quat.tolist()
                 row["place_quat"] = place_quat.tolist()
 
+                # "From its natural rest position facing downwards, the robot
+                # must be able to go towards the cube and pick it up" -- verify
+                # a collision-free plan exists from rest_qpos (the SAME fixed
+                # configuration every episode resets to) to the grasp pose,
+                # rather than from a separately sampled/resolved start pose.
                 inter_feasible_plan = _plan_multisegment_trajectory(
                     planner=planner,
                     env=ik_env,
                     poses=[_pose_with_orientation(sapien, position=grasp_position, quat=grasp_quat)],
-                    start_qpos=start_qpos,
+                    start_qpos=rest_qpos,
                     suppress_planner_output=True,
                     smooth_trajectory=True,
                 )
@@ -570,9 +549,8 @@ def main(argv: list[str] | None = None) -> int:
                     pos_counts["motion_plan_infeasible"] += 1
                     row["outcome"] = "motion_plan_infeasible"
                     print(
-                        f"  [ep {episode_idx}] SKIP — start and grasp pose each "
-                        "individually IK-reachable, but no collision-free plan connects "
-                        "them (not inter-feasible)"
+                        f"  [ep {episode_idx}] SKIP — grasp pose is IK-reachable, but no "
+                        "collision-free plan connects it from the robot's rest pose"
                     )
                     all_rows.append(row)
                     continue
@@ -609,19 +587,22 @@ def main(argv: list[str] | None = None) -> int:
                     all_rows.append(row)
                     continue
                 print(
-                    f"  [ep {episode_idx}] reachable and inter-feasible — proceeding. "
-                    f"tilt-from-down: start={_tilt_from_down_deg(start_quat):.0f}deg "
-                    f"grasp={_tilt_from_down_deg(grasp_quat):.0f}deg "
+                    f"  [ep {episode_idx}] reachable and inter-feasible from rest — proceeding. "
+                    f"tilt-from-down: grasp={_tilt_from_down_deg(grasp_quat):.0f}deg "
                     f"place={_tilt_from_down_deg(place_quat):.0f}deg"
                 )
 
+                # No explicit qpos override here -- PG3DReachXArm7Env._initialize_episode
+                # already resets the robot to its own agent.keyframes["rest"].qpos on
+                # every reset (see reach_env.py), which is the exact same rest_qpos
+                # this episode was just IK-verified from. "The robot's natural
+                # position facing downwards" IS the env's own default reset state.
                 _reset_obs, reset_info = sim_env.reset(
                     seed=args.seed + pos_idx * 1000 + episode_idx, options={"reconfigure": True}
                 )
-                _set_robot_qpos(sim_env, start_qpos)
                 set_cube_pose(sim_env, cube_center)
                 _set_site_pose(sim_env, "place_site", place_position)
-                _sync_pick_markers(sim_env, start_pos=start_position, grasp_pos=grasp_position)
+                _sync_pick_markers(sim_env, marker_pos=cube_center, target_pos=grasp_position)
                 sim_obs, sim_info = _refresh_obs_after_manual_qpos(
                     sim_env, info=reset_info, gripper_open=args.gripper_open_value
                 )
@@ -690,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         save_video(video_path, frames, fps=args.video_fps)
                         row["video"] = str(video_path)
+                        print(f"  [ep {episode_idx}] outcome={row['outcome']}  video: {video_path}")
                     continue
 
                 counts["reach_reached"] += 1
@@ -701,9 +683,21 @@ def main(argv: list[str] | None = None) -> int:
                 current_qpos = np.asarray(
                     sim_env.unwrapped.agent.robot.get_qpos()
                 ).reshape(-1)[:7]
-                for _ in range(args.close_steps):
+                # Ramp the gripper command gradually from open to fully closed
+                # over --close-steps, rather than snapping straight to
+                # --gripper-close-value on step 1. Commanding the full closed
+                # target immediately -- against this gripper's very stiff PD
+                # controller (stiffness=1e5, see XArm7Gripper in agents.py) --
+                # was slamming shut and popping the cube out from the sudden
+                # contact impulse ("squeezing it out") instead of settling
+                # into a stable grip around it.
+                for close_step in range(args.close_steps):
+                    close_frac = (close_step + 1) / float(args.close_steps)
+                    gripper_value = args.gripper_open_value + close_frac * (
+                        args.gripper_close_value - args.gripper_open_value
+                    )
                     close_action = _hold_sim_action(
-                        sim_env, gripper_open=args.gripper_close_value, qpos=current_qpos
+                        sim_env, gripper_open=gripper_value, qpos=current_qpos
                     )
                     sim_obs, _reward, _terminated, truncated, sim_info = sim_env.step(close_action)
                     frames.append(frame_to_numpy(sim_env.render()))
@@ -778,6 +772,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         save_video(video_path, frames, fps=args.video_fps)
                         row["video"] = str(video_path)
+                        print(f"  [ep {episode_idx}] outcome={row['outcome']}  video: {video_path}")
                     all_rows.append(row)
                     continue
 
@@ -789,7 +784,7 @@ def main(argv: list[str] | None = None) -> int:
                 # phase -- then re-read the observation before starting the
                 # reach loop, since sim_entry/obs_window are still stale from
                 # the last close/lift step (which didn't touch goal_site).
-                _sync_pick_markers(sim_env, start_pos=start_position, grasp_pos=place_position)
+                _sync_pick_markers(sim_env, marker_pos=cube_center, target_pos=place_position)
                 sim_obs, sim_info = _refresh_obs_after_manual_qpos(
                     sim_env, info=sim_info, gripper_open=args.gripper_close_value
                 )
@@ -894,6 +889,7 @@ def main(argv: list[str] | None = None) -> int:
                     video_path = args.video_dir / f"pos_{pos_idx:02d}_episode_{episode_idx:02d}.mp4"
                     save_video(video_path, frames, fps=args.video_fps)
                     row["video"] = str(video_path)
+                    print(f"  [ep {episode_idx}] outcome={row['outcome']}  video: {video_path}")
 
                 all_rows.append(row)
 
@@ -989,18 +985,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--extra-orientation-attempts", type=int, default=3)
     p.add_argument(
-        "--randomize-start-orientation",
-        action="store_true",
-        default=False,
-        help=(
-            "By default the robot START orientation is fixed straight-down -- the "
-            "requested 'keep an option that the start pose should be downwards' CLI "
-            "flag is this being the DEFAULT. Pass this flag to instead randomize "
-            "start orientation too (within --orientation-cone-deg), testing whether "
-            "the checkpoint can pick up the cube starting from an arbitrary pose."
-        ),
-    )
-    p.add_argument(
         "--cube-half-size",
         type=float,
         default=0.02,
@@ -1068,28 +1052,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=10,
         help="Settle steps holding the place-converged (or place-timed-out) qpos "
         "while the gripper opens to release the cube.",
-    )
-    p.add_argument(
-        "--start-min-height",
-        type=float,
-        default=0.10,
-        help="Minimum START position height (m) above the table -- the robot's own "
-        "'ready' pose it must transit from, independent of the cube's (fixed, "
-        "table-surface) height.",
-    )
-    p.add_argument(
-        "--start-max-height",
-        type=float,
-        default=0.25,
-        help="Maximum START position height (m) above the table.",
-    )
-    p.add_argument(
-        "--min-start-grasp-distance",
-        type=float,
-        default=0.15,
-        help="Minimum required separation (m) between the sampled start position "
-        "and the grasp position -- ensures a genuine transit is being tested, not "
-        "a start pose that's already at the cube.",
     )
     p.add_argument("--position-resample-attempts", type=int, default=1)
     p.add_argument("--position-tolerance", type=float, default=0.02)
@@ -1167,12 +1129,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--place-max-steps must be positive")
     if args.release_steps < 0:
         raise ValueError("--release-steps must be non-negative")
-    if args.start_min_height < 0.0:
-        raise ValueError("--start-min-height must be non-negative")
-    if args.start_max_height <= args.start_min_height:
-        raise ValueError("--start-max-height must be greater than --start-min-height")
-    if args.min_start_grasp_distance < 0.0:
-        raise ValueError("--min-start-grasp-distance must be non-negative")
     if args.position_resample_attempts <= 0:
         raise ValueError("--position-resample-attempts must be positive")
     if args.position_tolerance < 0.0 or args.rotation_tolerance < 0.0:
