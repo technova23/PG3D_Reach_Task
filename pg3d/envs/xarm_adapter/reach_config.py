@@ -230,9 +230,24 @@ XARM7_CAM_Q_WXYZ = np.asarray(
 # Real resolution: 848 × 480 px.  Depth FOV: 87° (H) × 58° (V).
 # Depth range: 0.4 m – 6 m.
 #
-# Sim uses 128 × 128 to match Panda data-gen speed; FOV is matched to real.
-# Increase SIM_CAM_WIDTH/HEIGHT to 424 × 240 (half-res) or 848 × 480 (full)
-# if higher point-cloud density is needed.
+# ManiSkill's CameraConfig.fov is passed straight through as `fovy` (VERTICAL
+# FOV only) -- confirmed against mani_skill/sensors/camera.py. A square sim
+# render (previously 128x128) therefore gets hfov == vfov == 58 deg, 29 deg
+# narrower than the real 87 deg horizontal -- harmless with the old camera
+# (1.34m back, on-axis, 100% of the reach workspace inside frustum either way)
+# but NOT with the current eye_on_base calibration, which sits 0.93m out and
+# well off-axis: the narrow horizontal field measurably clips the workspace
+# (verified 2026-09-04: 97.70% of XARM7_REACH_BOX_BASE inside frustum at
+# 128x128 vs 99.95% at the real camera's true 87x58 FOV -- a gap that exists
+# purely from the aspect mismatch, not the calibration itself).
+#
+# Sim resolution below (164x96) is chosen to reproduce the real camera's
+# aspect ratio at fovy=58deg: aspect = tan(87/2)/tan(58/2) = 1.712, and
+# 164/96 = 1.708 lands within 0.2 deg of the true 87 deg horizontal FOV
+# (86.88 deg) at essentially the old 128x128 point budget (15744 vs 16384
+# raw points/frame) -- i.e. same render cost, sim frustum now matches real.
+# Increase further (e.g. 212x120, true 848x480 aspect) if higher point-cloud
+# density is needed.
 # ──────────────────────────────────────────────────────────────────────────────
 XARM7_REAL_CAM_WIDTH = 848
 XARM7_REAL_CAM_HEIGHT = 480
@@ -240,6 +255,8 @@ XARM7_CAM_HFOV_DEG = 87.0
 XARM7_CAM_VFOV_DEG = 58.0
 XARM7_CAM_VFOV_RAD: float = float(np.deg2rad(XARM7_CAM_VFOV_DEG))
 
-# Sim render resolution (speed vs. density trade-off).
-XARM7_SIM_CAM_WIDTH = 128
-XARM7_SIM_CAM_HEIGHT = 128
+# Sim render resolution (speed vs. density trade-off). Aspect matched to the
+# real camera's 87x58 FOV at fovy=58deg -- see note above. Was 128x128
+# (square, hfov=58deg only) before the 2026-09-04 aspect fix.
+XARM7_SIM_CAM_WIDTH = 164
+XARM7_SIM_CAM_HEIGHT = 96
