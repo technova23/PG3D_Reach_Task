@@ -75,16 +75,36 @@ class PG3DPickXArm7GripperEnv(PG3DReachXArm7GripperEnv):
 
     def _load_scene(self, options: dict[str, Any]) -> None:
         super()._load_scene(options)
-        # Rest pose is overwritten every episode in _initialize_episode below;
-        # this initial_pose only matters for the very first scene build.
-        self.cube = actors.build_cube(
-            self.scene,
-            half_size=self.cube_half_size,
-            color=[0.85, 0.15, 0.15, 1.0],
-            name="pick_cube",
-            body_type="dynamic",
-            initial_pose=sapien.Pose(p=[0.4, 0.0, self.cube_half_size]),
+        # Built manually (not via actors.build_cube) because that helper does
+        # not expose a physics material -- confirmed against ManiSkill's own
+        # source, where build_cube/build_box call add_box_collision with NO
+        # material at all, silently falling back to SAPIEN's default friction
+        # (too low to hold a small object once actually gripped: closing the
+        # jaws was ejecting the cube sideways rather than griping it -- see
+        # the pick-and-place eval's own observed videos). Mirrors ManiSkill's
+        # own build_colorful_cube -- the one cube-builder in their codebase
+        # that IS meant to be grasped -- exactly: same high-friction
+        # PhysxMaterial (static=5, dynamic=3, restitution=0) and the same
+        # explicit light mass (0.1kg; a solid cube this size would otherwise
+        # default to a much heavier density-derived mass, harder to lift
+        # cleanly). Rest pose is overwritten every episode in
+        # _initialize_episode below; this initial_pose only matters for the
+        # very first scene build.
+        cube_builder = self.scene.create_actor_builder()
+        cube_material = sapien.pysapien.physx.PhysxMaterial(
+            static_friction=5.0, dynamic_friction=3.0, restitution=0.0
         )
+        cube_builder.add_box_collision(
+            half_size=[self.cube_half_size] * 3,
+            material=cube_material,
+            density=1000.0,
+        )
+        cube_builder.add_box_visual(
+            half_size=[self.cube_half_size] * 3,
+            material=sapien.render.RenderMaterial(base_color=[0.85, 0.15, 0.15, 1.0]),
+        )
+        cube_builder.set_initial_pose(sapien.Pose(p=[0.4, 0.0, self.cube_half_size]))
+        self.cube = cube_builder.build(name="pick_cube")
         # Place-target landing zone: a thin, flat, kinematic disk resting on
         # the table (no collision -- purely a visual/goal marker, same as
         # start_site/goal_site; actual place SUCCESS is checked numerically

@@ -243,6 +243,25 @@ class XArm7Gripper(BaseAgent):
     agent_pos_joint_indices = list(range(7))
     urdf_path = _XARM7_GRIPPER_COLORED_URDF
 
+    # Friction material on the actual contact surfaces (left_finger/right_finger,
+    # the two links with real collision geometry -- see the URDF) so a closed
+    # grasp can actually hold something. Never set previously because this
+    # agent was reach-only (gripper held at a fixed pose the whole episode,
+    # never actually closed on an object) -- mirrors XArm7Robotiq's identical
+    # urdf_config pattern below, added there for the same reason. Without
+    # this, SAPIEN's default (much lower) friction let a closing grasp eject
+    # a small cube sideways instead of holding it (confirmed via
+    # scripts/eval_pose_variety_pick_and_place.py's own recorded videos).
+    urdf_config = dict(
+        _materials=dict(
+            gripper=dict(static_friction=2.0, dynamic_friction=2.0, restitution=0.0)
+        ),
+        link=dict(
+            left_finger=dict(material="gripper", patch_radius=0.1, min_patch_radius=0.1),
+            right_finger=dict(material="gripper", patch_radius=0.1, min_patch_radius=0.1),
+        ),
+    )
+
     # drive_joint is the sole actuated gripper DOF; the other 5 are followers that
     # mimic it 1:1 (see the URDF's own <mimic joint="drive_joint" .../> tags) --
     # the inner knuckles are the redundant broken-loop links and wander/jam if left
