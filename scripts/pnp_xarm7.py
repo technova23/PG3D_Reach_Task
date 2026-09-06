@@ -359,107 +359,140 @@ def run_tune_gripper(args: argparse.Namespace) -> int:
 
     baseline_force = XArm7Gripper.gripper_force_limit
     baseline_stiffness = XArm7Gripper.gripper_stiffness
+    baseline_damping = XArm7Gripper.gripper_damping
     print(
         f"baseline XArm7Gripper: force_limit={baseline_force} "
-        f"stiffness={baseline_stiffness} damping={XArm7Gripper.gripper_damping}"
-    )
-    print(
-        f"sweeping force_limit over {args.force_limits} "
-        f"x stiffness {args.stiffnesses or [baseline_stiffness]}  "
-        f"({args.trials} trials each, cube edge {args.cube_edge * 100:.0f}cm)\n"
+        f"stiffness={baseline_stiffness} damping={baseline_damping}"
     )
 
     stiffness_values = args.stiffnesses or [baseline_stiffness]
+    damping_values = args.dampings or [baseline_damping]
+    grid_size = len(args.force_limits) * len(stiffness_values) * len(damping_values)
+    print(
+        f"sweeping force_limit over {args.force_limits} "
+        f"x stiffness {stiffness_values} "
+        f"x damping {damping_values}  "
+        f"({grid_size} configs x {args.trials} trials, cube edge {args.cube_edge * 100:.0f}cm)\n"
+    )
+
     results: list[dict[str, Any]] = []
     geometry_reported = False
+    geometry_warned = False
 
     try:
-        for stiffness in stiffness_values:
-            for force_limit in args.force_limits:
-                # These are class attributes read when the agent builds its
-                # controller configs, so they MUST be set before gym.make --
-                # mutating them on a live env would have no effect.
-                XArm7Gripper.gripper_force_limit = force_limit
-                XArm7Gripper.gripper_stiffness = stiffness
+        for damping in damping_values:
+            for stiffness in stiffness_values:
+                for force_limit in args.force_limits:
+                    # These are class attributes read when the agent builds
+                    # its controller configs, so they MUST be set before
+                    # gym.make -- mutating them on a live env has no effect.
+                    XArm7Gripper.gripper_force_limit = force_limit
+                    XArm7Gripper.gripper_stiffness = stiffness
+                    XArm7Gripper.gripper_damping = damping
 
-                env = gym.make(
-                    "PG3DPnP-XArm7-Gripper-v0",
-                    render_mode="rgb_array",
-                    obs_mode="state",
-                    cube_edge=args.cube_edge,
-                    spawn_margin=args.spawn_margin,
-                    min_object_separation=args.min_object_separation,
-                )
-                trials: list[dict[str, Any]] = []
-                try:
-                    for trial_idx in range(args.trials):
-                        env.reset(seed=args.seed + trial_idx)
-                        if not geometry_reported:
-                            # Measured once, at reset, with the gripper at its
-                            # rest (closed) keyframe -- then again after the
-                            # first trial's open command inside the trial.
-                            print(
-                                f"finger separation at rest/closed keyframe: "
-                                f"{_finger_separation(env):.4f}m"
+                    env = gym.make(
+                        "PG3DPnP-XArm7-Gripper-v0",
+                        render_mode="rgb_array",
+                        obs_mode="state",
+                        cube_edge=args.cube_edge,
+                        spawn_margin=args.spawn_margin,
+                        min_object_separation=args.min_object_separation,
+                    )
+                    trials: list[dict[str, Any]] = []
+                    try:
+                        for trial_idx in range(args.trials):
+                            env.reset(seed=args.seed + trial_idx)
+                            if not geometry_reported:
+                                # Measured once, at reset, with the gripper at
+                                # its rest keyframe -- then again after the
+                                # first trial's close command inside the trial.
+                                rest_gap = _finger_separation(env)
+                                print(
+                                    f"finger separation at rest keyframe: {rest_gap:.4f}m "
+                                    f"vs cube edge {args.cube_edge:.3f}m"
+                                )
+                                if rest_gap < args.cube_edge:
+                                    geometry_warned = True
+                                    print(
+                                        f"  *** WARNING: the jaws' rest opening "
+                                        f"({rest_gap * 100:.1f}cm) is NARROWER than "
+                                        f"the cube ({args.cube_edge * 100:.0f}cm). The "
+                                        "gripper physically cannot take this cube "
+                                        "between its fingers -- force/stiffness "
+                                        "cannot fix that, only a smaller --cube-edge "
+                                        "or a wider gripper open-command/keyframe can. "
+                                        "Every result below is confounded by this "
+                                        "until it's resolved."
+                                    )
+                            record = (
+                                args.video_dir is not None and trial_idx == 0
                             )
-                        record = (
-                            args.video_dir is not None and trial_idx == 0
-                        )
-                        frames = [frame_to_numpy(env.render())] if record else None
-                        row = _scripted_grasp_trial(env, args=args, frames=frames)
-                        row["trial"] = trial_idx
-                        trials.append(row)
-                        if not geometry_reported:
-                            print(
-                                f"finger separation once closed on the cube: "
-                                f"{row.get('finger_separation_closed', float('nan')):.4f}m "
-                                f"(cube edge {args.cube_edge:.3f}m)"
-                            )
-                            geometry_reported = True
-                        if record and frames:
-                            args.video_dir.mkdir(parents=True, exist_ok=True)
-                            path = (
-                                args.video_dir
-                                / f"force{force_limit:g}_stiff{stiffness:g}.mp4"
-                            )
-                            save_video(path, frames, fps=args.video_fps)
-                            print(f"  video: {path}")
-                finally:
-                    env.close()
+                            frames = [frame_to_numpy(env.render())] if record else None
+                            row = _scripted_grasp_trial(env, args=args, frames=frames)
+                            row["trial"] = trial_idx
+                            trials.append(row)
+                            if not geometry_reported:
+                                print(
+                                    f"finger separation once closed on the cube: "
+                                    f"{row.get('finger_separation_closed', float('nan')):.4f}m "
+                                    f"(cube edge {args.cube_edge:.3f}m)"
+                                )
+                                geometry_reported = True
+                            if record and frames:
+                                args.video_dir.mkdir(parents=True, exist_ok=True)
+                                path = (
+                                    args.video_dir
+                                    / f"force{force_limit:g}_stiff{stiffness:g}_damp{damping:g}.mp4"
+                                )
+                                save_video(path, frames, fps=args.video_fps)
+                                print(f"  video: {path}")
+                    finally:
+                        env.close()
 
-                held = [t for t in trials if t["success"]]
-                lifts = [t["cube_lift"] for t in trials]
-                drifts = [t.get("approach_drift", 0.0) for t in trials]
-                summary = {
-                    "force_limit": force_limit,
-                    "stiffness": stiffness,
-                    "trials": len(trials),
-                    "held": len(held),
-                    "success_rate": len(held) / max(len(trials), 1),
-                    "mean_lift": float(np.mean(lifts)) if lifts else 0.0,
-                    "max_gripper_qvel": max(t["max_gripper_qvel"] for t in trials),
-                    "max_arm_qvel": max(t["max_arm_qvel"] for t in trials),
-                    "mean_approach_drift": float(np.mean(drifts)) if drifts else 0.0,
-                    "outcomes": {
-                        outcome: sum(1 for t in trials if t["outcome"] == outcome)
-                        for outcome in sorted({t["outcome"] for t in trials})
-                    },
-                    "episodes": trials,
-                }
-                results.append(summary)
-                flag = " UNSTABLE" if summary["max_gripper_qvel"] > args.qvel_warn else ""
-                print(
-                    f"  force={force_limit:<6g} stiff={stiffness:<8g} "
-                    f"held {summary['held']}/{summary['trials']} "
-                    f"({100 * summary['success_rate']:.0f}%)  "
-                    f"mean_lift={summary['mean_lift']:.4f}m  "
-                    f"max|qvel| gripper={summary['max_gripper_qvel']:.2f} "
-                    f"arm={summary['max_arm_qvel']:.2f}rad/s{flag}  "
-                    f"{summary['outcomes']}"
-                )
+                    held = [t for t in trials if t["success"]]
+                    lifts = [t["cube_lift"] for t in trials]
+                    drifts = [t.get("approach_drift", 0.0) for t in trials]
+                    summary = {
+                        "force_limit": force_limit,
+                        "stiffness": stiffness,
+                        "damping": damping,
+                        "trials": len(trials),
+                        "held": len(held),
+                        "success_rate": len(held) / max(len(trials), 1),
+                        "mean_lift": float(np.mean(lifts)) if lifts else 0.0,
+                        "max_gripper_qvel": max(t["max_gripper_qvel"] for t in trials),
+                        "max_arm_qvel": max(t["max_arm_qvel"] for t in trials),
+                        "mean_approach_drift": float(np.mean(drifts)) if drifts else 0.0,
+                        "outcomes": {
+                            outcome: sum(1 for t in trials if t["outcome"] == outcome)
+                            for outcome in sorted({t["outcome"] for t in trials})
+                        },
+                        "episodes": trials,
+                    }
+                    results.append(summary)
+                    flag = " UNSTABLE" if summary["max_gripper_qvel"] > args.qvel_warn else ""
+                    print(
+                        f"  force={force_limit:<6g} stiff={stiffness:<8g} "
+                        f"damp={damping:<6g} "
+                        f"held {summary['held']}/{summary['trials']} "
+                        f"({100 * summary['success_rate']:.0f}%)  "
+                        f"mean_lift={summary['mean_lift']:.4f}m  "
+                        f"max|qvel| gripper={summary['max_gripper_qvel']:.2f} "
+                        f"arm={summary['max_arm_qvel']:.2f}rad/s{flag}  "
+                        f"{summary['outcomes']}"
+                    )
     finally:
         XArm7Gripper.gripper_force_limit = baseline_force
         XArm7Gripper.gripper_stiffness = baseline_stiffness
+        XArm7Gripper.gripper_damping = baseline_damping
+
+    if geometry_warned:
+        print(
+            f"\n*** Every config above was run with the jaws unable to fit "
+            f"around a {args.cube_edge * 100:.0f}cm cube. Re-run with a "
+            "smaller --cube-edge (or fix the gripper's open keyframe/limits) "
+            "before trusting any force/stiffness/damping recommendation."
+        )
 
     print("\n── Sweep summary (sorted: most reliable, then most stable)")
     stable = [r for r in results if r["max_gripper_qvel"] <= args.qvel_warn]
@@ -470,6 +503,7 @@ def run_tune_gripper(args: argparse.Namespace) -> int:
     for r in ranked:
         print(
             f"   force_limit={r['force_limit']:<6g} stiffness={r['stiffness']:<8g} "
+            f"damping={r['damping']:<6g} "
             f"success={100 * r['success_rate']:5.1f}%  "
             f"max gripper |qvel|={r['max_gripper_qvel']:.2f} rad/s"
         )
@@ -484,6 +518,7 @@ def run_tune_gripper(args: argparse.Namespace) -> int:
         print(
             f"\n   -> best: gripper_force_limit = {best['force_limit']:g}"
             + (f", gripper_stiffness = {best['stiffness']:g}" if len(stiffness_values) > 1 else "")
+            + (f", gripper_damping = {best['damping']:g}" if len(damping_values) > 1 else "")
             + f"  ({100 * best['success_rate']:.0f}% held, "
             f"peak gripper |qvel| {best['max_gripper_qvel']:.2f} rad/s)"
         )
@@ -524,8 +559,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--cube-edge",
         type=float,
-        default=0.07,
-        help="Cube side length in metres (0.07 = the 7cm cube).",
+        default=0.04,
+        help="Cube side length in metres (0.04 = the 4cm cube; the original "
+        "7cm default was wider than the gripper's measured 5.47cm rest "
+        "opening -- see tune-gripper's finger-separation warning).",
     )
     p.add_argument(
         "--goal-marker-radius",
@@ -571,19 +608,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--force-limits",
         type=float,
         nargs="+",
-        default=[0.1, 5.0, 20.0, 50.0, 100.0],
-        help="tune-gripper: gripper_force_limit values to sweep. Includes 0.1 "
-        "(the long-standing untested default) as a control so the sweep shows "
-        "what it actually does rather than assuming.",
+        default=[0.05, 0.1, 0.2, 0.5, 1.0],
+        help="tune-gripper: gripper_force_limit values to sweep. Narrowed "
+        "around 0.1 -- an earlier wider sweep (0.1/5/20/50/100) found every "
+        "value above 0.1 drove the joint unstable (>100 rad/s) before even "
+        "reaching the cube, and 0.1 itself only held 40%%.",
     )
     p.add_argument(
         "--stiffnesses",
         type=float,
         nargs="+",
+        default=[100_000.0, 20_000.0, 5_000.0, 1_000.0, 200.0],
+        help="tune-gripper: gripper_stiffness values to cross with "
+        "--force-limits (full grid, not independent sweeps). Defaults to a "
+        "descending sweep from the current baseline (1e5): a PD spring that "
+        "stiff snapping onto rigid contact is a plausible cause of the "
+        "qvel blowups seen at every force_limit so far, independent of force. "
+        "Pass a single value to pin stiffness and sweep force alone.",
+    )
+    p.add_argument(
+        "--dampings",
+        type=float,
+        nargs="+",
         default=None,
-        help="tune-gripper: optional gripper_stiffness values to cross with "
-        "--force-limits. Defaults to leaving stiffness at its current value "
-        "(1-D sweep over force only).",
+        help="tune-gripper: optional gripper_damping values to cross in as a "
+        "third sweep axis. Defaults to leaving damping at its current value "
+        "-- add this only after force/stiffness narrow things down, the grid "
+        "size multiplies.",
     )
     p.add_argument(
         "--trials",
@@ -634,6 +685,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--force-limits must be non-negative")
     if args.stiffnesses is not None and any(s <= 0 for s in args.stiffnesses):
         raise ValueError("--stiffnesses must be positive")
+    if args.dampings is not None and any(d < 0 for d in args.dampings):
+        raise ValueError("--dampings must be non-negative")
     if args.pregrasp_height <= 0:
         raise ValueError("--pregrasp-height must be positive")
     if args.lift_height <= 0:

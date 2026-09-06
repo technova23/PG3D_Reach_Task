@@ -4,7 +4,8 @@ Deliberately a FRESH scene contract, not a variant of ``pick_env.py`` -- that
 one grew out of the reach eval and carries its start/goal-pair marker
 conventions with it. Here the scene is exactly two visible things:
 
-* a RED CUBE (``--cube-edge``, default 7cm on a side) -- a real dynamic
+* a RED CUBE (``--cube-edge``, default 4cm on a side -- the gripper's
+  measured ~5.47cm rest opening can't fit a wider cube) -- a real dynamic
   SAPIEN body with an explicit mass and a high-friction contact material, the
   object to be picked up;
 * a GREEN GOAL MARKER (the inherited ``goal_site`` sphere) -- where that cube
@@ -42,8 +43,12 @@ from pg3d.envs.maniskill_adapter.reach_config import REACH_TASK_SPECS
 from pg3d.envs.xarm_adapter.reach_config import XARM7_REACH_BOX_BASE
 from pg3d.envs.xarm_adapter.reach_env import PG3DReachXArm7GripperEnv, ROBOT_BASE_POSE
 
-# 7cm on a side -> 0.035 half-extent.
-DEFAULT_CUBE_EDGE = 0.07
+# 4cm on a side -> 0.02 half-extent. Was 7cm; the gripper's measured rest
+# opening is ~5.47cm (see scripts/pnp_xarm7.py's tune-gripper finger-
+# separation check), so a 7cm cube could never physically fit between the
+# jaws -- every force/stiffness sweep against it was measuring that
+# collision fight, not the gripper's actual clamp behaviour.
+DEFAULT_CUBE_EDGE = 0.04
 
 # Cube physics. Mass is set EXPLICITLY rather than left to density: a solid
 # 7cm box at water density would come out at ~0.34kg, which needs far more
