@@ -419,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
         "ik_failed": 0,
         "motion_plan_infeasible": 0,
         "reach_reached": 0,
+        "grasp_misaligned": 0,
         "pick_succeeded": 0,
         "place_succeeded": 0,
         "pick_and_place_succeeded": 0,
@@ -481,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ik_failed": 0,
                 "motion_plan_infeasible": 0,
                 "reach_reached": 0,
+                "grasp_misaligned": 0,
                 "pick_succeeded": 0,
                 "place_succeeded": 0,
                 "pick_and_place_succeeded": 0,
@@ -676,6 +678,44 @@ def main(argv: list[str] | None = None) -> int:
 
                 counts["reach_reached"] += 1
                 pos_counts["reach_reached"] += 1
+
+                # --- Pre-close alignment gate: verify the TCP is actually
+                # centered over the cube's LIVE position (not just within the
+                # reach constraint's tolerance on the pre-planned grasp target)
+                # before committing to a close. Rotation error amplifies at the
+                # fingertips -- they sit several cm from the TCP origin (see
+                # the URDF's left_finger/right_finger joint offsets) -- so even
+                # a reach that "converged" within --rotation-tolerance can
+                # still clip the cube off-center and knock it away instead of
+                # straddling it. This just makes that failure mode visible and
+                # skips the doomed close, rather than blindly attempting it.
+                tcp_at_convergence = _tcp_pose(sim_env.unwrapped)[:2]
+                cube_xy_at_convergence = _cube_world_position(sim_env)[:2]
+                grasp_centering_err = float(
+                    np.linalg.norm(tcp_at_convergence - cube_xy_at_convergence)
+                )
+                row["grasp_centering_err"] = grasp_centering_err
+                if grasp_centering_err > args.grasp_centering_tolerance:
+                    row["outcome"] = "grasp_misaligned"
+                    counts["grasp_misaligned"] += 1
+                    pos_counts["grasp_misaligned"] += 1
+                    print(
+                        f"  [ep {episode_idx}] SKIP close -- TCP is "
+                        f"{grasp_centering_err:.4f}m off the cube's actual XY "
+                        f"center at convergence (allowed <="
+                        f"{args.grasp_centering_tolerance}m); closing here would "
+                        "clip the cube off-center rather than grasp it"
+                    )
+                    if args.video_dir is not None:
+                        video_path = (
+                            args.video_dir
+                            / f"pos_{pos_idx:02d}_episode_{episode_idx:02d}_misaligned.mp4"
+                        )
+                        save_video(video_path, frames, fps=args.video_fps)
+                        row["video"] = str(video_path)
+                        print(f"  [ep {episode_idx}] outcome={row['outcome']}  video: {video_path}")
+                    all_rows.append(row)
+                    continue
 
                 # --- Hardcoded grasp: this checkpoint has no gripper output at all
                 # (see module docstring) -- close then lift are scripted, not policy.
@@ -923,6 +963,10 @@ def main(argv: list[str] | None = None) -> int:
         f"({100 * counts['reach_reached'] / max(attempted_total, 1):.1f}%)"
     )
     print(
+        f"   grasp misaligned (skipped): {counts['grasp_misaligned']}/{counts['reach_reached']} "
+        "(reach converged but TCP wasn't centered on the cube -- close was never attempted)"
+    )
+    print(
         f"   pick succeeded            : {counts['pick_succeeded']}/{attempted_total} "
         f"({100 * counts['pick_succeeded'] / max(attempted_total, 1):.1f}% of attempted)"
     )
@@ -1057,6 +1101,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--position-tolerance", type=float, default=0.02)
     p.add_argument("--rotation-tolerance", type=float, default=0.35, help="Radians.")
     p.add_argument(
+        "--grasp-centering-tolerance",
+        type=float,
+        default=0.012,
+        help="Max allowed XY distance (m) between the TCP and the cube's LIVE "
+        "position at reach convergence, checked right before committing to the "
+        "close. A reach that 'converged' within --position-tolerance/"
+        "--rotation-tolerance can still be off-center enough at the fingertips "
+        "(rotation error amplifies with finger length) to clip the cube instead "
+        "of straddling it -- this gate skips that doomed close instead of "
+        "attempting it blindly.",
+    )
+    p.add_argument(
         "--max-steps",
         type=int,
         default=120,
@@ -1133,6 +1189,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--position-resample-attempts must be positive")
     if args.position_tolerance < 0.0 or args.rotation_tolerance < 0.0:
         raise ValueError("tolerances must be non-negative")
+    if args.grasp_centering_tolerance < 0.0:
+        raise ValueError("--grasp-centering-tolerance must be non-negative")
     if args.max_steps <= 0:
         raise ValueError("--max-steps must be positive")
     if not (0.0 < args.action_ema_alpha <= 1.0):
