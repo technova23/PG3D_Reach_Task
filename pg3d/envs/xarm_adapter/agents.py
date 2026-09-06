@@ -278,16 +278,27 @@ class XArm7Gripper(BaseAgent):
         joint_name: {"joint": "drive_joint"}
         for joint_name in gripper_joint_names[1:]
     }
-    # Gains match ManiSkill's own xarm6_robotiq mimic gripper exactly (stiffness=1e5,
-    # damping=2000, force_limit=0.1) -- this codebase's closest precedent for a
-    # mimic-driven xArm-family gripper. force_limit is the critical one: a 1e5-rad/s^2
-    # spring with no meaningful force cap can deliver unbounded torque on any real
-    # target change, which is what produced a qvel blowup (~100 rad/s) when this was
-    # first tried at force_limit=50 (copied from the old *static*-hold config, which
-    # never actually moved its target so a high cap was never exercised).
+    # Gains started as ManiSkill's own xarm6_robotiq mimic gripper defaults
+    # (stiffness=1e5, damping=2000, force_limit=0.1) -- this codebase's closest
+    # precedent for a mimic-driven xArm-family gripper. That force_limit was
+    # copied purely to avoid a qvel blowup (~100 rad/s) that came from an
+    # INSTANT target snap in this agent's old *static*-hold config, which
+    # never actually closed on anything, so a low cap was never load-tested.
+    # It is far too low to hold anything: it caps torque on `drive_joint`, the
+    # sole actuated gripper DOF, and 0.1 N (per scripts/
+    # eval_pose_variety_pick_and_place.py's own recorded videos) is not
+    # remotely enough clamp force to keep even a light cube from slipping out
+    # under its own weight once lifted -- the jaws visibly narrow (position
+    # control tracks fine) but the cube slides out from under them because
+    # the force backing that position target is capped far below what
+    # friction needs to resist gravity. Raised to 20 -- still well under the
+    # 50 that produced the earlier blowup, and this agent's close is now
+    # always ramped gradually over several steps (see --close-steps in the
+    # pick-and-place eval), never snapped to the target in one step, which is
+    # what actually caused that blowup in the first place.
     gripper_stiffness = 1e5
     gripper_damping = 2000
-    gripper_force_limit = 0.1
+    gripper_force_limit = 20
     gripper_friction = 1
     # rad; joint hard limit is [0, 0.85]. The action-space upper bound is backed off
     # the hard limit by _GRIPPER_LIMIT_MARGIN rather than 0.85 exactly: commanding
