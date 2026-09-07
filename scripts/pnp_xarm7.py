@@ -23,10 +23,12 @@ is trusted:
   in straight-down orientation -- no orientation variety, no tilt-realign.
   The grasp itself (close + lift) stays scripted because the checkpoint has
   no gripper output at all, using the settings ``tune-gripper`` recommended.
-* ``pick-place`` -- STAGE 4. Adds the transport-and-release half.
+* ``pick-place`` -- STAGE 4 (implemented). Everything ``pick`` does, then
+  transports the held cube to the green goal marker on the table -- the same
+  policy rollout, gripper closed -- releases it, and scores where it actually
+  came to rest against a tolerance the marker is drawn at.
 
-``pick-place`` is not implemented yet -- it exits with a clear message
-rather than pretending to run.
+All four stages are implemented.
 
 Stage 1 usage:
     python scripts/pnp_xarm7.py --mode scene --out artifacts/pnp/scene.png
@@ -540,8 +542,8 @@ def run_tune_gripper(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_pick(args: argparse.Namespace) -> int:
-    """STAGE 3: scripted top-down pick, cube spawned anywhere in the workspace.
+def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
+    """STAGE 3 (pick) / STAGE 4 (pick-place), sharing one implementation.
 
     Deliberately NOT policy-steered yet and deliberately NOT orientation-
     aware: every approach is straight down (``_DOWN_QUAT_WXYZ``), exactly the
@@ -577,6 +579,21 @@ def run_pick(args: argparse.Namespace) -> int:
        gripper output at all (see agents.py), so close/lift can only ever be
        scripted -- that is not a shortcut, it is the checkpoint's actual
        action space.
+
+    With ``place_enabled`` (STAGE 4, ``--mode pick-place``), a successful pick
+    continues into:
+
+    4. POLICY TRANSPORT to the green goal marker on the table -- the SAME
+       reranking rollout as the approach, gripper held closed, its EMA seeded
+       from the lift's last action so the arm doesn't snap at the handoff.
+    5. SCRIPTED RELEASE (ramped open) then a settle window, after which the
+       cube's own pose is scored: it must land within ``--place-radius`` of
+       the goal AND come to rest at its natural resting height. The goal
+       marker is drawn at exactly ``--place-radius``, so the visible green
+       target on the table IS the scored tolerance area.
+
+    Both stages share this one function because the pick half is identical --
+    duplicating it would just let the two drift apart.
     """
     try:
         import gymnasium as gym
@@ -601,7 +618,8 @@ def run_pick(args: argparse.Namespace) -> int:
     from pg3d.envs.maniskill_adapter.dataset import load_reach_metadata
     from pg3d.envs.xarm_adapter.agents import XArm7Gripper
     from pg3d.envs.xarm_adapter.motionplanner import XArm7GripperMotionPlanningSolver
-    from pg3d.envs.xarm_adapter.pnp_env import cube_position, register_pnp_envs
+    from pg3d.envs.xarm_adapter.pnp_env import cube_position, goal_position, register_pnp_envs
+    from pg3d.envs.xarm_adapter.reach_env import ROBOT_BASE_POSE
     from pg3d.eval import TimingRecorder, scene_context_for_constraints
     from pg3d.policies.dp3.checkpoint import load_reach_policy_from_checkpoint
     from pg3d.utils.arrays import bool_any, frame_to_numpy
@@ -649,30 +667,55 @@ def run_pick(args: argparse.Namespace) -> int:
     if args.gripper_damping is not None:
         XArm7Gripper.gripper_damping = args.gripper_damping
 
-    # One episode is: policy reach + scripted descent + close + lift. The env
-    # step limit has to cover all of it or a late phase gets truncated by the
-    # env rather than judged on its merits.
+    # One episode is: policy reach + scripted descent + close + lift, plus (in
+    # pick-place) the policy transport + release + settle. The env step limit
+    # has to cover all of it or a late phase gets truncated by the env rather
+    # than judged on its merits.
     meta_max_steps = metadata.get("env_kwargs", {}).get("max_episode_steps")
+    place_budget = (
+        int(args.place_max_steps) + int(args.release_steps) + int(args.settle_steps)
+        if place_enabled
+        else 0
+    )
     env_max_steps = max(
         int(args.max_steps)
         + int(args.descent_max_steps)
         + int(args.close_steps)
-        + int(args.lift_max_steps),
+        + int(args.lift_max_steps)
+        + place_budget,
         int(meta_max_steps or 0),
     )
+    # Cube's natural resting height, used to tell "placed on the table" from
+    # "still in the jaws" / "fell off". Table surface is at the robot base's
+    # own Z -- see XARM7_REACH_BOX_BASE's dz convention in reach_config.py.
+    cube_rest_z = float(ROBOT_BASE_POSE.p[2]) + args.cube_edge / 2.0
+    stage = "pick-place" if place_enabled else "pick"
     print(
-        f"pick: force_limit={XArm7Gripper.gripper_force_limit} "
+        f"{stage}: force_limit={XArm7Gripper.gripper_force_limit} "
         f"stiffness={XArm7Gripper.gripper_stiffness} "
         f"damping={XArm7Gripper.gripper_damping}\n"
         f"      {args.episodes} episodes, cube edge {args.cube_edge * 100:.0f}cm, "
         f"straight-down approach only, env step limit {env_max_steps}\n"
-        f"      policy={args.checkpoint}\n"
+        f"      policy={args.checkpoint}"
     )
+    if place_enabled:
+        print(
+            f"      place tolerance {args.place_radius:.3f}m (the green goal "
+            f"marker is drawn at exactly this radius, so what you see on the "
+            f"table IS the scored zone); cube rests at Z={cube_rest_z:.3f}\n"
+        )
+    else:
+        print()
 
     sim_env_kwargs = _env_kwargs(metadata, render_mode="rgb_array", max_episode_steps=env_max_steps)
     sim_env_kwargs["cube_edge"] = args.cube_edge
     sim_env_kwargs["spawn_margin"] = args.spawn_margin
     sim_env_kwargs["min_object_separation"] = args.min_object_separation
+    # Draw the goal marker at the scoring radius so the visible green target
+    # on the table is literally the tolerance area, not a decorative dot of
+    # some unrelated size.
+    if place_enabled:
+        sim_env_kwargs["goal_marker_radius"] = args.place_radius
     sim_env = gym.make("PG3DPnP-XArm7-Gripper-v0", **sim_env_kwargs)
     # Ghost env supplies the world model's geometry; it is the env the
     # checkpoint was TRAINED on (no cube), never stepped, only queried.
@@ -694,13 +737,28 @@ def run_pick(args: argparse.Namespace) -> int:
         frames: list[np.ndarray] | None,
         target_position: np.ndarray,
         max_steps: int,
-    ) -> tuple[bool, dict[str, Any], Any, int, float, float, bool]:
+        gripper_value: float,
+        phase: str,
+        initial_ema_action: np.ndarray | None = None,
+    ) -> tuple[bool, dict[str, Any], Any, int, float, float, bool, np.ndarray | None]:
         """Steer the checkpoint to `target_position` (straight-down orientation).
 
         Same reranking mechanism as the reach evals -- this is the actual DP3
-        rollout, not a planner. Returns (reached, sim_entry, obs_window,
-        steps, pos_err, rot_err, truncated_early); `frames` is mutated in
-        place so the caller keeps one continuous video across phases.
+        rollout, not a planner. Shared by both the pick approach (gripper
+        open, empty) and the place transport (gripper closed, carrying the
+        cube): identical machinery, only the target, step budget, and held
+        gripper command differ. Returns (reached, sim_entry, obs_window,
+        steps, pos_err, rot_err, truncated_early, last_ema_action); `frames`
+        is mutated in place so the caller keeps one continuous video across
+        phases.
+
+        `initial_ema_action` seeds the EMA instead of starting from the raw
+        first policy action. Needed at the pick->place handoff: the close+lift
+        phase is a scripted, non-EMA open-loop replay, so without a seed the
+        place phase's first blended action snaps from wherever that replay
+        left off straight to a raw policy output against this gripper's stiff
+        PD controller (stiffness=1e5) -- which in the earlier pick-and-place
+        eval launched the cube ~0.30m in a single rendered frame.
         """
         constraint = CartesianPoseConstraint(
             target_position=target_position,
@@ -708,15 +766,17 @@ def run_pick(args: argparse.Namespace) -> int:
             position_tolerance=args.position_tolerance,
             rotation_tolerance=args.rotation_tolerance,
             weight=1.0,
-            name="pnp_pick_pregrasp",
+            name=f"pnp_{phase}",
         )
         scene = scene_context_for_constraints(
             target_position=target_position,
             constraints=[constraint],
-            metadata={"phase": "pick_pregrasp"},
+            metadata={"phase": phase},
         )
         timer = TimingRecorder(enabled=False)
-        ema_sim_action: np.ndarray | None = None
+        ema_sim_action: np.ndarray | None = (
+            None if initial_ema_action is None else np.asarray(initial_ema_action, dtype=np.float32)
+        )
         reached_goal = False
         truncated_early = False
         pos_err = float("inf")
@@ -757,7 +817,7 @@ def run_pick(args: argparse.Namespace) -> int:
                         sim_action_dim=int(np.prod(sim_env.action_space.shape)),
                         low=getattr(sim_env.action_space, "low", None),
                         high=getattr(sim_env.action_space, "high", None),
-                        gripper_open=args.gripper_open_value,
+                        gripper_open=gripper_value,
                     )
                     if ema_sim_action is None or args.action_ema_alpha >= 1.0:
                         ema_sim_action = sim_action
@@ -793,7 +853,16 @@ def run_pick(args: argparse.Namespace) -> int:
         finally:
             if was_training:
                 policy.train()
-        return (reached_goal, sim_entry, obs_window, total_steps, pos_err, rot_err, truncated_early)
+        return (
+            reached_goal,
+            sim_entry,
+            obs_window,
+            total_steps,
+            pos_err,
+            rot_err,
+            truncated_early,
+            ema_sim_action,
+        )
 
     def _replay_planned_move(
         *,
@@ -858,17 +927,30 @@ def run_pick(args: argparse.Namespace) -> int:
             pregrasp_position = grasp_position + np.array(
                 [0.0, 0.0, args.pregrasp_height], dtype=np.float32
             )
+            # Read the env's own sampled goal BEFORE goal_site gets repurposed
+            # as the pick's conditioning signal below -- this is where the cube
+            # has to end up, and pnp_env already guarantees it is at least
+            # --min-object-separation from the cube, so every episode is a real
+            # relocation.
+            place_target = goal_position(sim_env)
+            # Release slightly above the cube's own resting height so the cube
+            # is let go just clear of the table rather than pressed into it.
+            release_position = place_target + np.array(
+                [0.0, 0.0, args.place_height_offset], dtype=np.float32
+            )
             row: dict[str, Any] = {
                 "episode": episode_idx,
                 "cube_start": cube_start.tolist(),
                 "pregrasp_position": pregrasp_position.tolist(),
+                "place_target": place_target.tolist(),
             }
 
             # goal_site IS the policy's goal-conditioning signal (see
             # pnp_env's docstring / PG3DReachEnv._get_obs_extra), so pointing
             # it at the pre-grasp standoff is how the checkpoint is told where
-            # to go. Cosmetically it also moves the green marker onto the
-            # cube's approach point for the duration of the pick.
+            # to go. One actor serves both jobs, so the green marker rides the
+            # ACTIVE target: it hovers at the cube's approach point during the
+            # pick, then returns to the table goal for the place phase.
             _set_site_pose(sim_env, "goal_site", pregrasp_position)
             update_render = getattr(sim_env.unwrapped.scene, "update_render", None)
             if callable(update_render):
@@ -906,12 +988,15 @@ def run_pick(args: argparse.Namespace) -> int:
                 pos_err,
                 rot_err,
                 truncated_early,
+                _pick_ema_action,
             ) = _policy_reach_to(
                 sim_entry=sim_entry,
                 obs_window=obs_window,
                 frames=frames,
                 target_position=pregrasp_position,
                 max_steps=args.max_steps,
+                gripper_value=args.gripper_open_value,
+                phase="pick_pregrasp",
             )
             row.update(
                 reach_steps=reach_steps,
@@ -976,29 +1061,160 @@ def run_pick(args: argparse.Namespace) -> int:
             lift_position = grasp_position + np.array(
                 [0.0, 0.0, args.lift_height], dtype=np.float32
             )
-            lift_ok, _ = _replay_planned_move(
+            lift_ok, last_lift_action = _replay_planned_move(
                 position=lift_position,
                 gripper_value=args.gripper_close_value,
                 max_steps=args.lift_max_steps,
                 frames=frames,
             )
-            cube_end = cube_position(sim_env)
-            cube_lift = float(cube_end[2] - cube_before_lift[2])
-            success = bool(
+            cube_after_lift = cube_position(sim_env)
+            cube_lift = float(cube_after_lift[2] - cube_before_lift[2])
+            picked_ok = bool(
                 lift_ok and cube_lift >= args.success_lift_fraction * args.lift_height
             )
             row.update(
                 cube_lift=cube_lift,
-                cube_end=cube_end.tolist(),
+                cube_after_lift=cube_after_lift.tolist(),
                 lift_planned=lift_ok,
-                success=success,
-                outcome="picked" if success else ("dropped_or_missed" if lift_ok else "lift_unplannable"),
+                picked=picked_ok,
+            )
+
+            if not place_enabled:
+                row.update(
+                    success=picked_ok,
+                    cube_end=cube_after_lift.tolist(),
+                    outcome="picked"
+                    if picked_ok
+                    else ("dropped_or_missed" if lift_ok else "lift_unplannable"),
+                )
+                print(
+                    f"  [ep {episode_idx:02d}] cube={np.round(cube_start, 3).tolist()}  "
+                    f"reach OK ({reach_steps} steps, pos_err={pos_err:.4f})  "
+                    f"centering={centering_err:.4f}m drift={approach_drift:.4f}m  "
+                    f"lift={cube_lift:.4f}m  outcome={row['outcome']}"
+                )
+                rows.append(row)
+                _save_pick_video(args, save_video, frames, episode_idx, row)
+                continue
+
+            # Nothing to transport if the pick didn't hold -- the gripper is
+            # closed on empty air, or the cube fell during the lift.
+            if not picked_ok:
+                row.update(
+                    success=False,
+                    cube_end=cube_after_lift.tolist(),
+                    outcome="pick_failed",
+                )
+                print(
+                    f"  [ep {episode_idx:02d}] cube={np.round(cube_start, 3).tolist()}  "
+                    f"reach OK ({reach_steps} steps)  centering={centering_err:.4f}m  "
+                    f"PICK FAILED — cube rose only {cube_lift:.4f}m "
+                    f"(needed >={args.success_lift_fraction * args.lift_height:.4f}m)"
+                )
+                rows.append(row)
+                _save_pick_video(args, save_video, frames, episode_idx, row)
+                continue
+
+            # --- 4. POLICY TRANSPORT to the goal marker, cube still held.
+            # Same reranking rollout as the pick approach; the green marker
+            # (and with it the policy's goal conditioning) goes back to the
+            # table goal it was sampled at.
+            _set_site_pose(sim_env, "goal_site", place_target)
+            if callable(update_render):
+                update_render()
+            sim_obs, sim_info = _refresh_obs_after_manual_qpos(
+                sim_env, info=sim_info, gripper_open=args.gripper_close_value
+            )
+            sim_entry = rollout_observation_entry(
+                sim_obs, sim_info, env=sim_env, crop_config=crop_config
+            )
+            obs_window = append_obs_window(
+                obs_window, sim_entry, n_obs_steps=int(policy.n_obs_steps)
+            )
+            (
+                place_reached,
+                sim_entry,
+                obs_window,
+                place_steps,
+                place_pos_err,
+                place_rot_err,
+                place_truncated,
+                _place_ema_action,
+            ) = _policy_reach_to(
+                sim_entry=sim_entry,
+                obs_window=obs_window,
+                frames=frames,
+                target_position=release_position,
+                max_steps=args.place_max_steps,
+                gripper_value=args.gripper_close_value,
+                phase="place_transport",
+                # Seeded from the lift's last raw action: the close+lift is a
+                # scripted open-loop replay, so an unseeded EMA here blends a
+                # raw policy action against whatever that replay left off at.
+                initial_ema_action=last_lift_action,
+            )
+            row.update(
+                place_steps=place_steps,
+                place_pos_err=float(place_pos_err),
+                place_rot_err_deg=float(np.degrees(place_rot_err)),
+                place_reached=bool(place_reached),
+            )
+
+            # --- 5. RELEASE (ramped open), then settle. Deliberately runs
+            # even if the transport did not converge: releasing wherever the
+            # arm actually ended up gets scored honestly, and stops the cube
+            # being carried into the next episode's reset.
+            hold_qpos = np.asarray(sim_env.unwrapped.agent.robot.get_qpos()).reshape(-1)[:7]
+            for release_step in range(args.release_steps):
+                frac = (release_step + 1) / float(args.release_steps)
+                value = args.gripper_close_value + frac * (
+                    args.gripper_open_value - args.gripper_close_value
+                )
+                action = _hold_sim_action(sim_env, gripper_open=value, qpos=hold_qpos)
+                _obs, _reward, _term, truncated, _info = sim_env.step(action)
+                if frames is not None:
+                    frames.append(frame_to_numpy(sim_env.render()))
+                if bool_any(truncated):
+                    break
+            # Let the cube actually land and stop before measuring it --
+            # scoring mid-fall would read as a miss even for a good release.
+            for _settle_step in range(args.settle_steps):
+                action = _hold_sim_action(
+                    sim_env, gripper_open=args.gripper_open_value, qpos=hold_qpos
+                )
+                _obs, _reward, _term, truncated, _info = sim_env.step(action)
+                if frames is not None:
+                    frames.append(frame_to_numpy(sim_env.render()))
+                if bool_any(truncated):
+                    break
+
+            cube_end = cube_position(sim_env)
+            place_xy_err = float(np.linalg.norm(cube_end[:2] - place_target[:2]))
+            resting_z_err = float(abs(cube_end[2] - cube_rest_z))
+            # Placed = landed inside the tolerance disc AND actually settled at
+            # its natural resting height. The height check is what separates a
+            # real placement from a cube still wedged in the jaws, or one that
+            # bounced off the table edge.
+            settled = resting_z_err <= args.place_settle_tolerance
+            placed_ok = bool(place_xy_err <= args.place_radius and settled)
+            row.update(
+                cube_end=cube_end.tolist(),
+                place_xy_err=place_xy_err,
+                cube_resting_z_err=resting_z_err,
+                cube_settled=settled,
+                success=placed_ok,
+                outcome="placed"
+                if placed_ok
+                else ("not_settled" if not settled else "missed_goal"),
             )
             print(
-                f"  [ep {episode_idx:02d}] cube={np.round(cube_start, 3).tolist()}  "
-                f"reach OK ({reach_steps} steps, pos_err={pos_err:.4f})  "
-                f"centering={centering_err:.4f}m drift={approach_drift:.4f}m  "
-                f"lift={cube_lift:.4f}m  outcome={row['outcome']}"
+                f"  [ep {episode_idx:02d}] cube={np.round(cube_start, 3).tolist()} "
+                f"-> goal={np.round(place_target, 3).tolist()}  "
+                f"pick OK (lift={cube_lift:.4f}m)  "
+                f"transport {'OK' if place_reached else 'NOT CONVERGED'} "
+                f"({place_steps} steps, pos_err={place_pos_err:.4f})  "
+                f"final XY err={place_xy_err:.4f}m (tol {args.place_radius:.3f})  "
+                f"outcome={row['outcome']}"
             )
             rows.append(row)
             _save_pick_video(args, save_video, frames, episode_idx, row)
@@ -1009,26 +1225,55 @@ def run_pick(args: argparse.Namespace) -> int:
         XArm7Gripper.gripper_stiffness = baseline_stiffness
         XArm7Gripper.gripper_damping = baseline_damping
 
-    picked = [r for r in rows if r["success"]]
     reached_rows = [r for r in rows if r.get("reach_reached")]
+    picked_rows = [r for r in rows if r.get("picked")]
+    succeeded = [r for r in rows if r["success"]]
     lifts = [r["cube_lift"] for r in rows]
     outcomes = {
         outcome: sum(1 for r in rows if r["outcome"] == outcome)
         for outcome in sorted({r["outcome"] for r in rows})
     }
+    total = max(len(rows), 1)
+    label = "placed" if place_enabled else "picked"
     print(
-        f"\n── pick summary: picked {len(picked)}/{len(rows)} "
-        f"({100 * len(picked) / max(len(rows), 1):.0f}%)  |  "
-        f"policy reach converged {len(reached_rows)}/{len(rows)}  |  "
-        f"mean_lift={float(np.mean(lifts)) if lifts else 0.0:.4f}m\n"
-        f"   outcomes: {outcomes}"
+        f"\n── {stage} summary: {label} {len(succeeded)}/{len(rows)} "
+        f"({100 * len(succeeded) / total:.0f}%)\n"
+        f"   funnel: policy reach converged {len(reached_rows)}/{len(rows)}"
+        f"  ->  picked {len(picked_rows)}/{len(rows)}"
+        + (
+            f"  ->  placed {len(succeeded)}/{len(rows)}"
+            if place_enabled
+            else ""
+        )
+        + f"\n   mean_lift={float(np.mean(lifts)) if lifts else 0.0:.4f}m"
+        f"\n   outcomes: {outcomes}"
     )
-    if reached_rows and len(picked) < len(reached_rows):
+    if place_enabled:
+        placed_rows = [r for r in rows if r.get("place_xy_err") is not None]
+        if placed_rows:
+            errs = [r["place_xy_err"] for r in placed_rows]
+            transported = [r for r in placed_rows if r.get("place_reached")]
+            print(
+                f"   of the {len(placed_rows)} episode(s) that got as far as a "
+                f"release: transport converged {len(transported)}/{len(placed_rows)}, "
+                f"final XY error mean={float(np.mean(errs)):.4f}m "
+                f"min={float(np.min(errs)):.4f}m max={float(np.max(errs)):.4f}m "
+                f"(tolerance {args.place_radius:.3f}m)"
+            )
+    if reached_rows and len(picked_rows) < len(reached_rows):
         print(
-            f"   NOTE: {len(reached_rows) - len(picked)} episode(s) reached the "
+            f"   NOTE: {len(reached_rows) - len(picked_rows)} episode(s) reached the "
             "pre-grasp pose but still failed to pick -- that is a grasp/descent "
             "problem, not a policy-steering one. Check grasp_centering_err and "
             "approach_drift in those rows before touching reach settings."
+        )
+    if place_enabled and picked_rows and len(succeeded) < len(picked_rows):
+        print(
+            f"   NOTE: {len(picked_rows) - len(succeeded)} episode(s) picked the cube "
+            "but did not place it. 'missed_goal' means the transport ended too far "
+            "from the marker (a steering problem -- check place_pos_err); "
+            "'not_settled' means the cube never came to rest at table height "
+            "(it stuck in the jaws, or bounced away -- check the video)."
         )
     if args.summary_json is not None:
         args.summary_json.parent.mkdir(parents=True, exist_ok=True)
@@ -1070,7 +1315,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--mode",
         default="scene",
         choices=["scene", "tune-gripper", "pick", "pick-place"],
-        help="Which stage to run. 'scene', 'tune-gripper', and 'pick' are implemented; 'pick-place' is not yet.",
+        help="Which stage to run: scene -> tune-gripper -> pick -> pick-place.",
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
@@ -1258,6 +1503,50 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="pick: replay budget for the scripted vertical descent from the "
         "pre-grasp standoff onto the cube.",
     )
+    # pick-place mode (everything above applies too -- the pick half is shared)
+    p.add_argument(
+        "--place-radius",
+        type=float,
+        default=0.05,
+        help="pick-place: the cube counts as placed if it settles within this "
+        "distance (m, XY) of the goal marker. The marker is DRAWN at this "
+        "radius, so the visible green target on the table is the scored zone.",
+    )
+    p.add_argument(
+        "--place-height-offset",
+        type=float,
+        default=0.02,
+        help="pick-place: release the cube this far above its natural resting "
+        "height, so it is let go just clear of the table rather than pressed "
+        "into it.",
+    )
+    p.add_argument(
+        "--place-settle-tolerance",
+        type=float,
+        default=0.03,
+        help="pick-place: after release the cube's height must be within this "
+        "of its natural resting height to count as settled. This is what "
+        "separates a real placement from one still wedged in the jaws.",
+    )
+    p.add_argument(
+        "--place-max-steps",
+        type=int,
+        default=300,
+        help="pick-place: step budget for the policy transport to the goal.",
+    )
+    p.add_argument(
+        "--release-steps",
+        type=int,
+        default=15,
+        help="pick-place: steps to ramp the gripper back open, mirroring --close-steps.",
+    )
+    p.add_argument(
+        "--settle-steps",
+        type=int,
+        default=25,
+        help="pick-place: steps to let the cube land and stop before scoring it. "
+        "Measuring mid-fall would read a good release as a miss.",
+    )
     p.add_argument(
         "--gripper-force-limit",
         type=float,
@@ -1340,6 +1629,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--lift-max-steps must be positive")
     if args.descent_max_steps <= 0:
         raise ValueError("--descent-max-steps must be positive")
+    if args.place_radius <= 0:
+        raise ValueError("--place-radius must be positive")
+    if args.place_settle_tolerance <= 0:
+        raise ValueError("--place-settle-tolerance must be positive")
+    if args.place_max_steps <= 0:
+        raise ValueError("--place-max-steps must be positive")
+    if args.release_steps <= 0:
+        raise ValueError("--release-steps must be positive")
+    if args.settle_steps <= 0:
+        raise ValueError("--settle-steps must be positive")
     return args
 
 
@@ -1350,7 +1649,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "tune-gripper":
         return run_tune_gripper(args)
     if args.mode == "pick":
-        return run_pick(args)
+        return run_pick(args, place_enabled=False)
+    if args.mode == "pick-place":
+        return run_pick(args, place_enabled=True)
     return _not_implemented(args.mode)
 
 
