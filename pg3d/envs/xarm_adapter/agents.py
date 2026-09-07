@@ -252,9 +252,20 @@ class XArm7Gripper(BaseAgent):
     # this, SAPIEN's default (much lower) friction let a closing grasp eject
     # a small cube sideways instead of holding it (confirmed via
     # scripts/eval_pose_variety_pick_and_place.py's own recorded videos).
+    #
+    # Raised 2.0 -> 5.0 (matching CUBE_STATIC_FRICTION in pnp_env.py, so
+    # neither material is the bottleneck in PhysX's combine) to fight the
+    # cube slipping mid-TRANSPORT: max tangential (slip-resisting) force at
+    # the contact is friction_coeff x clamp_force, so this raises the
+    # inertial-load margin without touching clamp force itself -- unlike
+    # bumping gripper_force_limit further, it can't reopen the asymmetric-
+    # first-contact punch-out risk documented below, or the joint-qvel
+    # instability seen at force_limit=20. Estimate, not swept -- no local
+    # sim to tune against (eval runs on enigma); revisit if it overshoots
+    # into stiction (jerky release / cube dragged off-target while opening).
     urdf_config = dict(
         _materials=dict(
-            gripper=dict(static_friction=2.0, dynamic_friction=2.0, restitution=0.0)
+            gripper=dict(static_friction=5.0, dynamic_friction=5.0, restitution=0.0)
         ),
         link=dict(
             left_finger=dict(material="gripper", patch_radius=0.1, min_patch_radius=0.1),
