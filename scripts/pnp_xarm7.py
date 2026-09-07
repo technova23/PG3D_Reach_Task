@@ -201,6 +201,44 @@ def _arm_qvel(env: Any) -> float:
     return float(np.max(np.abs(qvel[:7])))
 
 
+def _set_gripper_force_limit(env: Any, force_limit: float) -> None:
+    """Bump ``drive_joint``'s live force limit, bypassing the controller config.
+
+    ``XArm7Gripper.gripper_force_limit`` (agents.py) is a class attribute only
+    read when the controller config is BUILT, at env construction -- setting
+    it after the env exists does nothing to the running sim. Getting a
+    different force for the CLOSE phase (must stay soft: 0.05, tuned so
+    asymmetric first contact doesn't punch the cube out before both fingers
+    are seated) versus the HOLD/TRANSPORT phase (needs real margin against
+    inertial loads once the cube is already seated -- no more asymmetric-
+    contact risk at that point) means reaching past the config and poking the
+    live PhysX joint drive directly.
+
+    SAPIEN has used both ``set_drive_property`` (singular) and
+    ``set_drive_properties`` (plural) as the method name across versions this
+    repo has touched; try both and raise rather than silently no-op if
+    neither exists -- this runs unattended on enigma, where a silently
+    ignored force bump would look identical to a real one right up until the
+    next slip.
+    """
+    joint = env.unwrapped.agent.robot.active_joints_map["drive_joint"]
+    kwargs = dict(
+        stiffness=XArm7Gripper.gripper_stiffness,
+        damping=XArm7Gripper.gripper_damping,
+        force_limit=float(force_limit),
+    )
+    for method_name in ("set_drive_property", "set_drive_properties"):
+        method = getattr(joint, method_name, None)
+        if method is not None:
+            method(**kwargs)
+            return
+    raise AttributeError(
+        f"drive_joint ({type(joint)!r}) exposes neither set_drive_property nor "
+        "set_drive_properties -- can't apply the transport-phase force bump. "
+        "Check the installed SAPIEN version's joint drive API."
+    )
+
+
 def _plan_and_replay(
     env: Any,
     *,
@@ -666,6 +704,11 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
         XArm7Gripper.gripper_stiffness = args.gripper_stiffness
     if args.gripper_damping is not None:
         XArm7Gripper.gripper_damping = args.gripper_damping
+    # This is the CLOSE-phase force -- the value the sweep tuned for
+    # asymmetric first-contact safety. Captured here (after any CLI
+    # override above) so the post-lift bump below has the right value to
+    # restore to before release.
+    close_force_limit = XArm7Gripper.gripper_force_limit
 
     # One episode is: policy reach + scripted descent + close + lift, plus (in
     # pick-place) the policy transport + release + settle. The env step limit
@@ -1164,6 +1207,18 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                 if bool_any(truncated):
                     break
 
+            # Stiffen the grip now that the cube is confirmed seated (lift
+            # succeeded, both fingers symmetrically loaded) -- the asymmetric-
+            # contact punch-out risk that keeps CLOSE force at 0.05 no longer
+            # applies once we're just holding, and 0.05 only has margin for
+            # gravity, not for the inertial loads a moving arm adds. No local
+            # sim to tune this against (eval runs on enigma) -- 0.25 is an
+            # engineering estimate (~5x the static-hold floor, a fraction of
+            # the 20 that punched cubes out during CLOSE) rather than a swept
+            # value; revisit with a slip-vs-force sweep (same shape as
+            # tune-gripper) if slips persist or a wider margin turns out safe.
+            _set_gripper_force_limit(sim_env, args.transport_gripper_force_limit)
+
             # --- 4. POLICY TRANSPORT to the goal marker, cube still held.
             # Same reranking rollout as the pick approach; the green marker
             # (and with it the policy's goal conditioning) goes back to the
@@ -1214,6 +1269,11 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                 place_rot_err_deg=float(np.degrees(place_rot_err)),
                 place_reached=bool(place_reached),
             )
+
+            # Drop the grip back to the tuned CLOSE/RELEASE force before
+            # opening -- the transport-phase bump above is deliberately not
+            # in effect for the release ramp, which was tuned against 0.05.
+            _set_gripper_force_limit(sim_env, close_force_limit)
 
             # --- 5. RELEASE (ramped open), then settle. Deliberately runs
             # even if the transport did not converge: releasing wherever the
@@ -1634,6 +1694,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "the ramp does nothing.",
     )
     p.add_argument(
+        "--transport-gripper-force-limit",
+        type=float,
+        default=0.25,
+        help="pick-place: live drive_joint force_limit used for HOLD/TRANSPORT "
+        "and RELEASE, applied right after the post-lift settle (see "
+        "_set_gripper_force_limit) and dropped back to the CLOSE force before "
+        "the release ramp. The CLOSE force (0.05) is tuned soft so asymmetric "
+        "first contact doesn't punch the cube out before both fingers are "
+        "seated -- that risk is gone once the lift has confirmed a symmetric "
+        "grasp, but 0.05 alone only has margin for gravity, not the inertial "
+        "loads a moving arm adds, which is what was causing slips at random "
+        "points along the transport path. No local sim to sweep this against "
+        "(eval runs on enigma) -- 0.25 is an engineering estimate (~5x the "
+        "static-hold floor, well under the 20 that punched cubes out during "
+        "CLOSE), not a tuned value. Revisit with a slip-vs-force sweep if "
+        "slips persist or a wider margin turns out safe.",
+    )
+    p.add_argument(
         "--gripper-force-limit",
         type=float,
         default=None,
@@ -1693,6 +1771,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--episodes must be positive")
     if args.gripper_force_limit is not None and args.gripper_force_limit < 0:
         raise ValueError("--gripper-force-limit must be non-negative")
+    if args.transport_gripper_force_limit <= 0:
+        raise ValueError("--transport-gripper-force-limit must be positive")
     if args.gripper_stiffness is not None and args.gripper_stiffness <= 0:
         raise ValueError("--gripper-stiffness must be positive")
     if args.gripper_damping is not None and args.gripper_damping < 0:
