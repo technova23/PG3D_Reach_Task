@@ -1192,6 +1192,25 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                 _save_pick_video(args, save_video, frames, episode_idx, row)
                 continue
 
+            # Stiffen the grip now that the cube is confirmed seated (lift
+            # just succeeded, both fingers symmetrically loaded) -- the
+            # asymmetric-contact punch-out risk that keeps CLOSE force at
+            # 0.05 no longer applies once we're just holding, and 0.05 only
+            # has margin for an instantaneous grasp check, not for holding
+            # weight over many steps: frame-by-frame video review (E:/
+            # place_chk/pnp) showed the cube sinking to table height DURING
+            # the post-lift settle hold below -- arm stationary the whole
+            # time, no transport motion yet -- i.e. a slow static gravity
+            # slip through the fingers, not a dynamic/inertial one. Moving
+            # the bump to BEFORE the settle loop (rather than after, as it
+            # first was) is what actually covers that window. No local sim
+            # to tune this against (eval runs on enigma) -- 0.25 is an
+            # engineering estimate (~5x the static-hold floor, a fraction of
+            # the 20 that punched cubes out during CLOSE) rather than a swept
+            # value; revisit with a slip-vs-force sweep (same shape as
+            # tune-gripper) if slips persist or a wider margin turns out safe.
+            _set_gripper_force_limit(sim_env, args.transport_gripper_force_limit)
+
             # --- Post-lift SETTLE: hold the current qpos, gripper still
             # closed, for a few steps before handing control back to the
             # policy. The lift is an open-loop scripted replay of a planned
@@ -1209,17 +1228,27 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                 if bool_any(truncated):
                     break
 
-            # Stiffen the grip now that the cube is confirmed seated (lift
-            # succeeded, both fingers symmetrically loaded) -- the asymmetric-
-            # contact punch-out risk that keeps CLOSE force at 0.05 no longer
-            # applies once we're just holding, and 0.05 only has margin for
-            # gravity, not for the inertial loads a moving arm adds. No local
-            # sim to tune this against (eval runs on enigma) -- 0.25 is an
-            # engineering estimate (~5x the static-hold floor, a fraction of
-            # the 20 that punched cubes out during CLOSE) rather than a swept
-            # value; revisit with a slip-vs-force sweep (same shape as
-            # tune-gripper) if slips persist or a wider margin turns out safe.
-            _set_gripper_force_limit(sim_env, args.transport_gripper_force_limit)
+            # Bisection check: is the cube still up here, or did it already
+            # slip during LIFT or during this very SETTLE hold, before the
+            # transport ever starts? A video's own goal_site sphere sits
+            # right on top of the gripper here and fully occludes a mid-air
+            # cube for this whole window, so pixels alone can't answer this
+            # -- ground truth can.
+            cube_after_settle = cube_position(sim_env)
+            held_after_settle = bool(
+                (cube_after_settle[2] - cube_rest_z)
+                >= 0.5 * args.success_lift_fraction * args.lift_height
+            )
+            row.update(
+                cube_z_after_settle=float(cube_after_settle[2]),
+                held_after_settle=held_after_settle,
+            )
+            if not held_after_settle:
+                print(
+                    f"  [ep {episode_idx:02d}] DROPPED during LIFT/SETTLE -- "
+                    f"cube already at z={cube_after_settle[2]:.4f} "
+                    f"(rest={cube_rest_z:.4f}) before transport even starts"
+                )
 
             # --- 4. POLICY TRANSPORT to the goal marker, cube still held.
             # Same reranking rollout as the pick approach; the green marker
@@ -1272,6 +1301,27 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                 place_reached=bool(place_reached),
             )
 
+            # `place_pos_err` above is the ARM's own tracking error against
+            # the release target -- it says nothing about whether the cube
+            # was still between the fingers when the arm got there. A low
+            # pos_err with a large final cube XY error (checked below) is
+            # exactly what an empty-handed arm converging on the goal looks
+            # like, so check the cube's height HERE, before release, while
+            # we still know whether the transport carried it or dropped it
+            # somewhere along the way.
+            cube_after_transport = cube_position(sim_env)
+            # Lenient vs. the pick's own lift-success bar: grip compliance
+            # can sag a held cube a little without it having actually
+            # dropped, so this only needs to rule out "already on the table".
+            held_through_transport = bool(
+                (cube_after_transport[2] - cube_rest_z)
+                >= 0.5 * args.success_lift_fraction * args.lift_height
+            )
+            row.update(
+                cube_z_after_transport=float(cube_after_transport[2]),
+                held_through_transport=held_through_transport,
+            )
+
             # Drop the grip back to the tuned CLOSE/RELEASE force before
             # opening -- the transport-phase bump above is deliberately not
             # in effect for the release ramp, which was tuned against 0.05.
@@ -1314,22 +1364,28 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
             # bounced off the table edge.
             settled = resting_z_err <= args.place_settle_tolerance
             placed_ok = bool(place_xy_err <= args.place_radius and settled)
+            outcome = "placed" if placed_ok else ("not_settled" if not settled else "missed_goal")
+            # A dropped-in-flight miss is a different failure than a
+            # genuinely-carried-but-overshot one, and looks identical in the
+            # xy_err/settled numbers alone -- relabel it using the
+            # held_through_transport check above so the two aren't conflated.
+            if not placed_ok and not row["held_through_transport"]:
+                outcome = "dropped_in_transport"
             row.update(
                 cube_end=cube_end.tolist(),
                 place_xy_err=place_xy_err,
                 cube_resting_z_err=resting_z_err,
                 cube_settled=settled,
                 success=placed_ok,
-                outcome="placed"
-                if placed_ok
-                else ("not_settled" if not settled else "missed_goal"),
+                outcome=outcome,
             )
             print(
                 f"  [ep {episode_idx:02d}] cube={np.round(cube_start, 3).tolist()} "
                 f"-> goal={np.round(place_target, 3).tolist()}  "
                 f"pick OK (lift={cube_lift:.4f}m)  "
                 f"transport {'OK' if place_reached else 'NOT CONVERGED'} "
-                f"({place_steps} steps, pos_err={place_pos_err:.4f})  "
+                f"({place_steps} steps, pos_err={place_pos_err:.4f}, "
+                f"held={row['held_through_transport']})  "
                 f"final XY err={place_xy_err:.4f}m (tol {args.place_radius:.3f})  "
                 f"outcome={row['outcome']}"
             )
