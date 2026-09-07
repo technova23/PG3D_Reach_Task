@@ -673,7 +673,10 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
     # than judged on its merits.
     meta_max_steps = metadata.get("env_kwargs", {}).get("max_episode_steps")
     place_budget = (
-        int(args.place_max_steps) + int(args.release_steps) + int(args.settle_steps)
+        int(args.post_lift_settle_steps)
+        + int(args.place_max_steps)
+        + int(args.release_steps)
+        + int(args.settle_steps)
         if place_enabled
         else 0
     )
@@ -740,6 +743,7 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
         gripper_value: float,
         phase: str,
         initial_ema_action: np.ndarray | None = None,
+        ema_warmup_steps: int = 0,
     ) -> tuple[bool, dict[str, Any], Any, int, float, float, bool, np.ndarray | None]:
         """Steer the checkpoint to `target_position` (straight-down orientation).
 
@@ -759,6 +763,23 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
         left off straight to a raw policy output against this gripper's stiff
         PD controller (stiffness=1e5) -- which in the earlier pick-and-place
         eval launched the cube ~0.30m in a single rendered frame.
+
+        `ema_warmup_steps` (only meaningful together with `initial_ema_action`)
+        ramps the EMA blend weight up from a low floor
+        (``args.transport_ema_warmup_alpha``) to the configured
+        ``args.action_ema_alpha`` over that many steps, instead of jumping
+        straight to the full weight on step 1. A single 50/50 blend still
+        lets through half of whatever the raw policy predicts, and the very
+        first prediction here is exactly where this checkpoint is furthest
+        out of distribution (see the caller: the observation window is only
+        now being repointed at a brand-new, far-away goal after several
+        pick-phase steps at the OLD goal -- this checkpoint was trained as a
+        single-goal-per-episode reach policy, never on a goal teleporting
+        mid-rollout). A low-force gripper (see agents.py, tuned soft
+        specifically so the jaws yield into the cube rather than crushing
+        through it) has no margin to also absorb one bad, large first
+        command -- it yields to that impact too, and the cube is punched out
+        under a nominally-still-closed target.
         """
         constraint = CartesianPoseConstraint(
             target_position=target_position,
@@ -819,12 +840,23 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                         high=getattr(sim_env.action_space, "high", None),
                         gripper_open=gripper_value,
                     )
-                    if ema_sim_action is None or args.action_ema_alpha >= 1.0:
+                    if initial_ema_action is not None and total_steps < ema_warmup_steps:
+                        # Ramp the blend weight up from a low floor instead of
+                        # jumping straight to the full weight -- bounds the
+                        # max per-step delta right after a seeded handoff
+                        # regardless of how far off the raw prediction is.
+                        warmup_frac = (total_steps + 1) / float(max(ema_warmup_steps, 1))
+                        effective_alpha = args.transport_ema_warmup_alpha + warmup_frac * (
+                            args.action_ema_alpha - args.transport_ema_warmup_alpha
+                        )
+                    else:
+                        effective_alpha = args.action_ema_alpha
+                    if ema_sim_action is None or effective_alpha >= 1.0:
                         ema_sim_action = sim_action
                     else:
                         ema_sim_action = (
-                            args.action_ema_alpha * sim_action
-                            + (1.0 - args.action_ema_alpha) * ema_sim_action
+                            effective_alpha * sim_action
+                            + (1.0 - effective_alpha) * ema_sim_action
                         )
                     sim_obs, _reward, _term, truncated, sim_info = sim_env.step(ema_sim_action)
                     total_steps += 1
@@ -1115,6 +1147,23 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                 _save_pick_video(args, save_video, frames, episode_idx, row)
                 continue
 
+            # --- Post-lift SETTLE: hold the current qpos, gripper still
+            # closed, for a few steps before handing control back to the
+            # policy. The lift is an open-loop scripted replay of a planned
+            # trajectory that can end abruptly with nonzero joint velocity --
+            # letting that die out here means the place phase's first policy
+            # step isn't also fighting leftover motion from the lift.
+            lift_hold_qpos = np.asarray(sim_env.unwrapped.agent.robot.get_qpos()).reshape(-1)[:7]
+            for _settle_step in range(args.post_lift_settle_steps):
+                action = _hold_sim_action(
+                    sim_env, gripper_open=args.gripper_close_value, qpos=lift_hold_qpos
+                )
+                sim_obs, _reward, _term, truncated, sim_info = sim_env.step(action)
+                if frames is not None:
+                    frames.append(frame_to_numpy(sim_env.render()))
+                if bool_any(truncated):
+                    break
+
             # --- 4. POLICY TRANSPORT to the goal marker, cube still held.
             # Same reranking rollout as the pick approach; the green marker
             # (and with it the policy's goal conditioning) goes back to the
@@ -1128,9 +1177,14 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
             sim_entry = rollout_observation_entry(
                 sim_obs, sim_info, env=sim_env, crop_config=crop_config
             )
-            obs_window = append_obs_window(
-                obs_window, sim_entry, n_obs_steps=int(policy.n_obs_steps)
-            )
+            # Reinitialize the window (like the START of the episode) rather
+            # than appending one new entry into a window still mostly full of
+            # PICK-phase history (conditioned on the old, pregrasp goal). This
+            # checkpoint was trained as a single-goal-per-episode reach
+            # policy; a window mixing two different goals is exactly the kind
+            # of input it never saw, and is what was producing an erratic,
+            # sometimes violent, first prediction at this handoff.
+            obs_window = make_initial_obs_window(sim_entry, n_obs_steps=int(policy.n_obs_steps))
             (
                 place_reached,
                 sim_entry,
@@ -1152,6 +1206,7 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                 # scripted open-loop replay, so an unseeded EMA here blends a
                 # raw policy action against whatever that replay left off at.
                 initial_ema_action=last_lift_action,
+                ema_warmup_steps=args.transport_ema_warmup_steps,
             )
             row.update(
                 place_steps=place_steps,
@@ -1548,6 +1603,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Measuring mid-fall would read a good release as a miss.",
     )
     p.add_argument(
+        "--post-lift-settle-steps",
+        type=int,
+        default=10,
+        help="pick-place: steps to hold still (gripper closed) right after the "
+        "lift, before the policy takes back control for the transport. Lets "
+        "any residual velocity from the lift's open-loop scripted replay die "
+        "out first, so the transport's first policy step isn't also fighting "
+        "leftover motion.",
+    )
+    p.add_argument(
+        "--transport-ema-warmup-steps",
+        type=int,
+        default=15,
+        help="pick-place: ramp the transport phase's EMA blend weight up from "
+        "--transport-ema-warmup-alpha to --action-ema-alpha over this many "
+        "steps, instead of using the full weight from step 1. Bounds the max "
+        "per-step move right after the pick->place handoff -- the point in "
+        "the rollout where this checkpoint (trained single-goal-per-episode) "
+        "is most out of distribution, since the goal just teleported to a "
+        "brand-new position while still holding the cube.",
+    )
+    p.add_argument(
+        "--transport-ema-warmup-alpha",
+        type=float,
+        default=0.1,
+        help="pick-place: EMA blend weight at the very start of the transport "
+        "warmup ramp (see --transport-ema-warmup-steps). Low = trust the "
+        "seeded lift action more initially; must be < --action-ema-alpha or "
+        "the ramp does nothing.",
+    )
+    p.add_argument(
         "--gripper-force-limit",
         type=float,
         default=None,
@@ -1639,6 +1725,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--release-steps must be positive")
     if args.settle_steps <= 0:
         raise ValueError("--settle-steps must be positive")
+    if args.post_lift_settle_steps <= 0:
+        raise ValueError("--post-lift-settle-steps must be positive")
+    if args.transport_ema_warmup_steps < 0:
+        raise ValueError("--transport-ema-warmup-steps must be non-negative")
+    if not (0.0 < args.transport_ema_warmup_alpha <= 1.0):
+        raise ValueError("--transport-ema-warmup-alpha must be in (0.0, 1.0]")
+    if args.mode == "pick-place" and args.transport_ema_warmup_alpha >= args.action_ema_alpha:
+        raise ValueError(
+            "--transport-ema-warmup-alpha must be < --action-ema-alpha "
+            "(otherwise the warmup ramp does nothing)"
+        )
     return args
 
 
