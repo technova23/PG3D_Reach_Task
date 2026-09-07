@@ -1207,7 +1207,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "this script's own PG3DPnP scene, so the cube is actually present). "
         "Required for --mode pick.",
     )
-    p.add_argument("--device", default=None, help="pick: torch device for the policy (default: auto-select).")
+    p.add_argument(
+        "--device",
+        default="auto",
+        help="pick: torch device for the policy -- 'auto', 'cpu', 'cuda', etc. (default: auto-select).",
+    )
     p.add_argument(
         "--max-steps",
         type=int,
