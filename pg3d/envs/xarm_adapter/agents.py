@@ -284,21 +284,26 @@ class XArm7Gripper(BaseAgent):
     # copied purely to avoid a qvel blowup (~100 rad/s) that came from an
     # INSTANT target snap in this agent's old *static*-hold config, which
     # never actually closed on anything, so a low cap was never load-tested.
-    # It is far too low to hold anything: it caps torque on `drive_joint`, the
-    # sole actuated gripper DOF, and 0.1 N (per scripts/
-    # eval_pose_variety_pick_and_place.py's own recorded videos) is not
-    # remotely enough clamp force to keep even a light cube from slipping out
-    # under its own weight once lifted -- the jaws visibly narrow (position
-    # control tracks fine) but the cube slides out from under them because
-    # the force backing that position target is capped far below what
-    # friction needs to resist gravity. Raised to 20 -- still well under the
-    # 50 that produced the earlier blowup, and this agent's close is now
-    # always ramped gradually over several steps (see --close-steps in the
-    # pick-and-place eval), never snapped to the target in one step, which is
-    # what actually caused that blowup in the first place.
+    #
+    # force_limit=20 (tried next) turned out to be the wrong direction
+    # entirely: measured via scripts/pnp_xarm7.py --mode tune-gripper (a
+    # scripted, policy-free, perfectly-centered top-down grasp -- isolates the
+    # gripper's own physics from any approach/alignment error), 20 held the
+    # cube 0% of the time -- the position controller drove the closing jaws
+    # straight through the rigid cube with enough torque behind it to make
+    # contact violent (gripper |qvel| > 100 rad/s) rather than compliant, and
+    # the cube got punched out on every trial. force_limit=0.05, by contrast,
+    # held 5/5 with the lowest contact-transient |qvel| (41.7 rad/s) of any
+    # config in the sweep: a soft torque cap lets the jaws yield into the
+    # object and hold it with friction instead of trying to close through it.
+    # Sharp cliff in the sweep data: 0.05->100%, 0.1->100%, 0.2->20%, >=0.5->0%
+    # -- this gripper needs to run soft, not hard, and there is little margin
+    # above 0.1 before grasps start failing outright. Re-run the sweep if
+    # cube mass/size/friction ever changes; these numbers are specific to the
+    # 4cm/0.1kg cube in pg3d/envs/xarm_adapter/pnp_env.py.
     gripper_stiffness = 1e5
     gripper_damping = 2000
-    gripper_force_limit = 20
+    gripper_force_limit = 0.05
     gripper_friction = 1
     # rad; joint hard limit is [0, 0.85]. The action-space upper bound is backed off
     # the hard limit by _GRIPPER_LIMIT_MARGIN rather than 0.85 exactly: commanding

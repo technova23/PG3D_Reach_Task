@@ -17,11 +17,16 @@ is trusted:
 * ``tune-gripper`` -- STAGE 2. Sweep gripper force/close settings against a
   scripted top-down grasp and report which combinations actually hold the
   cube through a lift. No learned policy involved: this isolates the physics.
-* ``pick``   -- STAGE 3. Checkpoint-steered approach + scripted grasp + lift.
+* ``pick``   -- STAGE 3 (this one, now implemented). The trained DP3 reach
+  checkpoint is actually rolled out (reranking-steered, same mechanism as the
+  reach evals) to approach a cube spawned anywhere in the workspace, always
+  in straight-down orientation -- no orientation variety, no tilt-realign.
+  The grasp itself (close + lift) stays scripted because the checkpoint has
+  no gripper output at all, using the settings ``tune-gripper`` recommended.
 * ``pick-place`` -- STAGE 4. Adds the transport-and-release half.
 
-Only ``scene`` is implemented so far -- the later modes exit with a clear
-message rather than pretending to run.
+``pick-place`` is not implemented yet -- it exits with a clear message
+rather than pretending to run.
 
 Stage 1 usage:
     python scripts/pnp_xarm7.py --mode scene --out artifacts/pnp/scene.png
@@ -535,11 +540,523 @@ def run_tune_gripper(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_pick(args: argparse.Namespace) -> int:
+    """STAGE 3: scripted top-down pick, cube spawned anywhere in the workspace.
+
+    Deliberately NOT policy-steered yet and deliberately NOT orientation-
+    aware: every approach is straight down (``_DOWN_QUAT_WXYZ``), exactly the
+    grasp shape ``tune-gripper`` validated. The only thing this stage adds
+    over ``tune-gripper`` is that the APPROACH is now the trained DP3 reach
+    checkpoint, steered by the same reranking mechanism the reach evals use
+    (K candidate action chunks per replan, scored by imagined rollout against
+    a CartesianPoseConstraint, lowest-cost one executed) -- not a planned
+    trajectory. The cube also spawns anywhere in the workspace each episode
+    (``pnp_env``'s own reset sampler), so this answers "can the policy get to
+    the cube wherever it is, and does the tuned grasp then hold it".
+
+    Deliberately fixed straight-down orientation for every approach
+    (``_DOWN_QUAT_WXYZ``), no orientation variety and no tilt-realign retry:
+    tilt is what made the earlier pick-and-place eval hard to read (rotation
+    error amplifies at the fingertips, ~3.5cm off the TCP), and at zero tilt
+    a realign step would have nothing to correct toward anyway. Approach
+    variety comes later, once straight-down-anywhere is solid.
+
+    Structure per episode, mirroring the pick half of
+    ``eval_pose_variety_pick_and_place.py`` with the place half and the
+    orientation machinery removed:
+
+    1. POLICY REACH to a pre-grasp standoff ``--pregrasp-height`` above the
+       cube, gripper held open. The standoff exists because a learned reach
+       flown straight to cube height arrives still moving laterally with the
+       claws wide open and broadsides the cube.
+    2. SCRIPTED VERTICAL DESCENT onto the cube (straight down == the approach
+       axis here), so the fingers only ever move parallel to themselves near
+       the cube.
+    3. SCRIPTED CLOSE (ramped over ``--close-steps``) then LIFT, using the
+       gripper settings ``tune-gripper`` recommended. The checkpoint has no
+       gripper output at all (see agents.py), so close/lift can only ever be
+       scripted -- that is not a shortcut, it is the checkpoint's actual
+       action space.
+    """
+    try:
+        import gymnasium as gym
+        import mani_skill.envs  # noqa: F401
+        import sapien
+    except Exception as exc:  # noqa: BLE001
+        print(f"Failed to import ManiSkill/SAPIEN: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    import json
+
+    from dataset_generation.write_maniskill_reach_dataset import (
+        _format_sim_action,
+        _hold_sim_action,
+        _move_to_pose_with_screw,
+        _pose_with_orientation,
+        _refresh_obs_after_manual_qpos,
+        _tcp_pose,
+    )
+    from pg3d.constraints import CartesianPoseConstraint
+    from pg3d.envs.maniskill_adapter import ManiSkillGhostPandaGeometryProvider
+    from pg3d.envs.maniskill_adapter.dataset import load_reach_metadata
+    from pg3d.envs.xarm_adapter.agents import XArm7Gripper
+    from pg3d.envs.xarm_adapter.motionplanner import XArm7GripperMotionPlanningSolver
+    from pg3d.envs.xarm_adapter.pnp_env import cube_position, register_pnp_envs
+    from pg3d.eval import TimingRecorder, scene_context_for_constraints
+    from pg3d.policies.dp3.checkpoint import load_reach_policy_from_checkpoint
+    from pg3d.utils.arrays import bool_any, frame_to_numpy
+    from pg3d.utils.devices import select_device
+    from pg3d.world_model import GeometricWorldModel
+    from scripts.eval_constrained_reach import DP3ChunkPolicyAdapter, _env_kwargs, _select_decision
+    from scripts.eval_pose_variety_checkpoint_reachability import (
+        _quat_angular_distance_rad,
+        _set_site_pose,
+    )
+    from scripts.rollout_dp3_reach_policy import (
+        _action_mode,
+        append_obs_window,
+        crop_config_from_metadata,
+        make_initial_obs_window,
+        policy_action_to_sim_action,
+        rollout_observation_entry,
+        save_video,
+    )
+
+    if args.checkpoint is None or args.dataset is None:
+        print(
+            "--mode pick needs --checkpoint (the trained DP3 reach policy) and "
+            "--dataset (read ONLY for metadata.json: the observation/crop/action "
+            "config the checkpoint was trained on).",
+            file=sys.stderr,
+        )
+        return 2
+
+    metadata = load_reach_metadata(args.dataset)
+    device = select_device(args.device)
+    policy = load_reach_policy_from_checkpoint(args.checkpoint, device=device)
+    action_mode = _action_mode(str(metadata.get("action_mode", "abs_joint")))
+    crop_config = crop_config_from_metadata(metadata)
+
+    register_pnp_envs()
+
+    baseline_force = XArm7Gripper.gripper_force_limit
+    baseline_stiffness = XArm7Gripper.gripper_stiffness
+    baseline_damping = XArm7Gripper.gripper_damping
+    if args.gripper_force_limit is not None:
+        XArm7Gripper.gripper_force_limit = args.gripper_force_limit
+    if args.gripper_stiffness is not None:
+        XArm7Gripper.gripper_stiffness = args.gripper_stiffness
+    if args.gripper_damping is not None:
+        XArm7Gripper.gripper_damping = args.gripper_damping
+
+    # One episode is: policy reach + scripted descent + close + lift. The env
+    # step limit has to cover all of it or a late phase gets truncated by the
+    # env rather than judged on its merits.
+    meta_max_steps = metadata.get("env_kwargs", {}).get("max_episode_steps")
+    env_max_steps = max(
+        int(args.max_steps)
+        + int(args.descent_max_steps)
+        + int(args.close_steps)
+        + int(args.lift_max_steps),
+        int(meta_max_steps or 0),
+    )
+    print(
+        f"pick: force_limit={XArm7Gripper.gripper_force_limit} "
+        f"stiffness={XArm7Gripper.gripper_stiffness} "
+        f"damping={XArm7Gripper.gripper_damping}\n"
+        f"      {args.episodes} episodes, cube edge {args.cube_edge * 100:.0f}cm, "
+        f"straight-down approach only, env step limit {env_max_steps}\n"
+        f"      policy={args.checkpoint}\n"
+    )
+
+    sim_env_kwargs = _env_kwargs(metadata, render_mode="rgb_array", max_episode_steps=env_max_steps)
+    sim_env_kwargs["cube_edge"] = args.cube_edge
+    sim_env_kwargs["spawn_margin"] = args.spawn_margin
+    sim_env_kwargs["min_object_separation"] = args.min_object_separation
+    sim_env = gym.make("PG3DPnP-XArm7-Gripper-v0", **sim_env_kwargs)
+    # Ghost env supplies the world model's geometry; it is the env the
+    # checkpoint was TRAINED on (no cube), never stepped, only queried.
+    ghost_env = gym.make(str(metadata["env_id"]), **_env_kwargs(metadata, render_mode=None))
+
+    adapter = DP3ChunkPolicyAdapter(
+        policy, action_mode=action_mode, device=device, policy_batch_size=args.policy_batch_size
+    )
+    provider = ManiSkillGhostPandaGeometryProvider(
+        ghost_env, task_name=str(metadata.get("env_id", "unknown")), crop_bounds=crop_config.bounds
+    )
+    world_model = GeometricWorldModel(provider)
+    rng = np.random.default_rng(args.seed)
+
+    def _policy_reach_to(
+        *,
+        sim_entry: dict[str, Any],
+        obs_window: Any,
+        frames: list[np.ndarray] | None,
+        target_position: np.ndarray,
+        max_steps: int,
+    ) -> tuple[bool, dict[str, Any], Any, int, float, float, bool]:
+        """Steer the checkpoint to `target_position` (straight-down orientation).
+
+        Same reranking mechanism as the reach evals -- this is the actual DP3
+        rollout, not a planner. Returns (reached, sim_entry, obs_window,
+        steps, pos_err, rot_err, truncated_early); `frames` is mutated in
+        place so the caller keeps one continuous video across phases.
+        """
+        constraint = CartesianPoseConstraint(
+            target_position=target_position,
+            target_orientation=_DOWN_QUAT_WXYZ,
+            position_tolerance=args.position_tolerance,
+            rotation_tolerance=args.rotation_tolerance,
+            weight=1.0,
+            name="pnp_pick_pregrasp",
+        )
+        scene = scene_context_for_constraints(
+            target_position=target_position,
+            constraints=[constraint],
+            metadata={"phase": "pick_pregrasp"},
+        )
+        timer = TimingRecorder(enabled=False)
+        ema_sim_action: np.ndarray | None = None
+        reached_goal = False
+        truncated_early = False
+        pos_err = float("inf")
+        rot_err = float("inf")
+        total_steps = 0
+        was_training = policy.training
+        policy.eval()
+        try:
+            while total_steps < max_steps:
+                decision = _select_decision(
+                    method="reranking",
+                    adapter=adapter,
+                    world_model=world_model,
+                    provider=provider,
+                    current_entry=sim_entry,
+                    obs_window=obs_window,
+                    scene=scene,
+                    constraints=[constraint],
+                    crop_config=crop_config,
+                    goal_thresh=args.position_tolerance,
+                    planning_horizon_chunks=1,
+                    geometry_mode="exact",
+                    k_schedule=tuple(args.k_schedule),
+                    match_current_robot_points=True,
+                    rng=rng,
+                    timer=timer,
+                )
+                steps_to_execute = min(
+                    decision.selected_chunk.horizon,
+                    int(policy.n_action_steps),
+                    max_steps - total_steps,
+                )
+                for policy_action in decision.selected_chunk.actions[:steps_to_execute]:
+                    sim_action = policy_action_to_sim_action(
+                        policy_action,
+                        np.asarray(sim_entry["agent_pos"], dtype=np.float32),
+                        action_mode=action_mode,
+                        sim_action_dim=int(np.prod(sim_env.action_space.shape)),
+                        low=getattr(sim_env.action_space, "low", None),
+                        high=getattr(sim_env.action_space, "high", None),
+                        gripper_open=args.gripper_open_value,
+                    )
+                    if ema_sim_action is None or args.action_ema_alpha >= 1.0:
+                        ema_sim_action = sim_action
+                    else:
+                        ema_sim_action = (
+                            args.action_ema_alpha * sim_action
+                            + (1.0 - args.action_ema_alpha) * ema_sim_action
+                        )
+                    sim_obs, _reward, _term, truncated, sim_info = sim_env.step(ema_sim_action)
+                    total_steps += 1
+                    sim_entry = rollout_observation_entry(
+                        sim_obs, sim_info, env=sim_env, crop_config=crop_config
+                    )
+                    obs_window = append_obs_window(
+                        obs_window, sim_entry, n_obs_steps=int(policy.n_obs_steps)
+                    )
+                    if frames is not None:
+                        frames.append(frame_to_numpy(sim_env.render()))
+
+                    tcp = _tcp_pose(sim_env.unwrapped)
+                    pos_err = float(np.linalg.norm(tcp[:3].astype(np.float64) - target_position))
+                    rot_err = _quat_angular_distance_rad(
+                        tcp[3:7].astype(np.float64), _DOWN_QUAT_WXYZ.astype(np.float64)
+                    )
+                    if pos_err <= args.position_tolerance and rot_err <= args.rotation_tolerance:
+                        reached_goal = True
+                        break
+                    if bool_any(truncated):
+                        truncated_early = True
+                        break
+                if truncated_early or reached_goal:
+                    break
+        finally:
+            if was_training:
+                policy.train()
+        return (reached_goal, sim_entry, obs_window, total_steps, pos_err, rot_err, truncated_early)
+
+    def _replay_planned_move(
+        *,
+        position: np.ndarray,
+        gripper_value: float,
+        max_steps: int,
+        frames: list[np.ndarray] | None,
+    ) -> tuple[bool, np.ndarray | None]:
+        """Plan+replay a straight-line screw move (descent, lift). Scripted, not policy."""
+        solver = XArm7GripperMotionPlanningSolver(
+            sim_env,
+            debug=False,
+            vis=False,
+            base_pose=sim_env.unwrapped.agent.robot.pose,
+            visualize_target_grasp_pose=False,
+            print_env_info=False,
+        )
+        try:
+            plan = _move_to_pose_with_screw(
+                solver,
+                _pose_with_orientation(sapien, position=position, quat=_DOWN_QUAT_WXYZ),
+                suppress_output=True,
+            )
+        finally:
+            solver.close()
+        if plan == -1 or "position" not in plan:
+            return False, None
+        last_action: np.ndarray | None = None
+        for planned_qpos in np.asarray(plan["position"], dtype=np.float32)[:max_steps]:
+            action = _format_sim_action(sim_env, planned_qpos, gripper_action=gripper_value)
+            _obs, _reward, _term, truncated, _info = sim_env.step(action)
+            last_action = np.asarray(action, dtype=np.float32)
+            if frames is not None:
+                frames.append(frame_to_numpy(sim_env.render()))
+            if bool_any(truncated):
+                break
+        return True, last_action
+
+    rows: list[dict[str, Any]] = []
+    if args.video_dir is not None:
+        args.video_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        rest_gap: float | None = None
+        for episode_idx in range(args.episodes):
+            _reset_obs, reset_info = sim_env.reset(
+                seed=args.seed + episode_idx, options={"reconfigure": True}
+            )
+            if rest_gap is None:
+                rest_gap = _finger_separation(sim_env)
+                if rest_gap < args.cube_edge:
+                    print(
+                        f"*** WARNING: jaw rest opening ({rest_gap * 100:.1f}cm) is "
+                        f"narrower than the cube ({args.cube_edge * 100:.0f}cm) -- "
+                        "results below are confounded by geometry, not the policy. "
+                        "See tune-gripper.",
+                        file=sys.stderr,
+                    )
+
+            cube_start = cube_position(sim_env)
+            grasp_position = cube_start.copy()
+            pregrasp_position = grasp_position + np.array(
+                [0.0, 0.0, args.pregrasp_height], dtype=np.float32
+            )
+            row: dict[str, Any] = {
+                "episode": episode_idx,
+                "cube_start": cube_start.tolist(),
+                "pregrasp_position": pregrasp_position.tolist(),
+            }
+
+            # goal_site IS the policy's goal-conditioning signal (see
+            # pnp_env's docstring / PG3DReachEnv._get_obs_extra), so pointing
+            # it at the pre-grasp standoff is how the checkpoint is told where
+            # to go. Cosmetically it also moves the green marker onto the
+            # cube's approach point for the duration of the pick.
+            _set_site_pose(sim_env, "goal_site", pregrasp_position)
+            update_render = getattr(sim_env.unwrapped.scene, "update_render", None)
+            if callable(update_render):
+                update_render()
+            sim_obs, sim_info = _refresh_obs_after_manual_qpos(
+                sim_env, info=reset_info, gripper_open=args.gripper_open_value
+            )
+            sim_entry = rollout_observation_entry(
+                sim_obs, sim_info, env=sim_env, crop_config=crop_config
+            )
+            obs_window = make_initial_obs_window(sim_entry, n_obs_steps=int(policy.n_obs_steps))
+
+            conditioned_on = np.asarray(sim_entry["target_position"], dtype=np.float64)
+            if not np.allclose(conditioned_on, pregrasp_position.astype(np.float64), atol=1e-3):
+                print(
+                    f"  [ep {episode_idx:02d}] WARNING — policy is conditioned on "
+                    f"{conditioned_on.round(3).tolist()} but the pre-grasp target is "
+                    f"{pregrasp_position.astype(np.float64).round(3).tolist()}; "
+                    "goal_site did not take the new pose"
+                )
+
+            record = args.video_dir is not None and (
+                args.video_all or episode_idx < args.video_first_n
+            )
+            frames: list[np.ndarray] | None = (
+                [frame_to_numpy(sim_env.render())] if record else None
+            )
+
+            # --- 1. POLICY REACH to the pre-grasp standoff.
+            (
+                reached,
+                sim_entry,
+                obs_window,
+                reach_steps,
+                pos_err,
+                rot_err,
+                truncated_early,
+            ) = _policy_reach_to(
+                sim_entry=sim_entry,
+                obs_window=obs_window,
+                frames=frames,
+                target_position=pregrasp_position,
+                max_steps=args.max_steps,
+            )
+            row.update(
+                reach_steps=reach_steps,
+                reach_pos_err=float(pos_err),
+                reach_rot_err_deg=float(np.degrees(rot_err)),
+                reach_reached=bool(reached),
+            )
+            if not reached:
+                reason = (
+                    f"truncated at step {reach_steps}"
+                    if truncated_early
+                    else f"step budget ({args.max_steps}) exhausted"
+                )
+                row.update(outcome="reach_failed", cube_lift=0.0, success=False)
+                print(
+                    f"  [ep {episode_idx:02d}] cube={np.round(cube_start, 3).tolist()}  "
+                    f"REACH FAILED — {reason}, pos_err={pos_err:.4f} "
+                    f"rot_err={np.degrees(rot_err):.1f}deg"
+                )
+                rows.append(row)
+                _save_pick_video(args, save_video, frames, episode_idx, row)
+                continue
+
+            # --- 2. SCRIPTED VERTICAL DESCENT onto the cube.
+            descent_ok, _ = _replay_planned_move(
+                position=grasp_position,
+                gripper_value=args.gripper_open_value,
+                max_steps=args.descent_max_steps,
+                frames=frames,
+            )
+            if not descent_ok:
+                row.update(outcome="descent_unplannable", cube_lift=0.0, success=False)
+                print(
+                    f"  [ep {episode_idx:02d}] cube={np.round(cube_start, 3).tolist()}  "
+                    f"reach OK ({reach_steps} steps) but DESCENT UNPLANNABLE"
+                )
+                rows.append(row)
+                _save_pick_video(args, save_video, frames, episode_idx, row)
+                continue
+
+            tcp_at_grasp = _tcp_pose(sim_env.unwrapped)[:2]
+            cube_now = cube_position(sim_env)
+            centering_err = float(np.linalg.norm(tcp_at_grasp - cube_now[:2]))
+            approach_drift = float(np.linalg.norm(cube_now[:2] - cube_start[:2]))
+            row.update(grasp_centering_err=centering_err, approach_drift=approach_drift)
+
+            # --- 3. SCRIPTED CLOSE (ramped) then LIFT.
+            hold_qpos = np.asarray(sim_env.unwrapped.agent.robot.get_qpos()).reshape(-1)[:7]
+            for close_step in range(args.close_steps):
+                frac = (close_step + 1) / float(args.close_steps)
+                value = args.gripper_open_value + frac * (
+                    args.gripper_close_value - args.gripper_open_value
+                )
+                action = _hold_sim_action(sim_env, gripper_open=value, qpos=hold_qpos)
+                _obs, _reward, _term, truncated, _info = sim_env.step(action)
+                if frames is not None:
+                    frames.append(frame_to_numpy(sim_env.render()))
+                if bool_any(truncated):
+                    break
+
+            cube_before_lift = cube_position(sim_env)
+            lift_position = grasp_position + np.array(
+                [0.0, 0.0, args.lift_height], dtype=np.float32
+            )
+            lift_ok, _ = _replay_planned_move(
+                position=lift_position,
+                gripper_value=args.gripper_close_value,
+                max_steps=args.lift_max_steps,
+                frames=frames,
+            )
+            cube_end = cube_position(sim_env)
+            cube_lift = float(cube_end[2] - cube_before_lift[2])
+            success = bool(
+                lift_ok and cube_lift >= args.success_lift_fraction * args.lift_height
+            )
+            row.update(
+                cube_lift=cube_lift,
+                cube_end=cube_end.tolist(),
+                lift_planned=lift_ok,
+                success=success,
+                outcome="picked" if success else ("dropped_or_missed" if lift_ok else "lift_unplannable"),
+            )
+            print(
+                f"  [ep {episode_idx:02d}] cube={np.round(cube_start, 3).tolist()}  "
+                f"reach OK ({reach_steps} steps, pos_err={pos_err:.4f})  "
+                f"centering={centering_err:.4f}m drift={approach_drift:.4f}m  "
+                f"lift={cube_lift:.4f}m  outcome={row['outcome']}"
+            )
+            rows.append(row)
+            _save_pick_video(args, save_video, frames, episode_idx, row)
+    finally:
+        sim_env.close()
+        ghost_env.close()
+        XArm7Gripper.gripper_force_limit = baseline_force
+        XArm7Gripper.gripper_stiffness = baseline_stiffness
+        XArm7Gripper.gripper_damping = baseline_damping
+
+    picked = [r for r in rows if r["success"]]
+    reached_rows = [r for r in rows if r.get("reach_reached")]
+    lifts = [r["cube_lift"] for r in rows]
+    outcomes = {
+        outcome: sum(1 for r in rows if r["outcome"] == outcome)
+        for outcome in sorted({r["outcome"] for r in rows})
+    }
+    print(
+        f"\n── pick summary: picked {len(picked)}/{len(rows)} "
+        f"({100 * len(picked) / max(len(rows), 1):.0f}%)  |  "
+        f"policy reach converged {len(reached_rows)}/{len(rows)}  |  "
+        f"mean_lift={float(np.mean(lifts)) if lifts else 0.0:.4f}m\n"
+        f"   outcomes: {outcomes}"
+    )
+    if reached_rows and len(picked) < len(reached_rows):
+        print(
+            f"   NOTE: {len(reached_rows) - len(picked)} episode(s) reached the "
+            "pre-grasp pose but still failed to pick -- that is a grasp/descent "
+            "problem, not a policy-steering one. Check grasp_centering_err and "
+            "approach_drift in those rows before touching reach settings."
+        )
+    if args.summary_json is not None:
+        args.summary_json.parent.mkdir(parents=True, exist_ok=True)
+        args.summary_json.write_text(json.dumps(rows, indent=2))
+        print(f"wrote pick summary: {args.summary_json}")
+    return 0
+
+
+def _save_pick_video(
+    args: argparse.Namespace,
+    save_video: Any,
+    frames: list[np.ndarray] | None,
+    episode_idx: int,
+    row: dict[str, Any],
+) -> None:
+    """Write one episode's video (if recorded) and record its path on the row."""
+    if not frames or args.video_dir is None:
+        return
+    path = args.video_dir / f"pick_ep{episode_idx:02d}_{row['outcome']}.mp4"
+    save_video(path, frames, fps=args.video_fps)
+    row["video"] = str(path)
+    print(f"    video: {path}")
+
+
 def _not_implemented(mode: str) -> int:
     print(
-        f"--mode {mode} is not implemented yet. Stages are built and verified "
-        "one at a time: run --mode scene first and confirm the setup looks "
-        "right, then gripper tuning, then pick, then pick-place.",
+        f"--mode {mode} is not implemented yet. scene, tune-gripper, and pick "
+        "are done, in that order -- pick-place is next.",
         file=sys.stderr,
     )
     return 2
@@ -553,7 +1070,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--mode",
         default="scene",
         choices=["scene", "tune-gripper", "pick", "pick-place"],
-        help="Which stage to run. Only 'scene' is implemented so far.",
+        help="Which stage to run. 'scene', 'tune-gripper', and 'pick' are implemented; 'pick-place' is not yet.",
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
@@ -663,9 +1180,101 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "treated as unstable and excluded from the recommendation. The 0.1 "
         "default exists because of a historical blowup to ~57 rad/s.",
     )
-    p.add_argument("--video-dir", type=Path, default=None, help="tune-gripper: record trial 0 of each config here.")
+    p.add_argument("--video-dir", type=Path, default=None, help="tune-gripper/pick: directory to record videos into.")
     p.add_argument("--video-fps", type=int, default=15)
     p.add_argument("--summary-json", type=Path, default=None)
+    # pick mode
+    p.add_argument(
+        "--episodes",
+        type=int,
+        default=20,
+        help="pick: number of pick attempts, each at a freshly sampled cube "
+        "position spanning the whole workspace.",
+    )
+    p.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="pick: trained DP3 reach checkpoint to roll out for the approach. Required for --mode pick.",
+    )
+    p.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="pick: dataset whose metadata.json describes the observation/crop/"
+        "action config the checkpoint was trained on. Read for metadata ONLY -- "
+        "never for episode content, and never for the env id (the env is always "
+        "this script's own PG3DPnP scene, so the cube is actually present). "
+        "Required for --mode pick.",
+    )
+    p.add_argument("--device", default=None, help="pick: torch device for the policy (default: auto-select).")
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=300,
+        help="pick: step budget for the policy reach to the pre-grasp standoff.",
+    )
+    p.add_argument(
+        "--position-tolerance",
+        type=float,
+        default=0.02,
+        help="pick: pre-grasp reach counts as converged within this position error (m).",
+    )
+    p.add_argument(
+        "--rotation-tolerance",
+        type=float,
+        default=0.15,
+        help="pick: and within this orientation error (rad) of straight-down.",
+    )
+    p.add_argument(
+        "--k-schedule",
+        type=int,
+        nargs="+",
+        default=[8],
+        help="pick: reranking candidates per replan (the DP3 steering mechanism).",
+    )
+    p.add_argument(
+        "--action-ema-alpha",
+        type=float,
+        default=0.5,
+        help="pick: EMA blend on policy actions (1.0 = raw policy action, no smoothing). "
+        "Smoothing matters against this gripper's stiff PD controller.",
+    )
+    p.add_argument("--policy-batch-size", type=int, default=8, help="pick: policy inference batch size.")
+    p.add_argument(
+        "--lift-max-steps",
+        type=int,
+        default=80,
+        help="pick: replay budget for the scripted lift.",
+    )
+    p.add_argument(
+        "--descent-max-steps",
+        type=int,
+        default=80,
+        help="pick: replay budget for the scripted vertical descent from the "
+        "pre-grasp standoff onto the cube.",
+    )
+    p.add_argument(
+        "--gripper-force-limit",
+        type=float,
+        default=None,
+        help="pick: override XArm7Gripper.gripper_force_limit for this run "
+        "(default: leave the class default from agents.py, i.e. the "
+        "tune-gripper-recommended 0.05).",
+    )
+    p.add_argument("--gripper-stiffness", type=float, default=None, help="pick: override gripper_stiffness.")
+    p.add_argument("--gripper-damping", type=float, default=None, help="pick: override gripper_damping.")
+    p.add_argument(
+        "--video-all",
+        action="store_true",
+        help="pick: record every episode instead of just the first --video-first-n.",
+    )
+    p.add_argument(
+        "--video-first-n",
+        type=int,
+        default=3,
+        help="pick: with --video-dir set (and --video-all not set), record only this many leading episodes.",
+    )
     args = p.parse_args(argv)
     if args.cube_edge <= 0:
         raise ValueError("--cube-edge must be positive")
@@ -701,6 +1310,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--qvel-warn must be positive")
     if args.video_fps <= 0:
         raise ValueError("--video-fps must be positive")
+    if args.episodes <= 0:
+        raise ValueError("--episodes must be positive")
+    if args.gripper_force_limit is not None and args.gripper_force_limit < 0:
+        raise ValueError("--gripper-force-limit must be non-negative")
+    if args.gripper_stiffness is not None and args.gripper_stiffness <= 0:
+        raise ValueError("--gripper-stiffness must be positive")
+    if args.gripper_damping is not None and args.gripper_damping < 0:
+        raise ValueError("--gripper-damping must be non-negative")
+    if args.video_first_n < 0:
+        raise ValueError("--video-first-n must be non-negative")
+    if args.max_steps <= 0:
+        raise ValueError("--max-steps must be positive")
+    if args.position_tolerance <= 0:
+        raise ValueError("--position-tolerance must be positive")
+    if args.rotation_tolerance <= 0:
+        raise ValueError("--rotation-tolerance must be positive")
+    if not args.k_schedule or any(k <= 0 for k in args.k_schedule):
+        raise ValueError("--k-schedule entries must be positive")
+    if not (0.0 < args.action_ema_alpha <= 1.0):
+        raise ValueError("--action-ema-alpha must be in (0.0, 1.0]")
+    if args.policy_batch_size <= 0:
+        raise ValueError("--policy-batch-size must be positive")
+    if args.lift_max_steps <= 0:
+        raise ValueError("--lift-max-steps must be positive")
+    if args.descent_max_steps <= 0:
+        raise ValueError("--descent-max-steps must be positive")
     return args
 
 
@@ -710,6 +1345,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_scene(args)
     if args.mode == "tune-gripper":
         return run_tune_gripper(args)
+    if args.mode == "pick":
+        return run_pick(args)
     return _not_implemented(args.mode)
 
 
