@@ -1310,12 +1310,17 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
             # we still know whether the transport carried it or dropped it
             # somewhere along the way.
             cube_after_transport = cube_position(sim_env)
-            # Lenient vs. the pick's own lift-success bar: grip compliance
-            # can sag a held cube a little without it having actually
-            # dropped, so this only needs to rule out "already on the table".
+            # NOTE: the transport TARGET height above the table is only
+            # `place_height_offset` (0.02m default) -- release deliberately
+            # comes in low, clear of the table but nowhere near the full
+            # lift_height (0.15m). A threshold built from lift_height (as an
+            # earlier version of this check used) flags every correctly-
+            # placed cube as "dropped", since a genuine hold arriving at the
+            # release height never clears that bar. Use a fraction of the
+            # actual release height instead -- this only needs to separate
+            # "still near release height" from "already on the table".
             held_through_transport = bool(
-                (cube_after_transport[2] - cube_rest_z)
-                >= 0.5 * args.success_lift_fraction * args.lift_height
+                (cube_after_transport[2] - cube_rest_z) >= 0.5 * args.place_height_offset
             )
             row.update(
                 cube_z_after_transport=float(cube_after_transport[2]),
