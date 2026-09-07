@@ -202,7 +202,7 @@ def _arm_qvel(env: Any) -> float:
 
 
 def _set_gripper_force_limit(env: Any, force_limit: float) -> None:
-    """Bump ``drive_joint``'s live force limit, bypassing the controller config.
+    """Bump every gripper joint's live force limit, bypassing the controller config.
 
     ``XArm7Gripper.gripper_force_limit`` (agents.py) is a class attribute only
     read when the controller config is BUILT, at env construction -- setting
@@ -212,7 +212,18 @@ def _set_gripper_force_limit(env: Any, force_limit: float) -> None:
     are seated) versus the HOLD/TRANSPORT phase (needs real margin against
     inertial loads once the cube is already seated -- no more asymmetric-
     contact risk at that point) means reaching past the config and poking the
-    live PhysX joint drive directly.
+    live PhysX joint drives directly.
+
+    MUST cover all 6 of ``XArm7Gripper.gripper_joint_names``, not just
+    ``drive_joint`` -- each is mimic-CONSTRAINED to drive_joint's position
+    (they track its qpos 1:1), but each has its OWN independent PhysX drive
+    and OWN independent force_limit, all set to the same value at
+    construction. drive_joint itself is not what the cube is levering
+    against; left_finger_joint/right_finger_joint (the joints actually
+    attached to the finger links touching the cube) are. An earlier version
+    of this function only bumped drive_joint -- 0.05, 0.25, and 0.7 all
+    produced byte-for-byte identical drops on enigma, because the joints
+    that actually resist the cube prying the jaws open were never touched.
 
     SAPIEN has used both ``set_drive_property`` (singular) and
     ``set_drive_properties`` (plural) as the method name across versions this
@@ -223,22 +234,26 @@ def _set_gripper_force_limit(env: Any, force_limit: float) -> None:
     """
     from pg3d.envs.xarm_adapter.agents import XArm7Gripper
 
-    joint = env.unwrapped.agent.robot.active_joints_map["drive_joint"]
+    joints_map = env.unwrapped.agent.robot.active_joints_map
     kwargs = dict(
         stiffness=XArm7Gripper.gripper_stiffness,
         damping=XArm7Gripper.gripper_damping,
         force_limit=float(force_limit),
     )
-    for method_name in ("set_drive_property", "set_drive_properties"):
-        method = getattr(joint, method_name, None)
-        if method is not None:
-            method(**kwargs)
-            return
-    raise AttributeError(
-        f"drive_joint ({type(joint)!r}) exposes neither set_drive_property nor "
-        "set_drive_properties -- can't apply the transport-phase force bump. "
-        "Check the installed SAPIEN version's joint drive API."
-    )
+    for joint_name in XArm7Gripper.gripper_joint_names:
+        joint = joints_map[joint_name]
+        for method_name in ("set_drive_property", "set_drive_properties"):
+            method = getattr(joint, method_name, None)
+            if method is not None:
+                method(**kwargs)
+                break
+        else:
+            raise AttributeError(
+                f"{joint_name} ({type(joint)!r}) exposes neither "
+                "set_drive_property nor set_drive_properties -- can't apply "
+                "the force bump. Check the installed SAPIEN version's joint "
+                "drive API."
+            )
 
 
 def _plan_and_replay(
