@@ -221,6 +221,8 @@ def _set_gripper_force_limit(env: Any, force_limit: float) -> None:
     ignored force bump would look identical to a real one right up until the
     next slip.
     """
+    from pg3d.envs.xarm_adapter.agents import XArm7Gripper
+
     joint = env.unwrapped.agent.robot.active_joints_map["drive_joint"]
     kwargs = dict(
         stiffness=XArm7Gripper.gripper_stiffness,
