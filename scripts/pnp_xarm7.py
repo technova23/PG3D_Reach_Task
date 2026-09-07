@@ -201,18 +201,35 @@ def _arm_qvel(env: Any) -> float:
     return float(np.max(np.abs(qvel[:7])))
 
 
-def _set_gripper_force_limit(env: Any, force_limit: float) -> None:
-    """Bump every gripper joint's live force limit, bypassing the controller config.
+def _get_gripper_force_limits(env: Any) -> dict[str, float]:
+    """Read back each gripper joint's ACTUAL live force_limit, ground truth.
+
+    Not derived from what we last *tried* to set -- reads the PhysX joint's
+    own ``force_limit`` property directly, so this is the one thing that can
+    actually confirm a runtime bump took effect on this sim backend rather
+    than silently being a no-op (drops persisted byte-for-byte identical
+    across 0.05/0.25/0.7 in earlier enigma runs, which is exactly what a
+    no-op bump would look like).
+    """
+    from pg3d.utils.arrays import to_numpy
+    from pg3d.envs.xarm_adapter.agents import XArm7Gripper
+
+    joints_map = env.unwrapped.agent.robot.active_joints_map
+    out: dict[str, float] = {}
+    for joint_name in XArm7Gripper.gripper_joint_names:
+        joint = joints_map[joint_name]
+        value = to_numpy(joint.force_limit).reshape(-1)[0]
+        out[joint_name] = float(value)
+    return out
+
+
+def _set_gripper_force_limit(env: Any, force_limit: float, *, verify: bool = False) -> None:
+    """Set every gripper joint's live force limit, bypassing the controller config.
 
     ``XArm7Gripper.gripper_force_limit`` (agents.py) is a class attribute only
     read when the controller config is BUILT, at env construction -- setting
-    it after the env exists does nothing to the running sim. Getting a
-    different force for the CLOSE phase (must stay soft: 0.05, tuned so
-    asymmetric first contact doesn't punch the cube out before both fingers
-    are seated) versus the HOLD/TRANSPORT phase (needs real margin against
-    inertial loads once the cube is already seated -- no more asymmetric-
-    contact risk at that point) means reaching past the config and poking the
-    live PhysX joint drives directly.
+    it after the env exists does nothing to the running sim unless the live
+    PhysX joint drive is poked directly, which is what this does.
 
     MUST cover all 6 of ``XArm7Gripper.gripper_joint_names``, not just
     ``drive_joint`` -- each is mimic-CONSTRAINED to drive_joint's position
@@ -220,17 +237,18 @@ def _set_gripper_force_limit(env: Any, force_limit: float) -> None:
     and OWN independent force_limit, all set to the same value at
     construction. drive_joint itself is not what the cube is levering
     against; left_finger_joint/right_finger_joint (the joints actually
-    attached to the finger links touching the cube) are. An earlier version
-    of this function only bumped drive_joint -- 0.05, 0.25, and 0.7 all
-    produced byte-for-byte identical drops on enigma, because the joints
-    that actually resist the cube prying the jaws open were never touched.
+    attached to the finger links touching the cube) are.
 
     SAPIEN has used both ``set_drive_property`` (singular) and
     ``set_drive_properties`` (plural) as the method name across versions this
     repo has touched; try both and raise rather than silently no-op if
-    neither exists -- this runs unattended on enigma, where a silently
-    ignored force bump would look identical to a real one right up until the
-    next slip.
+    neither exists.
+
+    Pass ``verify=True`` to read every joint's force_limit back immediately
+    after setting it and raise if any doesn't match -- proof the bump
+    actually reached the live sim on this backend, not just that the call
+    didn't raise. Off by default (it's an extra sim query every call); worth
+    turning on again if slips ever look force-independent like this before.
     """
     from pg3d.envs.xarm_adapter.agents import XArm7Gripper
 
@@ -253,6 +271,20 @@ def _set_gripper_force_limit(env: Any, force_limit: float) -> None:
                 "set_drive_property nor set_drive_properties -- can't apply "
                 "the force bump. Check the installed SAPIEN version's joint "
                 "drive API."
+            )
+    if verify:
+        actual = _get_gripper_force_limits(env)
+        mismatched = {
+            name: val for name, val in actual.items() if abs(val - force_limit) > 1e-6
+        }
+        if mismatched:
+            raise RuntimeError(
+                f"_set_gripper_force_limit({force_limit}) didn't stick for: "
+                f"{mismatched} -- the live joint's own force_limit still "
+                "reads something else right after being set. The runtime "
+                "bump is not reaching this sim backend; use the "
+                "XArm7Gripper.gripper_force_limit class attribute (set "
+                "before env construction) instead."
             )
 
 
@@ -1207,24 +1239,26 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                 _save_pick_video(args, save_video, frames, episode_idx, row)
                 continue
 
-            # Stiffen the grip now that the cube is confirmed seated (lift
-            # just succeeded, both fingers symmetrically loaded) -- the
-            # asymmetric-contact punch-out risk that keeps CLOSE force at
-            # 0.05 no longer applies once we're just holding, and 0.05 only
-            # has margin for an instantaneous grasp check, not for holding
-            # weight over many steps: frame-by-frame video review (E:/
+            # Re-assert the tuned hold force across all 6 gripper joints right
+            # before the settle hold -- frame-by-frame video review (E:/
             # place_chk/pnp) showed the cube sinking to table height DURING
-            # the post-lift settle hold below -- arm stationary the whole
-            # time, no transport motion yet -- i.e. a slow static gravity
-            # slip through the fingers, not a dynamic/inertial one. Moving
-            # the bump to BEFORE the settle loop (rather than after, as it
-            # first was) is what actually covers that window. No local sim
-            # to tune this against (eval runs on enigma) -- 0.25 is an
-            # engineering estimate (~5x the static-hold floor, a fraction of
-            # the 20 that punched cubes out during CLOSE) rather than a swept
-            # value; revisit with a slip-vs-force sweep (same shape as
-            # tune-gripper) if slips persist or a wider margin turns out safe.
-            _set_gripper_force_limit(sim_env, args.transport_gripper_force_limit)
+            # the post-lift settle hold below, arm fully stationary, i.e. a
+            # slow static gravity slip through the fingers, not a
+            # dynamic/inertial one. A runtime bump up to 0.7 here (14x the
+            # base 0.05) produced byte-for-byte identical drops, which is not
+            # what a real force increase looks like -- rather than keep
+            # guessing values through a runtime path of unproven reliability
+            # on this sim backend, XArm7Gripper.gripper_force_limit itself is
+            # now 0.1 (agents.py) for the whole episode, so this call and
+            # args.transport_gripper_force_limit default to the SAME value:
+            # this line is now a verified no-op re-assertion, not a bump, and
+            # verify=True makes that provable in the log rather than assumed.
+            _set_gripper_force_limit(sim_env, args.transport_gripper_force_limit, verify=True)
+            if episode_idx == 0:
+                print(
+                    f"      gripper force_limit per joint after settle bump: "
+                    f"{_get_gripper_force_limits(sim_env)}"
+                )
 
             # --- Post-lift SETTLE: hold the current qpos, gripper still
             # closed, for a few steps before handing control back to the
@@ -1342,9 +1376,12 @@ def run_pick(args: argparse.Namespace, *, place_enabled: bool = False) -> int:
                 held_through_transport=held_through_transport,
             )
 
-            # Drop the grip back to the tuned CLOSE/RELEASE force before
-            # opening -- the transport-phase bump above is deliberately not
-            # in effect for the release ramp, which was tuned against 0.05.
+            # Restore the tuned CLOSE/RELEASE force before opening. With
+            # gripper_force_limit unified to 0.1 (agents.py) for the whole
+            # episode, close_force_limit == transport_gripper_force_limit by
+            # default, so this is a no-op re-assertion too -- kept so
+            # --transport-gripper-force-limit still does something real if
+            # ever set to a different value again.
             _set_gripper_force_limit(sim_env, close_force_limit)
 
             # --- 5. RELEASE (ramped open), then settle. Deliberately runs
@@ -1774,20 +1811,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--transport-gripper-force-limit",
         type=float,
-        default=0.25,
-        help="pick-place: live drive_joint force_limit used for HOLD/TRANSPORT "
-        "and RELEASE, applied right after the post-lift settle (see "
-        "_set_gripper_force_limit) and dropped back to the CLOSE force before "
-        "the release ramp. The CLOSE force (0.05) is tuned soft so asymmetric "
-        "first contact doesn't punch the cube out before both fingers are "
-        "seated -- that risk is gone once the lift has confirmed a symmetric "
-        "grasp, but 0.05 alone only has margin for gravity, not the inertial "
-        "loads a moving arm adds, which is what was causing slips at random "
-        "points along the transport path. No local sim to sweep this against "
-        "(eval runs on enigma) -- 0.25 is an engineering estimate (~5x the "
-        "static-hold floor, well under the 20 that punched cubes out during "
-        "CLOSE), not a tuned value. Revisit with a slip-vs-force sweep if "
-        "slips persist or a wider margin turns out safe.",
+        default=0.1,
+        help="pick-place: live force_limit (applied to ALL 6 "
+        "XArm7Gripper.gripper_joint_names, see _set_gripper_force_limit) "
+        "re-asserted right after the post-lift settle and restored before "
+        "the release ramp. Defaults to matching XArm7Gripper.gripper_force_limit "
+        "(0.1, agents.py) exactly -- a runtime bump above the base CLOSE force "
+        "was tried up to 0.7 (14x) and produced byte-for-byte identical drops "
+        "on enigma, so rather than keep guessing values through that path, "
+        "gripper_force_limit itself was unified to 0.1 (the top of the "
+        "tune-gripper sweep's validated '100% hold' tier) for the whole "
+        "episode. This flag is kept for a future slip-vs-force sweep, not "
+        "because it currently changes anything from the class default.",
     )
     p.add_argument(
         "--gripper-force-limit",
@@ -1795,7 +1830,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="pick: override XArm7Gripper.gripper_force_limit for this run "
         "(default: leave the class default from agents.py, i.e. the "
-        "tune-gripper-recommended 0.05).",
+        "tune-gripper-recommended 0.1).",
     )
     p.add_argument("--gripper-stiffness", type=float, default=None, help="pick: override gripper_stiffness.")
     p.add_argument("--gripper-damping", type=float, default=None, help="pick: override gripper_damping.")

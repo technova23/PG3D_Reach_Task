@@ -312,9 +312,22 @@ class XArm7Gripper(BaseAgent):
     # above 0.1 before grasps start failing outright. Re-run the sweep if
     # cube mass/size/friction ever changes; these numbers are specific to the
     # 4cm/0.1kg cube in pg3d/envs/xarm_adapter/pnp_env.py.
+    #
+    # 0.05 -> 0.1: pnp_xarm7.py's pick-place eval kept dropping the cube
+    # during the post-lift settle/transport hold (a slow static slip, arm
+    # stationary, not a dynamic/motion event -- confirmed via frame-by-frame
+    # video review, E:/place_chk/pnp) even after a runtime force bump up to
+    # 0.7 on ALL 6 gripper_joint_names -- ruling out force margin as the
+    # variable and pointing at something else being wrong with a runtime
+    # bump on this sim backend. Rather than keep guessing values through an
+    # unverified runtime path, settled on 0.1 -- the top of the sweep's own
+    # validated "100% hold" tier -- as the ONE static force used for the
+    # entire episode (close, hold, transport, release), applied the normal
+    # way (this class attribute, read at controller construction), removing
+    # the runtime bump/restore entirely.
     gripper_stiffness = 1e5
     gripper_damping = 2000
-    gripper_force_limit = 0.05
+    gripper_force_limit = 0.1
     gripper_friction = 1
     # rad; joint hard limit is [0, 0.85]. The action-space upper bound is backed off
     # the hard limit by _GRIPPER_LIMIT_MARGIN rather than 0.85 exactly: commanding
