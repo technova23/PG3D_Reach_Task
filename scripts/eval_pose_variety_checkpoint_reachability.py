@@ -156,6 +156,37 @@ def _sample_workspace_pair(
     return points
 
 
+def _warn_if_outside_bounds(
+    position: list[float] | None, bounds_world: np.ndarray, *, label: str
+) -> None:
+    """Warn (don't fail) if a manually-given position sits outside the sampling box.
+
+    Deliberately a warning rather than an error: the box is the CONSERVATIVE
+    reach region this script samples from (inset, and with its Z row already
+    narrowed by --min-height/--max-height), so a point just outside it may
+    still be perfectly reachable. The run's own mplib IK check is the real
+    verdict -- this only makes a typo'd coordinate obvious up front instead of
+    surfacing later as a confusing "ik_failed" with no explanation.
+    """
+    if position is None:
+        return
+    point = np.asarray(position, dtype=np.float32)
+    bounds = np.asarray(bounds_world, dtype=np.float32).reshape(3, 2)
+    outside = [
+        f"{axis}={float(value):+.3f} outside [{float(lo):+.3f}, {float(hi):+.3f}]"
+        for axis, value, (lo, hi) in zip("XYZ", point, bounds, strict=True)
+        if not (lo <= value <= hi)
+    ]
+    if outside:
+        print(
+            f"*** WARNING: {label} {point.tolist()} is outside the sampling box: "
+            + "; ".join(outside)
+            + ". It may still be IK-reachable -- the per-episode IK check decides -- "
+            "but if episodes come back 'ik_failed', this is the first thing to suspect.",
+            file=sys.stderr,
+        )
+
+
 def _set_site_pose(env: Any, site_name: str, position: np.ndarray) -> None:
     """Move one marker actor, using the ONLY pose-set form that works here.
 
@@ -305,10 +336,22 @@ def main(argv: list[str] | None = None) -> int:
     base_z_offset = float(bounds_world[2, 0]) - 0.05  # recover base_position[2]
     bounds_world[2, 0] = base_z_offset + args.min_height
     bounds_world[2, 1] = base_z_offset + args.max_height
+    # Print the full XYZ box, not just the height row: --start-position /
+    # --goal-position take WORLD coordinates, and this is the only place that
+    # says what world coordinates are actually valid to pass.
     print(
-        f"start/goal height range: {args.min_height:.2f}m to {args.max_height:.2f}m "
-        f"above table (world Z {bounds_world[2, 0]:.3f} to {bounds_world[2, 1]:.3f})"
+        "sampling box (world frame, metres) -- also the valid range for "
+        "--start-position / --goal-position:"
     )
+    for axis_name, (lo, hi) in zip("XYZ", bounds_world, strict=True):
+        print(f"    {axis_name}: [{float(lo):+.3f}, {float(hi):+.3f}]")
+    print(
+        f"    (Z row is --min-height {args.min_height:.2f}m to --max-height "
+        f"{args.max_height:.2f}m above the table; X/Y are the arm's own reach box, "
+        "XARM7_REACH_BOX_BASE in reach_config.py, shifted by the robot base pose)"
+    )
+    _warn_if_outside_bounds(args.start_position, bounds_world, label="--start-position")
+    _warn_if_outside_bounds(args.goal_position, bounds_world, label="--goal-position")
 
     if args.video_dir is not None:
         args.video_dir.mkdir(parents=True, exist_ok=True)
@@ -330,9 +373,22 @@ def main(argv: list[str] | None = None) -> int:
                 min_pairwise_distance=args.min_pairwise_distance,
                 resample_attempts=args.position_resample_attempts,
             )
+            # Manual overrides replace the sampled position for that end only,
+            # so you can pin the goal and still let the start vary (or vice
+            # versa). With BOTH pinned every config is identical, which is only
+            # useful with --num-configs 1 (orientation still varies per episode
+            # unless --orientation-cone-deg 0 pins that too).
+            pinned: list[str] = []
+            if args.start_position is not None:
+                positions[0] = np.asarray(args.start_position, dtype=np.float32)
+                pinned.append("start")
+            if args.goal_position is not None:
+                positions[1] = np.asarray(args.goal_position, dtype=np.float32)
+                pinned.append("goal")
+            pinned_note = f"  [{'+'.join(pinned)} pinned manually]" if pinned else ""
             print(
                 f"\n=== config {config_idx:02d} — start={positions[0].tolist()} "
-                f"goal={positions[1].tolist()} ==="
+                f"goal={positions[1].tolist()} ==={pinned_note}"
             )
 
             pools: dict[str, list[np.ndarray]] = {}
@@ -770,6 +826,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.15,
         help="Minimum required separation (m) between the start and goal positions.",
     )
+    p.add_argument(
+        "--goal-position",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        default=None,
+        help=(
+            "Pin the GOAL to these world-frame XYZ coordinates (metres) instead of "
+            "sampling it. The valid range is printed at startup as the 'sampling box' "
+            "-- with default --min-height/--max-height that is roughly "
+            "X [-0.435, -0.115], Y [-0.420, +0.420], Z [+0.100, +0.250]. A position "
+            "outside it warns but still runs (the per-episode mplib IK check is the "
+            "real verdict). Pair with --orientation-cone-deg 0 to also pin the goal "
+            "ORIENTATION straight-down, and --num-configs 1 so the pinned pose isn't "
+            "just repeated identically."
+        ),
+    )
+    p.add_argument(
+        "--start-position",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        default=None,
+        help=(
+            "Same as --goal-position, for the START pose. Independent of it: pin "
+            "one, both, or neither."
+        ),
+    )
     p.add_argument("--position-resample-attempts", type=int, default=1)
     p.add_argument("--position-tolerance", type=float, default=0.02)
     p.add_argument("--rotation-tolerance", type=float, default=0.35, help="Radians.")
@@ -804,6 +888,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--extra-orientation-attempts must be non-negative")
     if args.min_pairwise_distance < 0.0:
         raise ValueError("--min-pairwise-distance must be non-negative")
+    if args.start_position is not None and args.goal_position is not None:
+        # Both pinned bypasses _sample_workspace_pair entirely, so its
+        # min-pairwise-distance guarantee no longer applies -- check it here
+        # instead of silently running a start==goal (or near-degenerate) reach.
+        separation = float(
+            np.linalg.norm(
+                np.asarray(args.start_position, dtype=np.float32)
+                - np.asarray(args.goal_position, dtype=np.float32)
+            )
+        )
+        if separation < args.min_pairwise_distance:
+            raise ValueError(
+                f"--start-position and --goal-position are only {separation:.3f}m apart, "
+                f"below --min-pairwise-distance ({args.min_pairwise_distance:.3f}m). "
+                "Move them apart, or lower --min-pairwise-distance if a short reach "
+                "is what you actually want to test."
+            )
     if args.min_height < 0.0:
         raise ValueError("--min-height must be non-negative")
     if args.max_height <= args.min_height:
