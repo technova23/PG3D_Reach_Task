@@ -415,10 +415,20 @@ def main(argv: list[str] | None = None) -> int:
             for label in labels:
                 stats = _orientation_variety_stats_deg(pools[label])
                 tilts = ", ".join(f"{_tilt_from_down_deg(q):.0f}" for q in pools[label])
-                print(
-                    f"    {label:8s}: min={stats['min_deg']:.1f} mean={stats['mean_deg']:.1f} "
-                    f"max={stats['max_deg']:.1f}  (tilt-from-down per episode: [{tilts}] deg)"
-                )
+                if stats["min_deg"] is None:
+                    # Pairwise spread is undefined for a single orientation
+                    # (--episodes-per-config 1, or --orientation-cone-deg 0
+                    # collapsing every sample to the same point) -- nothing to
+                    # spread, not a missing-data bug.
+                    print(
+                        f"    {label:8s}: n=1, no pairwise spread to report "
+                        f"(tilt-from-down: {tilts} deg)"
+                    )
+                else:
+                    print(
+                        f"    {label:8s}: min={stats['min_deg']:.1f} mean={stats['mean_deg']:.1f} "
+                        f"max={stats['max_deg']:.1f}  (tilt-from-down per episode: [{tilts}] deg)"
+                    )
 
             config_counts = {
                 "total": 0,
